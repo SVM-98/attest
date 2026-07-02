@@ -1,4 +1,4 @@
-// Pinned OPR Ed25519 ruleset (spec §10): cofactorless/strict RFC 8032, reject
+// Pinned attest Ed25519 ruleset (spec §10): cofactorless/strict RFC 8032, reject
 // non-canonical S (S >= L), reject small-order/non-canonical A and R.
 // Mirrors Python keys.verify_strict (PyNaCl/libsodium) with @noble/curves.
 import { ed25519 } from '@noble/curves/ed25519'

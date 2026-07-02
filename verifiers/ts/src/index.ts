@@ -1,4 +1,4 @@
-export const OPR_VERSION = '0.1'
+export const ATTEST_VERSION = '0.1'
 export { verify, isOk } from './verify.js'
 export type { VerificationResult, Disclosure } from './verify.js'
 export { loadsStrict, canonicalBytes, CanonError } from './canon.js'

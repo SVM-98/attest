@@ -17,8 +17,8 @@ export const ERR = {
   MISSING_ISSUER_ID: 'malformed payload: missing issuer.id',
   ISSUER_MISMATCH: 'issuer_mismatch: kid domain does not match payload issuer.id',
   SIG_VERIFICATION_FAILED: 'signature verification failed',
-  FLOATS_NOT_ALLOWED: 'floats are not allowed in the OPR-JCS profile',
-  LONE_SURROGATE: 'lone surrogate not allowed in the OPR-JCS profile',
+  FLOATS_NOT_ALLOWED: 'floats are not allowed in the attest-JCS profile',
+  LONE_SURROGATE: 'lone surrogate not allowed in the attest-JCS profile',
   TYPE_NOT_JSON: 'type not representable in JSON',
 } as const
 
@@ -27,7 +27,7 @@ export const WARN = {
   REVOCABILITY_NONE_IGNORED: "revocation record ignored: license.revocability is 'none' (irrevocable)",
 } as const
 
-export const unsupportedOprVersion = (v: unknown) => `unsupported opr_version: ${pyRepr(v)}`
+export const unsupportedAttestVersion = (v: unknown) => `unsupported attest_version: ${pyRepr(v)}`
 export const signaturesCount = (n: number) => `signatures must contain exactly one entry, got ${n}`
 export const unsupportedSigAlg = (alg: unknown) => `unsupported signature algorithm: ${pyRepr(alg)}`
 export const noTrustedManifest = (issuer: string) => `no trusted manifest for issuer ${pyRepr(issuer)}`
