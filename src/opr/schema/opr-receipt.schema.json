@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openmarket.example/spec/opr-receipt-0.1.schema.json",
+  "title": "OPR v0.1 receipt payload",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["opr_version", "receipt_id", "issued_at", "issuer", "buyer", "work", "license", "survivability"],
+  "properties": {
+    "opr_version": { "const": "0.1" },
+    "receipt_id": { "type": "string", "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$" },
+    "issued_at": { "type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$" },
+    "supersedes": { "type": ["string", "null"], "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$" },
+    "issuer": {
+      "type": "object",
+      "required": ["id", "display_name"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$" },
+        "display_name": { "type": "string", "minLength": 1 }
+      }
+    },
+    "buyer": {
+      "type": "object",
+      "required": ["commitment", "identifier_type"],
+      "properties": {
+        "commitment": { "type": "string", "pattern": "^[A-Za-z0-9_-]{43}$" },
+        "identifier_type": { "enum": ["issuer-account", "email"] },
+        "pubkey": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9_-]{43}$" }
+      }
+    },
+    "work": {
+      "type": "object",
+      "required": ["title", "publisher", "identifiers"],
+      "properties": {
+        "title": { "type": "string", "minLength": 1 },
+        "publisher": { "type": "string", "minLength": 1 },
+        "edition": { "type": "string" },
+        "identifiers": { "type": "object", "minProperties": 1, "additionalProperties": { "type": "string" } },
+        "artifact_series": { "type": "string", "minLength": 1 },
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["role", "platform", "filename", "size_bytes", "sha256"],
+            "properties": {
+              "role": { "type": "string", "minLength": 1 },
+              "platform": { "type": "string", "minLength": 1 },
+              "filename": { "type": "string", "minLength": 1 },
+              "size_bytes": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+              "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+            }
+          }
+        }
+      }
+    },
+    "license": {
+      "type": "object",
+      "required": ["grant", "revocability", "transferable", "drm", "terms_uri", "legal_text_sha256"],
+      "properties": {
+        "grant": { "enum": ["perpetual", "subscription"] },
+        "revocability": { "enum": ["none", "refund_window", "policy"] },
+        "revocation_window_days": { "type": "integer", "minimum": 1, "maximum": 3650 },
+        "transferable": { "type": "boolean" },
+        "drm": { "enum": ["drm-free", "drm-bound"] },
+        "terms_uri": { "type": "string", "format": "uri" },
+        "legal_text_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "jurisdiction_flags": { "type": "object", "additionalProperties": { "type": "boolean" } }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "revocability": { "const": "refund_window" } } },
+          "then": { "required": ["revocation_window_days"] }
+        }
+      ]
+    },
+    "survivability": {
+      "type": "object",
+      "required": ["redownload_right", "end_of_life"],
+      "properties": {
+        "redownload_right": { "type": "boolean" },
+        "mirror_policy_uri": { "type": "string", "format": "uri" },
+        "mirror_policy_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "end_of_life": { "type": "string", "minLength": 1 },
+        "eol_commitment_uri": { "type": ["string", "null"], "format": "uri" },
+        "eol_commitment_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "license": { "properties": { "revocability": { "const": "none" } }, "required": ["revocability"] } } },
+      "then": {
+        "properties": {
+          "license": { "properties": { "drm": { "const": "drm-free" } } },
+          "survivability": { "properties": { "redownload_right": { "const": true } }, "required": ["redownload_right"] },
+          "work": {
+            "anyOf": [
+              { "required": ["artifact_series"] },
+              { "properties": { "artifacts": { "type": "array", "minItems": 1 } }, "required": ["artifacts"] }
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

@@ -27,5 +27,9 @@ ignore = ["S101"]  # assert in tests
 strict = true
 python_version = "3.12"
 
+[[tool.mypy.overrides]]
+module = "jsonschema.*"
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
