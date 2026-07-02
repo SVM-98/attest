@@ -1,0 +1,232 @@
+// Hand-rolled structural validator for the OPR v0.1 receipt payload schema
+// (docs/spec/schema/opr-receipt.schema.json). No JSON-Schema dependency: this
+// ports only the required/type/enum/pattern/conditional rules that schema
+// actually pins. `format: "uri"` is annotation-only in draft 2020-12 and is
+// deliberately NOT enforced here (Task 5 adjudication) -- we just require
+// those fields be strings where the schema requires a string.
+import type { JsonObject, JsonValue } from './canon.js'
+
+export const SCHEMA_TOP_LEVEL_KEYS: ReadonlySet<string> = new Set([
+  'opr_version',
+  'receipt_id',
+  'issued_at',
+  'supersedes',
+  'issuer',
+  'buyer',
+  'work',
+  'license',
+  'survivability',
+])
+
+const RECEIPT_ID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/
+const ISSUED_AT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/
+const ISSUER_ID_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/
+const COMMITMENT_RE = /^[A-Za-z0-9_-]{43}$/
+const SHA256_RE = /^[0-9a-f]{64}$/
+
+const GRANT_VALUES = new Set(['perpetual', 'subscription'])
+const REVOCABILITY_VALUES = new Set(['none', 'refund_window', 'policy'])
+const DRM_VALUES = new Set(['drm-free', 'drm-bound'])
+const IDENTIFIER_TYPE_VALUES = new Set(['issuer-account', 'email'])
+
+function isObject(v: JsonValue | undefined): v is JsonObject {
+  return v !== null && v !== undefined && typeof v === 'object' && !Array.isArray(v)
+}
+
+function isNonEmptyString(v: JsonValue | undefined): v is string {
+  return typeof v === 'string' && v.length >= 1
+}
+
+// Pushes `msg` when `cond` is false; returns `cond` so callers can short-circuit
+// dependent checks (e.g. don't pattern-match a field that isn't even a string).
+function check(errors: string[], cond: boolean, msg: string): boolean {
+  if (!cond) errors.push(msg)
+  return cond
+}
+
+function validateIssuer(v: JsonValue | undefined, errors: string[]): void {
+  if (!check(errors, isObject(v), 'issuer: must be an object')) return
+  const issuer = v as JsonObject
+  if (check(errors, 'id' in issuer, 'issuer.id: required')) {
+    check(errors, typeof issuer['id'] === 'string' && ISSUER_ID_RE.test(issuer['id']), 'issuer.id: must be a dotted hostname-like string')
+  }
+  if (check(errors, 'display_name' in issuer, 'issuer.display_name: required')) {
+    check(errors, isNonEmptyString(issuer['display_name']), 'issuer.display_name: must be a non-empty string')
+  }
+}
+
+function validateBuyer(v: JsonValue | undefined, errors: string[]): void {
+  if (!check(errors, isObject(v), 'buyer: must be an object')) return
+  const buyer = v as JsonObject
+  if (check(errors, 'commitment' in buyer, 'buyer.commitment: required')) {
+    check(errors, typeof buyer['commitment'] === 'string' && COMMITMENT_RE.test(buyer['commitment']), 'buyer.commitment: must be a 43-char base64url string')
+  }
+  if (check(errors, 'identifier_type' in buyer, 'buyer.identifier_type: required')) {
+    check(errors, typeof buyer['identifier_type'] === 'string' && IDENTIFIER_TYPE_VALUES.has(buyer['identifier_type']), 'buyer.identifier_type: must be one of issuer-account, email')
+  }
+  if ('pubkey' in buyer) {
+    check(errors, buyer['pubkey'] === null || (typeof buyer['pubkey'] === 'string' && COMMITMENT_RE.test(buyer['pubkey'])), 'buyer.pubkey: must be null or a 43-char base64url string')
+  }
+}
+
+function validateArtifact(v: JsonValue, index: number, errors: string[]): void {
+  if (!check(errors, isObject(v), `work.artifacts[${index}]: must be an object`)) return
+  const a = v as JsonObject
+  for (const field of ['role', 'platform', 'filename']) {
+    if (check(errors, field in a, `work.artifacts[${index}].${field}: required`)) {
+      check(errors, isNonEmptyString(a[field]), `work.artifacts[${index}].${field}: must be a non-empty string`)
+    }
+  }
+  if (check(errors, 'size_bytes' in a, `work.artifacts[${index}].size_bytes: required`)) {
+    const sizeBytes = a['size_bytes']
+    check(errors, typeof sizeBytes === 'bigint' && sizeBytes >= 0n && sizeBytes <= 9007199254740991n, `work.artifacts[${index}].size_bytes: must be an integer in [0, 9007199254740991]`)
+  }
+  if (check(errors, 'sha256' in a, `work.artifacts[${index}].sha256: required`)) {
+    check(errors, typeof a['sha256'] === 'string' && SHA256_RE.test(a['sha256']), `work.artifacts[${index}].sha256: must be a 64-char lowercase hex string`)
+  }
+}
+
+function validateWork(v: JsonValue | undefined, errors: string[]): void {
+  if (!check(errors, isObject(v), 'work: must be an object')) return
+  const work = v as JsonObject
+  if (check(errors, 'title' in work, 'work.title: required')) {
+    check(errors, isNonEmptyString(work['title']), 'work.title: must be a non-empty string')
+  }
+  if (check(errors, 'publisher' in work, 'work.publisher: required')) {
+    check(errors, isNonEmptyString(work['publisher']), 'work.publisher: must be a non-empty string')
+  }
+  if (check(errors, 'identifiers' in work, 'work.identifiers: required')) {
+    const identifiers = work['identifiers']
+    if (check(errors, isObject(identifiers), 'work.identifiers: must be an object')) {
+      const obj = identifiers as JsonObject
+      check(errors, Object.keys(obj).length >= 1, 'work.identifiers: must have at least one member')
+      for (const [k, val] of Object.entries(obj)) {
+        check(errors, typeof val === 'string', `work.identifiers.${k}: must be a string`)
+      }
+    }
+  }
+  if ('artifact_series' in work) {
+    check(errors, isNonEmptyString(work['artifact_series']), 'work.artifact_series: must be a non-empty string')
+  }
+  if ('artifacts' in work) {
+    const artifacts = work['artifacts']
+    if (check(errors, Array.isArray(artifacts), 'work.artifacts: must be an array')) {
+      ;(artifacts as JsonValue[]).forEach((a, i) => validateArtifact(a, i, errors))
+    }
+  }
+}
+
+function validateLicense(v: JsonValue | undefined, errors: string[]): void {
+  if (!check(errors, isObject(v), 'license: must be an object')) return
+  const license = v as JsonObject
+  for (const field of ['grant', 'revocability', 'transferable', 'drm', 'terms_uri', 'legal_text_sha256']) {
+    check(errors, field in license, `license.${field}: required`)
+  }
+  if ('grant' in license) {
+    check(errors, typeof license['grant'] === 'string' && GRANT_VALUES.has(license['grant']), 'license.grant: must be one of perpetual, subscription')
+  }
+  if ('revocability' in license) {
+    check(errors, typeof license['revocability'] === 'string' && REVOCABILITY_VALUES.has(license['revocability']), 'license.revocability: must be one of none, refund_window, policy')
+  }
+  if ('revocation_window_days' in license) {
+    const days = license['revocation_window_days']
+    check(errors, typeof days === 'bigint' && days >= 1n && days <= 3650n, 'license.revocation_window_days: must be an integer in [1, 3650]')
+  }
+  if ('transferable' in license) {
+    check(errors, typeof license['transferable'] === 'boolean', 'license.transferable: must be a boolean')
+  }
+  if ('drm' in license) {
+    check(errors, typeof license['drm'] === 'string' && DRM_VALUES.has(license['drm']), 'license.drm: must be one of drm-free, drm-bound')
+  }
+  if ('terms_uri' in license) {
+    check(errors, typeof license['terms_uri'] === 'string', 'license.terms_uri: must be a string')
+  }
+  if ('legal_text_sha256' in license) {
+    check(errors, typeof license['legal_text_sha256'] === 'string' && SHA256_RE.test(license['legal_text_sha256']), 'license.legal_text_sha256: must be a 64-char lowercase hex string')
+  }
+  if ('jurisdiction_flags' in license) {
+    const flags = license['jurisdiction_flags']
+    if (check(errors, isObject(flags), 'license.jurisdiction_flags: must be an object')) {
+      for (const [k, val] of Object.entries(flags as JsonObject)) {
+        check(errors, typeof val === 'boolean', `license.jurisdiction_flags.${k}: must be a boolean`)
+      }
+    }
+  }
+  // if revocability === "refund_window" then revocation_window_days is required
+  if (license['revocability'] === 'refund_window') {
+    check(errors, 'revocation_window_days' in license, 'license.revocation_window_days: required when license.revocability is refund_window')
+  }
+}
+
+function validateSurvivability(v: JsonValue | undefined, errors: string[]): void {
+  if (!check(errors, isObject(v), 'survivability: must be an object')) return
+  const survivability = v as JsonObject
+  if (check(errors, 'redownload_right' in survivability, 'survivability.redownload_right: required')) {
+    check(errors, typeof survivability['redownload_right'] === 'boolean', 'survivability.redownload_right: must be a boolean')
+  }
+  if (check(errors, 'end_of_life' in survivability, 'survivability.end_of_life: required')) {
+    check(errors, isNonEmptyString(survivability['end_of_life']), 'survivability.end_of_life: must be a non-empty string')
+  }
+  if ('mirror_policy_uri' in survivability) {
+    check(errors, typeof survivability['mirror_policy_uri'] === 'string', 'survivability.mirror_policy_uri: must be a string')
+  }
+  if ('mirror_policy_sha256' in survivability) {
+    check(errors, typeof survivability['mirror_policy_sha256'] === 'string' && SHA256_RE.test(survivability['mirror_policy_sha256']), 'survivability.mirror_policy_sha256: must be a 64-char lowercase hex string')
+  }
+  if ('eol_commitment_uri' in survivability) {
+    const uri = survivability['eol_commitment_uri']
+    check(errors, uri === null || typeof uri === 'string', 'survivability.eol_commitment_uri: must be null or a string')
+  }
+  if ('eol_commitment_sha256' in survivability) {
+    const sha = survivability['eol_commitment_sha256']
+    check(errors, sha === null || (typeof sha === 'string' && SHA256_RE.test(sha)), 'survivability.eol_commitment_sha256: must be null or a 64-char lowercase hex string')
+  }
+}
+
+// if license.revocability === "none" then license.drm === "drm-free" AND
+// survivability.redownload_right === true AND work has artifact_series OR a
+// non-empty artifacts array.
+function validateRevocabilityNoneConditional(payload: JsonObject, errors: string[]): void {
+  const license = payload['license']
+  if (!isObject(license) || license['revocability'] !== 'none') return
+
+  check(errors, license['drm'] === 'drm-free', 'license.drm: must be drm-free when license.revocability is none')
+
+  const survivability = payload['survivability']
+  check(errors, isObject(survivability) && survivability['redownload_right'] === true, 'survivability.redownload_right: must be true when license.revocability is none')
+
+  const work = payload['work']
+  const hasArtifactSeries = isObject(work) && isNonEmptyString(work['artifact_series'])
+  const hasArtifacts = isObject(work) && Array.isArray(work['artifacts']) && (work['artifacts'] as JsonValue[]).length >= 1
+  check(errors, hasArtifactSeries || hasArtifacts, 'work: must have artifact_series or a non-empty artifacts array when license.revocability is none')
+}
+
+export function validatePayload(payload: JsonObject): string[] {
+  const errors: string[] = []
+
+  if (check(errors, 'opr_version' in payload, 'opr_version: required')) {
+    check(errors, payload['opr_version'] === '0.1', "opr_version: must be the constant '0.1'")
+  }
+  if (check(errors, 'receipt_id' in payload, 'receipt_id: required')) {
+    check(errors, typeof payload['receipt_id'] === 'string' && RECEIPT_ID_RE.test(payload['receipt_id']), 'receipt_id: must be a 26-char ULID')
+  }
+  if (check(errors, 'issued_at' in payload, 'issued_at: required')) {
+    check(errors, typeof payload['issued_at'] === 'string' && ISSUED_AT_RE.test(payload['issued_at']), 'issued_at: must be an RFC3339 UTC date-time (YYYY-MM-DDTHH:MM:SSZ)')
+  }
+  if ('supersedes' in payload) {
+    const supersedes = payload['supersedes']
+    check(errors, supersedes === null || (typeof supersedes === 'string' && RECEIPT_ID_RE.test(supersedes)), 'supersedes: must be null or a 26-char ULID')
+  }
+
+  if (check(errors, 'issuer' in payload, 'issuer: required')) validateIssuer(payload['issuer'], errors)
+  if (check(errors, 'buyer' in payload, 'buyer: required')) validateBuyer(payload['buyer'], errors)
+  if (check(errors, 'work' in payload, 'work: required')) validateWork(payload['work'], errors)
+  if (check(errors, 'license' in payload, 'license: required')) validateLicense(payload['license'], errors)
+  if (check(errors, 'survivability' in payload, 'survivability: required')) validateSurvivability(payload['survivability'], errors)
+
+  if ('license' in payload && 'survivability' in payload && 'work' in payload) {
+    validateRevocabilityNoneConditional(payload, errors)
+  }
+
+  return errors
+}
