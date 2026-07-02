@@ -1,0 +1,45 @@
+{
+  "chains": {},
+  "manifests": {
+    "evil.example.com": {
+      "issued_at": "2025-01-01T00:00:00Z",
+      "issuer": "evil.example.com",
+      "keys": [
+        {
+          "kid": "evil.example.com/keys/2025-01#ed25519-1",
+          "pub": "_RckOFqgx1tk-3jNYC-h2ZH96_drE8WO1wLqyDXp9hg",
+          "status": "active",
+          "valid_from": "2025-01-01T00:00:00Z",
+          "valid_to": null
+        }
+      ],
+      "manifest_signature": {
+        "kid": "evil.example.com/keys/2025-01#ed25519-1",
+        "sig": "ClHTTerfSanT9L--BXK2TWeCDxHqPaR6kmTKJgVMns-FuC1w6pXCsFSoTOyLGy22oXnaB-uiL7UObk4gYE2lAA"
+      },
+      "manifest_version": 1
+    },
+    "store.example.com": {
+      "issued_at": "2025-01-01T00:00:00Z",
+      "issuer": "store.example.com",
+      "keys": [
+        {
+          "kid": "store.example.com/keys/2025-01#ed25519-1",
+          "pub": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
+          "status": "active",
+          "valid_from": "2025-01-01T00:00:00Z",
+          "valid_to": null
+        }
+      ],
+      "manifest_signature": {
+        "kid": "store.example.com/keys/2025-01#ed25519-1",
+        "sig": "VZfebZVkctMN8kvVxm557T7co5Z-1VPlVpvkrzbulHQAMeIbDrx6sTn9NcLzYyBARpdAS8Ke6WpikTbqKIdKBw"
+      },
+      "manifest_version": 1
+    }
+  },
+  "provenance": {
+    "evil.example.com": "tls",
+    "store.example.com": "tls"
+  }
+}

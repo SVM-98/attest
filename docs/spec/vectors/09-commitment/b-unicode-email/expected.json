@@ -1,0 +1,12 @@
+{
+  "binding": "proven",
+  "commitment_b64u": "PlNdv5Y_WqRKtnoRa9ssAsz2e4lT8jxjCXJDC3MquV0",
+  "errors": [],
+  "normalized_identifier": "b\u00fcy\u00e9r+tag@example.com",
+  "ok": true,
+  "revocation": "unknown",
+  "schema": "valid",
+  "signature": "valid",
+  "trust": "verified",
+  "warnings": []
+}

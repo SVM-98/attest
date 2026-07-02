@@ -1,0 +1,46 @@
+{
+  "buyer": {
+    "commitment": "Xi_Lo3j4HWtbvg_8ehNpgbqIZXtg6LQ-SXMlPjrJBOY",
+    "identifier_type": "issuer-account",
+    "pubkey": null
+  },
+  "issued_at": "2025-07-02T13:50:00Z",
+  "issuer": {
+    "display_name": "Example Games Store",
+    "id": "store.example.com"
+  },
+  "license": {
+    "drm": "drm-free",
+    "grant": "perpetual",
+    "legal_text_sha256": "fd626193eb454bce229584a139d223f8e15f2b0c4693739b81fa31ea330d6bc2",
+    "revocability": "none",
+    "terms_uri": "https://store.example.com/opr/license-templates/standard-v1",
+    "transferable": false
+  },
+  "opr_version": "0.1",
+  "receipt_id": "01JZ5PDHT0000G40R40M30E209",
+  "supersedes": null,
+  "survivability": {
+    "end_of_life": "artifacts-remain-redownloadable",
+    "eol_commitment_sha256": null,
+    "eol_commitment_uri": null,
+    "redownload_right": true
+  },
+  "work": {
+    "artifact_series": "store.example.com/works/EXG-001",
+    "artifacts": [
+      {
+        "filename": "example-game-1.0-setup.exe",
+        "platform": "windows-x86_64",
+        "role": "installer",
+        "sha256": "265afa7622f09842258fe8a6ea0ed33ce274f4b308501ceb664b8024f6ebdac0",
+        "size_bytes": 9007199254740991
+      }
+    ],
+    "identifiers": {
+      "issuer_sku": "EXG-001"
+    },
+    "publisher": "Example Publisher srl",
+    "title": "Cafe\u0301"
+  }
+}
