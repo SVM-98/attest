@@ -545,6 +545,7 @@ def main(argv: list[str] | None = None) -> int:
         ValueError,
         KeyError,
         TypeError,
+        AttributeError,  # e.g. a well-formed-JSON-but-wrong-shape input (list instead of object)
         json.JSONDecodeError,
         canon.CanonError,
         bundle.BundleError,

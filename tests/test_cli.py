@@ -686,6 +686,36 @@ def test_issue_invalid_payload_json_exits_2(tmp_path: Path, capsys: CapSys) -> N
     assert capsys.readouterr().err != ""
 
 
+def test_export_with_wrong_shaped_receipt_json_exits_2_not_traceback(
+    tmp_path: Path, capsys: CapSys
+) -> None:
+    """A receipt file that is valid JSON but the wrong shape (a list instead
+    of an envelope object) must fail as a clean usage error, not propagate
+    the library's internal `AttributeError` (`list.get` does not exist) as
+    an uncaught traceback."""
+    seed, _pub = _keygen(tmp_path, "issuer")
+    manifest_path = _manifest_init(tmp_path, seed)
+    bad_receipt = tmp_path / "bad_receipt.json"
+    bad_receipt.write_text(json.dumps([1, 2, 3]), encoding="utf-8")
+
+    rc = cli.main(
+        [
+            "export",
+            "--receipt",
+            str(bad_receipt),
+            "--key-manifest",
+            str(manifest_path),
+            "--out-dir",
+            str(tmp_path / "out"),
+            "--name",
+            "mylibrary",
+        ]
+    )
+
+    assert rc == 2
+    assert capsys.readouterr().err != ""
+
+
 # --- --help surfaces -----------------------------------------------------------
 
 
