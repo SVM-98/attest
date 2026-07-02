@@ -1,0 +1,13 @@
+{
+  "binding": "not_checked",
+  "errors_contains": [
+    "no key",
+    "in issuer manifest"
+  ],
+  "ok": false,
+  "revocation": "unknown",
+  "schema": "not_checked",
+  "signature": "invalid",
+  "trust": "verified",
+  "warnings": []
+}

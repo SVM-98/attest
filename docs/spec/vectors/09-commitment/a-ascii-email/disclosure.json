@@ -1,0 +1,5 @@
+{
+  "identifier": "Buyer@Example.com",
+  "identifier_type": "email",
+  "salt_b64u": "AAECAwQFBgcICQoLDA0ODw"
+}
