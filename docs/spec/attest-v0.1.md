@@ -2,7 +2,7 @@
 
 - **Status**: Normative, v0.1
 - **Date**: 2026-07-02
-- **Grounding**: this document normatizes [`docs/superpowers/specs/2026-07-02-opr-spec-design.md`](../superpowers/specs/2026-07-02-opr-spec-design.md) (design rev 2, approved) against the reference implementation in `src/attest/` and the conformance vectors in [`docs/spec/vectors/`](vectors/). It introduces no design decision not already present in one of those two sources.
+- **Grounding**: this document is grounded in the reference implementation in `src/attest/` and the conformance vectors in [`docs/spec/vectors/`](vectors/). It introduces no design decision not already present in one of those two sources.
 - **Companion artifacts**: JSON Schema — [`docs/spec/schema/attest-receipt.schema.json`](schema/attest-receipt.schema.json); conformance vectors — [`docs/spec/vectors/`](vectors/).
 
 ## 1. Conformance language
@@ -462,6 +462,5 @@ Design rev 2 §8 outlines, but does not build in v0.1, a registry layer: indepen
 - RFC 8032 — Edwards-Curve Digital Signature Algorithm (EdDSA); §10 states the pinned verification ruleset.
 - RFC 4648 §5 — base64url encoding.
 - ULID specification — `receipt_id` / `supersedes` format.
-- [`docs/superpowers/specs/2026-07-02-opr-spec-design.md`](../superpowers/specs/2026-07-02-opr-spec-design.md) — design rev 2, the source this specification normatizes.
 - [`docs/spec/schema/attest-receipt.schema.json`](schema/attest-receipt.schema.json) — normative JSON Schema for `payload`.
 - [`docs/spec/vectors/`](vectors/) — normative conformance vectors (§15).
