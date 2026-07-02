@@ -1,4 +1,4 @@
-import { duplicateKey, notUtf8, invalidJson, ERR } from './messages.js'
+import { duplicateKey, notUtf8, invalidJson, intOutOfRange, ERR } from './messages.js'
 
 export class CanonError extends Error {}
 
@@ -169,3 +169,46 @@ export function loadsStrict(bytes: Uint8Array): JsonValue {
     throw new CanonError(invalidJson(e instanceof Error ? e.message : String(e)))
   }
 }
+
+// ---- JCS canonical serializer (the ONLY byte form that is signed/verified) ----
+const INT_MAX = 2n ** 53n
+const SHORT_ESCAPES: Record<number, string> = {
+  0x08: '\\b', 0x09: '\\t', 0x0a: '\\n', 0x0c: '\\f', 0x0d: '\\r', 0x22: '\\"', 0x5c: '\\\\',
+}
+
+function serializeString(s: string): string {
+  let out = '"'
+  for (let i = 0; i < s.length; i++) {
+    const cp = s.charCodeAt(i)
+    if (cp >= 0xd800 && cp <= 0xdfff) {
+      const lo = s.charCodeAt(i + 1)
+      if (cp <= 0xdbff && lo >= 0xdc00 && lo <= 0xdfff) { out += s[i]! + s[i + 1]!; i++; continue }
+      throw new CanonError(ERR.LONE_SURROGATE)
+    }
+    const esc = SHORT_ESCAPES[cp]
+    if (esc !== undefined) out += esc
+    else if (cp < 0x20) out += '\\u' + cp.toString(16).padStart(4, '0')
+    else out += s[i]!
+  }
+  return out + '"'
+}
+
+function serialize(v: JsonValue): string {
+  if (v === null) return 'null'
+  if (typeof v === 'boolean') return v ? 'true' : 'false'
+  if (typeof v === 'bigint') {
+    if (!(-INT_MAX < v && v < INT_MAX)) throw new CanonError(intOutOfRange(v))
+    return v.toString()
+  }
+  if (typeof v === 'string') return serializeString(v)
+  if (Array.isArray(v)) return '[' + v.map(serialize).join(',') + ']'
+  if (typeof v === 'object') {
+    // JS Array.prototype.sort default compares by UTF-16 code units == Python utf-16-be byte order.
+    const keys = Object.keys(v).sort()
+    return '{' + keys.map((k) => serializeString(k) + ':' + serialize(v[k]!)).join(',') + '}'
+  }
+  throw new CanonError(ERR.TYPE_NOT_JSON)
+}
+
+export function dumps(v: JsonValue): string { return serialize(v) }
+export function canonicalBytes(v: JsonValue): Uint8Array { return new TextEncoder().encode(dumps(v)) }
