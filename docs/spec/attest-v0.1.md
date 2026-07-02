@@ -133,7 +133,7 @@ Artifact hashes here and in artifact manifests (§7.2) identify content **author
 | `legal_text_sha256` | string, `^[0-9a-f]{64}$` | REQUIRED | SHA-256 of the license text at `terms_uri`, hash-binding it into the signed payload. |
 | `jurisdiction_flags` | object, boolean-valued, open vocabulary | OPTIONAL | See `eu_usedsoft_asserted` below. |
 
-`jurisdiction_flags.eu_usedsoft_asserted` (renamed from `_eligible` in design rev 2) means precisely: the issuer asserts this sale met the *UsedSoft* C‑128/11 conditions (perpetual software license, fee corresponding to economic value, no license splitting). It is **informational, not a transfer authorization**: transfer-time conditions (e.g. disabling the seller's own copy) are out of receipt scope. Where the assertion is true and EU law applies, statutory exhaustion cannot be contracted away, and `transferable: false` MUST NOT be read as overriding it.
+`jurisdiction_flags.eu_usedsoft_asserted` means precisely: the issuer asserts this sale met the *UsedSoft* C‑128/11 conditions (perpetual software license, fee corresponding to economic value, no license splitting). It is **informational, not a transfer authorization**: transfer-time conditions (e.g. disabling the seller's own copy) are out of receipt scope. Where the assertion is true and EU law applies, statutory exhaustion cannot be contracted away, and `transferable: false` MUST NOT be read as overriding it.
 
 ### 5.6 `survivability`
 
@@ -453,7 +453,7 @@ The conformance vectors under [`docs/spec/vectors/`](vectors/) are the attest v0
 
 ## Appendix B — Registry layer and future work (non-normative, out of v0.1 conformance scope)
 
-Design rev 2 §8 outlines, but does not build in v0.1, a registry layer: independent nodes replicating key/artifact manifests, license/policy texts, and revocation records, plus optional receipt-existence proofs anchored via Merkle roots. Nothing in this specification's conformance requirement (§15) depends on a registry node existing. A future revision of this specification will normatize the registry-node wire format if and when it ships.
+This appendix outlines, but v0.1 does not build, a registry layer: independent nodes replicating key/artifact manifests, license/policy texts, and revocation records, plus optional receipt-existence proofs anchored via Merkle roots. Nothing in this specification's conformance requirement (§15) depends on a registry node existing. A future revision of this specification will normatize the registry-node wire format if and when it ships.
 
 ## References
 
