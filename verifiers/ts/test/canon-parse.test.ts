@@ -30,4 +30,16 @@ describe('loadsStrict', () => {
     const v = loadsStrict(enc('{"a":[true,false,null,1]}')) as any
     expect(v['a']).toEqual([true, false, null, 1n])
   })
+  it('rejects pathological deep nesting as CanonError, not native RangeError', () => {
+    const deep = '['.repeat(20000) + ']'.repeat(20000)
+    expect(() => loadsStrict(enc(deep))).toThrow(CanonError)
+    // Assert the concrete instance so a stack-overflow RangeError would fail here.
+    let caught: unknown
+    try { loadsStrict(enc(deep)) } catch (e) { caught = e }
+    expect(caught instanceof CanonError).toBe(true)
+  })
+  it('parses legitimately deep nesting just under the cap', () => {
+    const nested = '['.repeat(100) + ']'.repeat(100)
+    expect(() => loadsStrict(enc(nested))).not.toThrow()
+  })
 })
