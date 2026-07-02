@@ -13,7 +13,7 @@ to still work.
 A digital "purchase" today is a revocable license living inside one company's
 platform, not a thing you hold. When the platform shuts down, delists a title, or
 changes terms, the buyer's library goes with it — regardless of medium: Robot Cache
-bricked already-downloaded games at its April 2026 shutdown; Funimation wiped
+bricked already-downloaded games at its May 2026 shutdown; Funimation wiped
 customers' digital anime libraries in 2024; Kindle removed book export in
 February 2025; Sony ends PlayStation disc production for new games in
 January 2028, pushing more purchases into pure platform dependency. None of this is
