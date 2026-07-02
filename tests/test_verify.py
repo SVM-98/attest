@@ -21,10 +21,12 @@ ISSUER = "store.example.com"
 EVIL_ISSUER = "evil.example.com"
 KID = f"{ISSUER}/keys/test#ed25519-1"
 EVIL_KID = f"{EVIL_ISSUER}/keys/test#ed25519-1"
+COMPROMISED_KID = f"{ISSUER}/keys/test#ed25519-compromised"
 
 # TEST ONLY — fixed seeds, never use in production.
 KP = keys.from_seed(bytes([9]) * 32)
 EVIL_KP = keys.from_seed(bytes([10]) * 32)
+COMPROMISED_KP = keys.from_seed(bytes([15]) * 32)
 
 
 def _key_manifest(
@@ -37,6 +39,17 @@ def _key_manifest(
 ) -> dict[str, Any]:
     entries = [manifests.key_entry(kid, kp.pub, valid_from, valid_to, status)]
     return manifests.build_key_manifest(issuer, 1, "2026-01-01T00:00:00Z", entries, kp, kid)
+
+
+def _manifest_active_plus_compromised() -> dict[str, Any]:
+    """Manifest self-signed by the active KID, plus a listed-but-compromised key."""
+    entries = [
+        manifests.key_entry(KID, KP.pub, "2026-01-01T00:00:00Z", None, "active"),
+        manifests.key_entry(
+            COMPROMISED_KID, COMPROMISED_KP.pub, "2026-01-01T00:00:00Z", None, "compromised"
+        ),
+    ]
+    return manifests.build_key_manifest(ISSUER, 1, "2026-01-01T00:00:00Z", entries, KP, KID)
 
 
 def _trust_store(
@@ -314,7 +327,10 @@ def test_revocation_unsigned_record_is_ignored_with_warning() -> None:
     result = verify.verify(
         _to_bytes(envelope), _trust_store(_key_manifest()), revocation_view=[garbage_record]
     )
-    assert result.revocation.startswith("not_revoked_as_of:")
+    # The junk record does not authenticate, so it is the sole record AND yields
+    # no freshness anchor -> revocation is unknown (not not_revoked_as_of), and
+    # the matching-but-unverified record is ignored with a warning.
+    assert result.revocation == "unknown"
     assert result.ok is True
     assert any("failed verification" in w for w in result.warnings)
 
@@ -342,6 +358,76 @@ def test_no_revocation_view_reports_unknown() -> None:
     envelope = issue.issue(make_payload(), KP, KID)
     result = verify.verify(_to_bytes(envelope), _trust_store(_key_manifest()))
     assert result.revocation == "unknown"
+
+
+# --- step 6 hardening: authenticate records before honoring/anchoring them --------
+
+
+def test_revocation_record_signed_by_compromised_key_is_ignored() -> None:
+    """The silent-DoS fix: a record signed by a key the issuer has flagged
+    `compromised` (§5) must NOT revoke a policy receipt — it fails
+    verification and is ignored with a warning, receipt stays ok."""
+    manifest = _manifest_active_plus_compromised()
+    payload = make_payload(license={"revocability": "policy"})
+    envelope = issue.issue(payload, KP, KID)  # receipt signed by the still-active KID
+    record = revocation.build_record(
+        payload["receipt_id"], "revoked", "2026-07-03T00:00:00Z", COMPROMISED_KP, COMPROMISED_KID
+    )
+    result = verify.verify(_to_bytes(envelope), _trust_store(manifest), revocation_view=[record])
+    assert result.signature == "valid"
+    assert result.revocation == "unknown"  # no authenticated record -> no anchor
+    assert result.ok is True
+    assert any("failed verification" in w for w in result.warnings)
+
+
+def test_not_revoked_as_of_uses_only_authenticated_records_for_anchor() -> None:
+    """T must not be inflatable by injecting unsigned junk with a future
+    `revoked_at`: the anchor is the max over signature-verified records only."""
+    payload = make_payload(license={"revocability": "policy"})
+    envelope = issue.issue(payload, KP, KID)
+    authentic = revocation.build_record(
+        "01J1V5B4M9Z8QWERTY99999999", "revoked", "2026-07-05T00:00:00Z", KP, KID
+    )
+    junk = {
+        "receipt_id": "01J1V5B4M9Z8QWERTY88888888",
+        "status": "revoked",
+        "revoked_at": "2099-01-01T00:00:00Z",  # unsigned -> must not anchor T
+    }
+    result = verify.verify(
+        _to_bytes(envelope), _trust_store(_key_manifest()), revocation_view=[authentic, junk]
+    )
+    assert result.revocation == "not_revoked_as_of:2026-07-05T00:00:00Z"
+    assert result.ok is True
+
+
+def test_not_revoked_as_of_unknown_when_only_unauthenticated_records() -> None:
+    payload = make_payload(license={"revocability": "policy"})
+    envelope = issue.issue(payload, KP, KID)
+    junk = {
+        "receipt_id": "01J1V5B4M9Z8QWERTY88888888",
+        "status": "revoked",
+        "revoked_at": "2099-01-01T00:00:00Z",
+    }
+    result = verify.verify(
+        _to_bytes(envelope), _trust_store(_key_manifest()), revocation_view=[junk]
+    )
+    assert result.revocation == "unknown"
+
+
+def test_valid_record_with_non_revoked_status_is_not_a_revocation() -> None:
+    """Only status=='revoked' drives revocation. A validly-signed record with a
+    different status is not a revocation (but still authenticates the feed, so
+    it can anchor T)."""
+    payload = make_payload(license={"revocability": "policy"})
+    envelope = issue.issue(payload, KP, KID)
+    record = revocation.build_record(
+        payload["receipt_id"], "disputed", "2026-07-05T00:00:00Z", KP, KID
+    )
+    result = verify.verify(
+        _to_bytes(envelope), _trust_store(_key_manifest()), revocation_view=[record]
+    )
+    assert result.revocation == "not_revoked_as_of:2026-07-05T00:00:00Z"
+    assert result.ok is True
 
 
 # --- step 7: buyer binding (design §3.2) ------------------------------------------

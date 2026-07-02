@@ -57,6 +57,8 @@ _REVOCABILITY_NONE = "none"
 _REVOCABILITY_REFUND_WINDOW = "refund_window"
 _REVOCABILITY_POLICY = "policy"
 
+_RECORD_STATUS_REVOKED = "revoked"
+
 _BINDING_PROVEN = "proven"
 _BINDING_NOT_PROVEN = "not_proven"
 _BINDING_NOT_CHECKED = "not_checked"
@@ -96,10 +98,13 @@ class Disclosure:
     path: `challenge = (nonce, sig)` verifies an Ed25519 challenge-response
     transcript against `payload.buyer.pubkey`.
 
-    Supplying both paths, or a partial path (e.g. `salt` without
-    `identifier`), is a malformed disclosure: `verify()` fails closed to
-    `binding: "not_proven"` rather than raising — never trust an
-    under-specified proof.
+    The salt path takes precedence: if all three salt fields are populated,
+    `verify()` evaluates it (returning `proven`/`not_proven`) even when a
+    `challenge` is also supplied — a fully-specified salt disclosure is a
+    legitimate proof, so a stray extra field never downgrades it. A partial
+    path (e.g. `salt` without `identifier`, or neither path complete) is a
+    malformed disclosure and fails closed to `binding: "not_proven"` rather
+    than raising — never trust an under-specified proof.
     """
 
     identifier: str | None = None
@@ -216,13 +221,16 @@ def _parse_iso(value: object) -> datetime | None:
 
 def _max_revoked_at(view: list[dict[str, Any]]) -> str | None:
     """Freshness anchor for `not_revoked_as_of:<T>`: the maximum `revoked_at`
-    across every record in the supplied view, regardless of receipt_id match
-    or signature validity — it describes how current the verifier's overall
-    revocation feed is, not this one receipt's history (design decision,
-    documented in task-9-report.md: §6 does not define T itself). Malformed
-    entries (non-dict, missing/unparseable `revoked_at`) are skipped, never
-    crash; naive/aware datetime mixes that can't be compared are likewise
-    skipped rather than raising.
+    across the records passed in — which callers MUST have already filtered to
+    signature-authenticated records only (`revocation.verify_record` True).
+    Restricting to authenticated records is a security fix: otherwise an
+    attacker could inject an unsigned record with a far-future `revoked_at`
+    and inflate the reported freshness of the verifier's revocation feed. T
+    describes how current the verifier's *authenticated* revocation data is,
+    not this one receipt's history (design decision: §6 does not define T
+    itself). Malformed entries (non-dict, missing/unparseable `revoked_at`)
+    are skipped, never crash; naive/aware datetime mixes that can't be
+    compared are likewise skipped rather than raising.
     """
     best_dt: datetime | None = None
     best_raw: str | None = None
@@ -281,20 +289,29 @@ def _classify_revocation(
     issuer_manifest: dict[str, Any],
     warnings: list[str],
 ) -> str:
-    """§6 step 6 / §3.1: revocation-by-class. Only records whose `receipt_id`
-    matches this payload AND that verify against `issuer_manifest` are ever
-    considered "matching, valid"; everything else is ignored, with a warning
-    when it matched-but-failed-verification. What "valid" then *means* for
-    the outcome depends entirely on `license.revocability`:
+    """§6 step 6 / §3.1: revocation-by-class.
 
-    - "none": ANY matching valid record makes the record itself invalid —
-      this is the irrevocability guarantee (design vector 16). The receipt
-      stays `ok`.
-    - "policy": any matching valid record is honored as-is (terms govern;
-      the verifier cannot evaluate them, so a signed record is trusted).
-    - "refund_window": a matching valid record is honored only if its own
-      signed `revoked_at` falls within `issued_at + revocation_window_days`
-      — evaluated against the record's own signed time, never local clock.
+    A record is a candidate revocation for THIS receipt only if it (a)
+    matches the payload's `receipt_id`, (b) authenticates against
+    `issuer_manifest` (`revocation.verify_record`: active, in-window,
+    correctly signed — the §5 hardening), and (c) carries
+    `status == "revoked"` (any other status is not a revocation statement).
+    A matching record that fails authentication is ignored with a warning
+    (turning a would-be silent DoS into a visible ignore). What an effective
+    record then *means* depends on `license.revocability`:
+
+    - "none": ANY effective record is itself invalid — this is the
+      irrevocability guarantee (design vector 16). The receipt stays `ok`.
+    - "policy": any effective record is honored as-is (terms govern; the
+      verifier cannot evaluate them, so a signed record is trusted).
+    - "refund_window": an effective record is honored only if its own signed
+      `revoked_at` falls within `issued_at + revocation_window_days` —
+      evaluated against the record's own signed time, never local clock.
+
+    The `not_revoked_as_of:<T>` freshness anchor is computed over ALL
+    authenticated records in the view (any receipt_id), not the raw view —
+    so unsigned junk can neither revoke nor inflate T. With no authenticated
+    records at all, T has no trustworthy value and the result is `unknown`.
     """
     if not revocation_view:  # None or empty: no data, no freshness anchor either way
         return _REVOCATION_UNKNOWN
@@ -303,15 +320,27 @@ def _classify_revocation(
     license_block = payload.get("license")
     revocability = license_block.get("revocability") if isinstance(license_block, dict) else None
 
-    matching = [
-        r for r in revocation_view if isinstance(r, dict) and r.get("receipt_id") == receipt_id
-    ]
+    # Authenticated records (any receipt_id) drive the freshness anchor; only
+    # signature-verified records may set T (§5 hardening).
+    authenticated_ids: set[int] = set()
+    authenticated: list[dict[str, Any]] = []
+    for record in revocation_view:
+        if isinstance(record, dict) and revocation.verify_record(record, issuer_manifest):
+            authenticated.append(record)
+            authenticated_ids.add(id(record))
+    not_revoked = _not_revoked_or_unknown(authenticated)
+
+    # Effective revocations for THIS receipt: matching receipt_id, authenticated,
+    # and status == "revoked". Matching-but-unauthenticated records are warned.
     valid: list[dict[str, Any]] = []
-    for record in matching:
-        if revocation.verify_record(record, issuer_manifest):
-            valid.append(record)
-        else:
+    for record in revocation_view:
+        if not isinstance(record, dict) or record.get("receipt_id") != receipt_id:
+            continue
+        if id(record) not in authenticated_ids:
             warnings.append(f"revocation record for {receipt_id!r} failed verification, ignored")
+            continue
+        if record.get("status") == _RECORD_STATUS_REVOKED:
+            valid.append(record)
 
     if revocability == _REVOCABILITY_NONE:
         if valid:
@@ -319,12 +348,12 @@ def _classify_revocation(
                 "revocation record ignored: license.revocability is 'none' (irrevocable)"
             )
             return _REVOCATION_INVALID_IGNORED
-        return _not_revoked_or_unknown(revocation_view)
+        return not_revoked
 
     if revocability == _REVOCABILITY_POLICY:
         if valid:
             return _REVOCATION_REVOKED
-        return _not_revoked_or_unknown(revocation_view)
+        return not_revoked
 
     if revocability == _REVOCABILITY_REFUND_WINDOW:
         window_end = _refund_window_end(payload)
@@ -334,12 +363,12 @@ def _classify_revocation(
         if valid:  # matched and verified, but every one fell outside the window
             warnings.append(f"revocation record for {receipt_id!r} outside refund window, ignored")
             return _REVOCATION_INVALID_IGNORED
-        return _not_revoked_or_unknown(revocation_view)
+        return not_revoked
 
     # Unknown/malformed revocability: schema validation (step 5, already run
     # before this is ever called) should reject this payload outright — fail
     # closed by never honoring a match under an unrecognized class.
-    return _not_revoked_or_unknown(revocation_view)
+    return not_revoked
 
 
 def _check_binding_salt(
