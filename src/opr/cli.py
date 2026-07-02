@@ -450,9 +450,7 @@ def _cmd_check_artifact(args: argparse.Namespace) -> int:
     except FileNotFoundError as exc:
         raise CliUsageError(f"file not found: {args.file}") from exc
 
-    match = next(
-        (a for a in artifacts if isinstance(a, dict) and a.get("sha256") == digest), None
-    )
+    match = next((a for a in artifacts if isinstance(a, dict) and a.get("sha256") == digest), None)
     _print_json(
         {"file": str(args.file), "sha256": digest, "match": match is not None, "artifact": match}
     )
