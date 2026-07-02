@@ -22,3 +22,10 @@ htmlcov/
 # Editors
 .idea/
 .vscode/
+
+# Agent / test runtime state
+.superpowers/
+.hypothesis/
+
+# Node (TS verifier)
+node_modules/
