@@ -16,7 +16,7 @@ _ARTIFACT_SHA256 = hashlib.sha256(b"attest-test-artifact-v1").hexdigest()
 
 
 def _base_payload() -> dict[str, Any]:
-    """The §3.1 example payload (docs/superpowers/specs/2026-07-02-opr-spec-design.md)."""
+    """The reference example payload (see docs/spec/attest-v0.1.md)."""
     return {
         "attest_version": "0.1",
         "receipt_id": "01J1V5B4M9Z8QWERTY12345678",

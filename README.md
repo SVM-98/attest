@@ -13,13 +13,13 @@ to still work.
 A digital "purchase" today is a revocable license living inside one company's
 platform, not a thing you hold. When the platform shuts down, delists a title, or
 changes terms, the buyer's library goes with it — regardless of medium: Robot Cache
-bricked already-downloaded games at its April 2026 shutdown; Funimation wiped
+bricked already-downloaded games at its May 2026 shutdown; Funimation wiped
 customers' digital anime libraries in 2024; Kindle removed book export in
 February 2025; Sony ends PlayStation disc production for new games in
 January 2028, pushing more purchases into pure platform dependency. None of this is
 hypothetical or gaming-specific — it is what "buy" already means for every kind of
 digital media, and regulators are starting to notice: California's AB 2426 and
-Maryland's HB 208 both require disclosure that a digital "purchase" is a license,
+Maryland's [HB 208](https://mgaleg.maryland.gov/mgawebsite/Legislation/Details/hb0208?ys=2025RS) both require disclosure that a digital "purchase" is a license,
 and the EU's end-of-life industry code of conduct is due by the end of 2026. What's
 missing is not more disclosure law — it's an open technical standard for a purchase
 record the buyer actually holds, independent of whether the seller survives.
@@ -131,7 +131,7 @@ requests must pass all 23 conformance vector leaves and keep both the Python and
 TypeScript suites green.
 
 **Contact.** Use GitHub Issues for technical bugs, GitHub Discussions for
-everything else, or email `<CONTACT_EMAIL>` (placeholder until publication).
+everything else, or email `svm.overspend656@8shield.net`.
 Security issues follow a different path — see [`SECURITY.md`](SECURITY.md), and
 do not open a public issue for a vulnerability.
 
