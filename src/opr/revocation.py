@@ -15,9 +15,17 @@ lives in `verify.py` (§6 step 6), the one module that has both.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from opr import canon, keys, manifests
+
+_DATE_FMT = "%Y-%m-%dT%H:%M:%SZ"
+_ACTIVE = "active"
+
+
+def _parse_date(value: str) -> datetime:
+    return datetime.strptime(value, _DATE_FMT)
 
 
 def build_record(
@@ -39,19 +47,23 @@ def build_record(
 
 
 def verify_record(record: dict[str, Any], key_manifest: dict[str, Any]) -> bool:
-    """Self-consistency: `record`'s signature verifies against a key listed in
-    `key_manifest`, mirroring `manifests.verify_key_manifest`'s pattern.
+    """Verify against `key_manifest`, mirroring `manifests.verify_artifact_manifest`
+    exactly: the signer key must be **active** in a self-consistent
+    `key_manifest`, with its `[valid_from, valid_to]` window covering the
+    record's own signed `revoked_at`, and the signature must verify.
 
-    Defense-in-depth like `manifests.verify_artifact_manifest`: `key_manifest`
-    itself must be self-consistent, so a fabricated key manifest paired with a
-    matching fabricated record signature cannot verify. Fails closed on every
-    malformed/wrong-typed/unsigned input (Task 6's fix) — never raises.
+    A revocation record is a NEW side-document issued at revoke-time, so §5's
+    lifecycle rules bite: a `compromised` key's signatures are ALL invalid,
+    and a `retired` key can no longer sign new documents — both are rejected
+    (only `status == "active"` passes). The window is checked against the
+    record's own signed `revoked_at`, never the local clock, using the same
+    date-parse + fail-closed handling as `verify_artifact_manifest` / §6 step 3.
 
-    Deliberately does not gate on the signing key's `status` (active vs
-    retired/compromised) — same as `verify_key_manifest`'s bare
-    self-consistency check, not `verify_artifact_manifest`'s extra active+
-    validity-window gate. See task-9-report.md for the reasoning and the
-    resulting caveat.
+    Defense-in-depth: `key_manifest` itself must be self-consistent, so a
+    fabricated key manifest paired with a matching fabricated record signature
+    cannot verify. Fails closed on every malformed/wrong-typed/unsigned/
+    out-of-window input — never raises (Task 6's fix, extended by the Task 9
+    hardening review).
     """
     if not manifests.verify_key_manifest(key_manifest):
         return False
@@ -59,10 +71,16 @@ def verify_record(record: dict[str, Any], key_manifest: dict[str, Any]) -> bool:
     if not isinstance(sig_block, dict):
         return False
     entry = manifests.find_key(key_manifest, sig_block.get("kid", ""))
-    if entry is None:
+    if entry is None or entry.get("status") != _ACTIVE:
         return False
     body = {k: v for k, v in record.items() if k != "signature"}
     try:
+        revoked_at = _parse_date(record["revoked_at"])
+        if revoked_at < _parse_date(entry["valid_from"]):
+            return False
+        valid_to = entry.get("valid_to")
+        if valid_to is not None and revoked_at > _parse_date(valid_to):
+            return False
         return keys.verify_strict(
             canon.canonical_bytes(body),
             keys.b64u_decode(sig_block["sig"]),
