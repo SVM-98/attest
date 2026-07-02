@@ -19,7 +19,7 @@ v1 wedge: DRM-free PC gaming. North star (staged, conditional): music → books 
 
 ## Status
 
-Pre-spec. Foundation research (prior art, legal, tech, market, preservation — with sources) lives in [docs/research/](docs/research/).
+Foundation research (prior art, legal, tech, market, preservation — with sources) lives in [docs/research/](docs/research/). The normative v0.1 specification lives at [docs/spec/opr-v0.1.md](docs/spec/opr-v0.1.md); conformance vectors live in [docs/spec/vectors/](docs/spec/vectors/) — an implementation is OPR-conformant iff it reproduces the expected result for every vector there.
 
 ## License
 
