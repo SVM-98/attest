@@ -36,7 +36,7 @@ Watch the thesis play out end to end — a store issues a receipt, gets deleted 
 .venv/bin/python demo/store_dies.py
 ```
 
-See [demo/README.md](demo/README.md) for what each step of the demo proves. Run the test suite (gated at ≥80% coverage on every core module) with:
+See [demo/README.md](demo/README.md) for what each step of the demo proves. Core modules measure 90–100% line coverage (≥80% target); check with:
 
 ```sh
 .venv/bin/pytest --cov=opr --cov-report=term-missing
