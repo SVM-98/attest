@@ -423,10 +423,16 @@ The conformance vectors under [`docs/spec/vectors/`](vectors/) are the OPR v0.1 
 | 9 | `09-commitment` (`a-...`, `b-...`, `c-...`) | Buyer-binding normalization and scrypt commitment vectors: an ASCII email, a non-ASCII (Unicode) email, and an `issuer-account` identifier. |
 | 10 | `10-unknown-field` | An extra signed top-level field → verifies green with a warning (§11.2). |
 | 11 | `11-manifest-tamper` | A key manifest whose `status` was flipped after signing no longer self-verifies (§7.1); the receipt signed against the tampered manifest is rejected as if the key were compromised. |
+| 12 | `12-retired-key-ok` | A receipt genuinely signed while its key was `active`, verified against a manifest where that key is now `retired` → still verifies green, with a mandatory warning (§7.3, §11.2). |
+| 13 | `13-compromised-key` | A receipt genuinely signed by a key now marked `compromised` in the trust store → `signature: "invalid"`, unconditionally and independent of `issued_at` (§7.3). |
+| 14 | `14-rotation-continuity` | A manifest-version chain where v2 is signed by a key `active` in v1 (the trusted root) → the chain is continuous; `trust` stays at its provenance-derived value (§7.3, §11.1). |
+| 14b | `14b-rotation-discontinuous` | A manifest-version chain where v2 is signed by a key never listed in v1 → discontinuous rotation; `trust: "unverified_rotation"`, overriding provenance, while `signature`/`schema`/`ok` are unaffected (`trust` is not one of `ok`'s components, §11.1). |
+| 15 | `15-revoked-policy` | A `revocability: "policy"` receipt plus an authenticated, matching revocation record → honored as-is: `revocation: "revoked"`, `ok: false` (§12.2). |
+| 16 | `16-revocation-against-none-ignored` | A `revocability: "none"` receipt plus an authenticated, matching revocation record → the record itself is invalid: `revocation: "invalid_revocation_ignored"`, a warning is emitted, `ok` is unaffected (§6.2, §12.2). |
+| 17 | `17-binding-proven` (`a-...`, `b-...`) | Both buyer-binding proof paths (§8, §11 step 7): `a-salt-disclosure` recomputes the commitment from a disclosed `(identifier, identifier_type, salt)`; `b-pubkey-challenge` verifies an Ed25519 challenge-response transcript against `buyer.pubkey`. Both → `binding: "proven"`. |
+| 18 | `18-drm-bound` | `license.drm == "drm-bound"` → verifies green with a mandatory warning (§5.5, §11.2). |
 
 **Signature-malleability vector scope.** Vector 8 exercises non-canonical `S` specifically. Small-order and non-canonical `A`/`R` rejection (the other half of the pinned ruleset, §10) is enforced by the underlying libsodium verification primitive at verification time and is not separately vectorized in v0.1 — a conforming implementation MUST still reject such inputs (§10 is normative regardless of vector coverage), but conformance testing for that specific property currently relies on the pinned-library guarantee rather than a dedicated fixture.
-
-**Non-normative note:** design rev 2 (§11) additionally sketches lifecycle/policy vectors 12–18 (retired-key handling, rotation continuity/discontinuity, `policy` and `refund_window` revocation, binding-proven disclosure, `drm-bound` warnings) as a Fase 2 addition. Those vectors are not yet present under `docs/spec/vectors/` and are therefore **not** part of the v0.1 conformance requirement stated above; they are anticipated in a future revision of this specification.
 
 ## Appendix A — Threat model summary (non-normative)
 
