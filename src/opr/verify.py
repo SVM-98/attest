@@ -428,6 +428,15 @@ def verify(
     disclosure: Disclosure | None = None,
 ) -> VerificationResult:
     """§6 steps 0-7."""
+    # Caller-contract enforcement (security): a non-list `revocation_view`
+    # must fail loud. If a lone record OBJECT slipped through here,
+    # `_classify_revocation` would iterate its string keys, authenticate
+    # nothing, and report `revocation: "unknown"` / `ok: true` for a receipt
+    # genuinely revoked under `policy`/`refund_window` — a silent pass on a
+    # security check. `None` (no view) stays valid.
+    if revocation_view is not None and not isinstance(revocation_view, list):
+        raise TypeError("revocation_view must be a list of records or None")
+
     errors: list[str] = []
     warnings: list[str] = []
     # Conservative default: never claim "verified" trust until we've resolved
