@@ -19,6 +19,7 @@ model key lifecycle honestly at the manifest level.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import datetime
 from typing import Any
 
@@ -26,6 +27,8 @@ from opr import canon, keys
 
 _DATE_FMT = "%Y-%m-%dT%H:%M:%SZ"
 _ACTIVE = "active"
+_RETIRED = "retired"
+_COMPROMISED = "compromised"
 
 
 def _parse_date(value: str) -> datetime:
@@ -120,6 +123,84 @@ def check_continuity(trusted: dict[str, Any], candidate: dict[str, Any]) -> bool
         return False
     signer_entry = find_key(trusted, signer_kid)
     return signer_entry is not None and signer_entry.get("status") == _ACTIVE
+
+
+def rotate_key_manifest(
+    existing: dict[str, Any],
+    signing_kp: keys.SigningKeyPair,
+    signing_kid: str,
+    issued_at: str,
+    new_entry: dict[str, Any] | None = None,
+    retire_kids: Iterable[str] = (),
+    compromise_kids: Iterable[str] = (),
+) -> dict[str, Any]:
+    """Build the next key-manifest version: apply status changes to existing
+    keys, optionally append `new_entry`, bump `manifest_version`, re-sign with
+    `signing_kp`/`signing_kid`.
+
+    `retired` is planned end-of-use (past signatures stay valid, verify.py only
+    warns); `compromised` is an incident (verify.py fails closed, invalidating
+    every past signature by that key). Callers pick the one whose consequence
+    they mean.
+
+    Fail-closed guards (all raise `ValueError`):
+    - at least one change must be requested (a new key or a status change);
+    - no kid may be both retired and compromised;
+    - `signing_kid` may not be compromised — you cannot sign the recovery
+      manifest with the very key you are declaring compromised (the attacker
+      holds it too); sign with a different, still-active key;
+    - every kid to retire/compromise must exist in `existing["keys"]` — a
+      typo'd kid is an error, never a silent no-op;
+    - `new_entry`'s kid must not already exist in `existing["keys"]` — reusing
+      a kid would append a second `keys[]` entry sharing it, a silent no-op
+      for the operator since `find_key` returns the first (old-status) match.
+
+    The caller's `existing` manifest is never mutated (keys are copied).
+    """
+    retire = set(retire_kids)
+    compromise = set(compromise_kids)
+
+    if new_entry is None and not retire and not compromise:
+        raise ValueError("rotation must change something: a new key or a status change")
+
+    overlap = retire & compromise
+    if overlap:
+        raise ValueError(f"kid(s) marked both retired and compromised: {sorted(overlap)}")
+
+    if signing_kid in compromise:
+        raise ValueError(
+            f"signing kid {signing_kid!r} cannot be in the compromised set — sign the "
+            "recovery manifest with a different, still-active key"
+        )
+
+    existing_keys: list[dict[str, Any]] = existing["keys"]
+    existing_kids = {entry.get("kid") for entry in existing_keys}
+    unknown = (retire | compromise) - existing_kids
+    if unknown:
+        raise ValueError(f"cannot change status of unknown kid(s): {sorted(unknown)}")
+
+    if new_entry is not None and new_entry.get("kid") in existing_kids:
+        raise ValueError(
+            f"new key kid {new_entry.get('kid')!r} already exists in the manifest — use "
+            "--retire-kid/--compromise-kid to change an existing key's status, not --new-kid"
+        )
+
+    updated: list[dict[str, Any]] = []
+    for entry in existing_keys:
+        entry = dict(entry)  # copy — never mutate the caller's manifest
+        kid = entry.get("kid")
+        if kid in compromise:
+            entry["status"] = _COMPROMISED
+        elif kid in retire:
+            entry["status"] = _RETIRED
+        updated.append(entry)
+    if new_entry is not None:
+        updated.append(new_entry)
+
+    new_version = existing["manifest_version"] + 1
+    return build_key_manifest(
+        existing["issuer"], new_version, issued_at, updated, signing_kp, signing_kid
+    )
 
 
 def build_artifact_manifest(

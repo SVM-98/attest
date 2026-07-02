@@ -191,9 +191,7 @@ def test_verify_of_tampered_envelope_exits_1(tmp_path: Path, capsys: CapSys) -> 
     assert result["signature"] == "invalid"
 
 
-def test_verify_unknown_issuer_no_trust_dir_match_exits_1(
-    tmp_path: Path, capsys: CapSys
-) -> None:
+def test_verify_unknown_issuer_no_trust_dir_match_exits_1(tmp_path: Path, capsys: CapSys) -> None:
     seed, _pub = _keygen(tmp_path, "issuer")
     _manifest_init(tmp_path, seed)
     payload_path = _write_payload(tmp_path)
@@ -256,9 +254,7 @@ def test_verify_revocations_array_with_authenticated_record_exits_1(
     assert result["revocation"] == "revoked"
 
 
-def test_verify_revocations_bare_object_exits_2_not_ok_true(
-    tmp_path: Path, capsys: CapSys
-) -> None:
+def test_verify_revocations_bare_object_exits_2_not_ok_true(tmp_path: Path, capsys: CapSys) -> None:
     """The SAME record written as a bare OBJECT (not wrapped in a list) — the
     exact shape `revocation.build_record` returns — must be a usage error
     (exit 2), NEVER silently ignored into an `ok: true` pass of a genuinely
@@ -320,9 +316,7 @@ def test_check_artifact_matching_sha256_exits_0(tmp_path: Path, capsys: CapSys) 
     assert result["sha256"] == digest
 
 
-def test_check_artifact_mismatching_sha256_exits_nonzero(
-    tmp_path: Path, capsys: CapSys
-) -> None:
+def test_check_artifact_mismatching_sha256_exits_nonzero(tmp_path: Path, capsys: CapSys) -> None:
     seed, _pub = _keygen(tmp_path, "issuer")
     artifact_bytes = b"totally-a-game-installer"
     digest = hashlib.sha256(artifact_bytes).hexdigest()
@@ -493,9 +487,7 @@ def test_issue_salt_out_without_salt_is_usage_error(tmp_path: Path, capsys: CapS
 # --- verify: disclosure (binding proof) -------------------------------------
 
 
-def test_verify_with_matching_disclosure_proves_binding(
-    tmp_path: Path, capsys: CapSys
-) -> None:
+def test_verify_with_matching_disclosure_proves_binding(tmp_path: Path, capsys: CapSys) -> None:
     seed, _pub = _keygen(tmp_path, "issuer")
     manifest_path = _manifest_init(tmp_path, seed)
 
@@ -541,9 +533,7 @@ def test_verify_with_matching_disclosure_proves_binding(
 # --- disclose ----------------------------------------------------------------
 
 
-def test_disclose_writes_into_a_not_yet_existing_directory(
-    tmp_path: Path, capsys: CapSys
-) -> None:
+def test_disclose_writes_into_a_not_yet_existing_directory(tmp_path: Path, capsys: CapSys) -> None:
     seed, _pub = _keygen(tmp_path, "issuer")
     manifest_path = _manifest_init(tmp_path, seed)
     payload_path = _write_payload(tmp_path)
@@ -628,9 +618,10 @@ def test_export_then_import_then_verify_roundtrip(tmp_path: Path, capsys: CapSys
     )
     del legal_text
     legal_text_bytes = b"opr-test-legal-text-v1"
-    assert hashlib.sha256(legal_text_bytes).hexdigest() == json.loads(
-        payload_path.read_text(encoding="utf-8")
-    )["license"]["legal_text_sha256"]
+    assert (
+        hashlib.sha256(legal_text_bytes).hexdigest()
+        == json.loads(payload_path.read_text(encoding="utf-8"))["license"]["legal_text_sha256"]
+    )
     legal_text_path = tmp_path / "legal.txt"
     legal_text_path.write_bytes(legal_text_bytes)
 
@@ -860,3 +851,185 @@ def test_verify_help_exits_0(capsys: CapSys) -> None:
     with pytest.raises(SystemExit) as exc_info:
         cli.main(["verify", "--help"])
     assert exc_info.value.code == 0
+
+
+# --- manifest rotate: retirement / compromise flags --------------------------
+
+
+def test_manifest_rotate_compromise_without_new_key(tmp_path: Path) -> None:
+    """A key can be compromised without adding a new key, as long as the
+    rotation is signed by another active key. Flow: init (KID) -> rotate to add
+    KID2 -> rotate again compromising KID, signed by KID2, no new key."""
+    seed, _pub = _keygen(tmp_path, "issuer")
+    manifest_v1 = _manifest_init(tmp_path, seed)
+    seed2, pub2 = _keygen(tmp_path, "issuer-2")
+    kid2 = f"{ISSUER}/keys/test-2#ed25519-1"
+
+    manifest_v2 = tmp_path / "manifest-v2.json"
+    rc = cli.main(
+        [
+            "manifest",
+            "rotate",
+            "--in",
+            str(manifest_v1),
+            "--signing-kid",
+            KID,
+            "--signing-seed",
+            str(seed),
+            "--new-kid",
+            kid2,
+            "--new-pub",
+            str(pub2),
+            "--valid-from",
+            "2026-02-01T00:00:00Z",
+            "--issued-at",
+            "2026-02-01T00:00:00Z",
+            "--out",
+            str(manifest_v2),
+        ]
+    )
+    assert rc == 0
+
+    manifest_v3 = tmp_path / "manifest-v3.json"
+    rc = cli.main(
+        [
+            "manifest",
+            "rotate",
+            "--in",
+            str(manifest_v2),
+            "--signing-kid",
+            kid2,
+            "--signing-seed",
+            str(seed2),
+            "--compromise-kid",
+            KID,
+            "--issued-at",
+            "2026-03-01T00:00:00Z",
+            "--out",
+            str(manifest_v3),
+        ]
+    )
+    assert rc == 0
+
+    from opr import manifests
+
+    v2 = json.loads(manifest_v2.read_text(encoding="utf-8"))
+    v3 = json.loads(manifest_v3.read_text(encoding="utf-8"))
+    assert manifests.find_key(v3, KID)["status"] == "compromised"
+    assert manifests.verify_key_manifest(v3)
+    assert manifests.check_continuity(v2, v3)
+
+
+def test_manifest_rotate_retire_flag(tmp_path: Path) -> None:
+    """`--retire-kid` marks an existing key retired (signed by a second key)."""
+    seed, _pub = _keygen(tmp_path, "issuer")
+    manifest_v1 = _manifest_init(tmp_path, seed)
+    seed2, pub2 = _keygen(tmp_path, "issuer-2")
+    kid2 = f"{ISSUER}/keys/test-2#ed25519-1"
+
+    manifest_v2 = tmp_path / "manifest-v2.json"
+    assert (
+        cli.main(
+            [
+                "manifest",
+                "rotate",
+                "--in",
+                str(manifest_v1),
+                "--signing-kid",
+                KID,
+                "--signing-seed",
+                str(seed),
+                "--new-kid",
+                kid2,
+                "--new-pub",
+                str(pub2),
+                "--valid-from",
+                "2026-02-01T00:00:00Z",
+                "--issued-at",
+                "2026-02-01T00:00:00Z",
+                "--out",
+                str(manifest_v2),
+            ]
+        )
+        == 0
+    )
+
+    manifest_v3 = tmp_path / "manifest-v3.json"
+    rc = cli.main(
+        [
+            "manifest",
+            "rotate",
+            "--in",
+            str(manifest_v2),
+            "--signing-kid",
+            kid2,
+            "--signing-seed",
+            str(seed2),
+            "--retire-kid",
+            KID,
+            "--issued-at",
+            "2026-03-01T00:00:00Z",
+            "--out",
+            str(manifest_v3),
+        ]
+    )
+    assert rc == 0
+
+    from opr import manifests
+
+    v3 = json.loads(manifest_v3.read_text(encoding="utf-8"))
+    assert manifests.find_key(v3, KID)["status"] == "retired"
+
+
+def test_manifest_rotate_with_no_changes_exits_2(tmp_path: Path, capsys: CapSys) -> None:
+    """A rotation that neither adds a key nor changes a status is a usage
+    error (exit 2), not a silently re-signed duplicate."""
+    seed, _pub = _keygen(tmp_path, "issuer")
+    manifest_v1 = _manifest_init(tmp_path, seed)
+
+    rc = cli.main(
+        [
+            "manifest",
+            "rotate",
+            "--in",
+            str(manifest_v1),
+            "--signing-kid",
+            KID,
+            "--signing-seed",
+            str(seed),
+            "--issued-at",
+            "2026-02-01T00:00:00Z",
+            "--out",
+            str(tmp_path / "v2.json"),
+        ]
+    )
+    assert rc == 2
+    assert capsys.readouterr().err != ""
+
+
+def test_manifest_rotate_compromising_signing_key_exits_2(tmp_path: Path, capsys: CapSys) -> None:
+    """Guard surfaced through the CLI: compromising the very key you sign with
+    is refused (exit 2)."""
+    seed, _pub = _keygen(tmp_path, "issuer")
+    manifest_v1 = _manifest_init(tmp_path, seed)
+
+    rc = cli.main(
+        [
+            "manifest",
+            "rotate",
+            "--in",
+            str(manifest_v1),
+            "--signing-kid",
+            KID,
+            "--signing-seed",
+            str(seed),
+            "--compromise-kid",
+            KID,
+            "--issued-at",
+            "2026-02-01T00:00:00Z",
+            "--out",
+            str(tmp_path / "v2.json"),
+        ]
+    )
+    assert rc == 2
+    assert capsys.readouterr().err != ""

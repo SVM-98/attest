@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from typing import Any
 
-from opr import keys, manifests
+import pytest
+
+from opr import issue, keys, manifests, verify
+from tests.helpers import make_payload
 
 ISSUER = "store.example.com"
 SERIES = "store.example.com/works/EXG-001"
@@ -228,9 +232,7 @@ def test_artifact_manifest_released_before_valid_from_false() -> None:
 
 def test_artifact_manifest_released_after_valid_to_false() -> None:
     entries = [
-        manifests.key_entry(
-            KID1, KP1.pub, "2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z", "active"
-        )
+        manifests.key_entry(KID1, KP1.pub, "2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z", "active")
     ]
     key_manifest = manifests.build_key_manifest(
         ISSUER, 1, "2026-01-01T00:00:00Z", entries, KP1, KID1
@@ -274,9 +276,7 @@ def test_artifact_manifest_self_inconsistent_key_manifest_false() -> None:
 
 def test_artifact_manifest_released_within_window_true() -> None:
     entries = [
-        manifests.key_entry(
-            KID1, KP1.pub, "2026-01-01T00:00:00Z", "2026-12-31T00:00:00Z", "active"
-        )
+        manifests.key_entry(KID1, KP1.pub, "2026-01-01T00:00:00Z", "2026-12-31T00:00:00Z", "active")
     ]
     key_manifest = manifests.build_key_manifest(
         ISSUER, 1, "2026-01-01T00:00:00Z", entries, KP1, KID1
@@ -285,3 +285,116 @@ def test_artifact_manifest_released_within_window_true() -> None:
         ISSUER, SERIES, 1, "2026-06-15T00:00:00Z", [_artifact()], KP1, KID1
     )
     assert manifests.verify_artifact_manifest(am, key_manifest)
+
+
+# --- rotate_key_manifest: retirement / compromise ----------------------------
+
+
+def _two_active_v1() -> dict[str, Any]:
+    """A v1 manifest with two active keys, so a rotation can compromise one and
+    still be signed by the other (the recovery-key requirement)."""
+    entries = [
+        manifests.key_entry(KID1, KP1.pub, "2026-01-01T00:00:00Z"),
+        manifests.key_entry(KID2, KP2.pub, "2026-01-01T00:00:00Z"),
+    ]
+    return manifests.build_key_manifest(ISSUER, 1, "2026-01-01T00:00:00Z", entries, KP1, KID1)
+
+
+def test_rotate_compromise_flips_status_and_chains() -> None:
+    v1 = _two_active_v1()
+    rotated = manifests.rotate_key_manifest(
+        v1,
+        KP2,
+        KID2,
+        "2026-06-01T00:00:00Z",
+        compromise_kids=[KID1],
+        new_entry=manifests.key_entry(KID3, KP3.pub, "2026-06-01T00:00:00Z"),
+    )
+    assert rotated["manifest_version"] == 2
+    assert manifests.find_key(rotated, KID1)["status"] == "compromised"
+    assert manifests.find_key(rotated, KID3)["status"] == "active"
+    assert manifests.verify_key_manifest(rotated)
+    assert manifests.check_continuity(v1, rotated)  # signed by KID2, active in v1
+
+
+def test_rotate_retire_flips_status() -> None:
+    v1 = _two_active_v1()
+    rotated = manifests.rotate_key_manifest(
+        v1, KP2, KID2, "2026-06-01T00:00:00Z", retire_kids=[KID1]
+    )
+    assert manifests.find_key(rotated, KID1)["status"] == "retired"
+    assert manifests.verify_key_manifest(rotated)
+
+
+def test_rotate_does_not_mutate_the_input_manifest() -> None:
+    v1 = _two_active_v1()
+    manifests.rotate_key_manifest(v1, KP2, KID2, "2026-06-01T00:00:00Z", compromise_kids=[KID1])
+    assert manifests.find_key(v1, KID1)["status"] == "active"  # caller's copy untouched
+
+
+def test_compromised_key_past_receipt_fails_verification() -> None:
+    """The load-bearing security assertion: once a key is compromised, a
+    receipt it previously signed no longer verifies (fail-closed, §5)."""
+    v1 = _two_active_v1()
+    envelope_bytes = json.dumps(issue.issue(make_payload(), KP1, KID1)).encode("utf-8")
+
+    ts_before = verify.TrustStore(manifests={ISSUER: v1}, provenance={ISSUER: "bundle"})
+    assert verify.verify(envelope_bytes, ts_before).signature == "valid"
+
+    v2 = manifests.rotate_key_manifest(
+        v1, KP2, KID2, "2026-06-01T00:00:00Z", compromise_kids=[KID1]
+    )
+    ts_after = verify.TrustStore(manifests={ISSUER: v2}, provenance={ISSUER: "bundle"})
+    result = verify.verify(envelope_bytes, ts_after)
+    assert result.signature == "invalid"
+    assert any("compromised" in e for e in result.errors)
+
+
+def test_retired_key_past_receipt_still_verifies_with_warning() -> None:
+    """Contrast: a retired key's past receipt stays valid, only warned."""
+    v1 = _two_active_v1()
+    envelope_bytes = json.dumps(issue.issue(make_payload(), KP1, KID1)).encode("utf-8")
+
+    v2 = manifests.rotate_key_manifest(v1, KP2, KID2, "2026-06-01T00:00:00Z", retire_kids=[KID1])
+    ts = verify.TrustStore(manifests={ISSUER: v2}, provenance={ISSUER: "bundle"})
+    result = verify.verify(envelope_bytes, ts)
+    assert result.signature == "valid"
+    assert any("retired" in w for w in result.warnings)
+
+
+def test_rotate_rejects_unknown_kid() -> None:
+    v1 = _two_active_v1()
+    with pytest.raises(ValueError):
+        manifests.rotate_key_manifest(v1, KP1, KID1, "2026-06-01T00:00:00Z", retire_kids=["nope"])
+
+
+def test_rotate_rejects_kid_in_both_sets() -> None:
+    v1 = _two_active_v1()
+    with pytest.raises(ValueError):
+        manifests.rotate_key_manifest(
+            v1, KP2, KID2, "2026-06-01T00:00:00Z", retire_kids=[KID1], compromise_kids=[KID1]
+        )
+
+
+def test_rotate_rejects_signing_key_in_compromised_set() -> None:
+    v1 = _two_active_v1()
+    with pytest.raises(ValueError):
+        manifests.rotate_key_manifest(v1, KP1, KID1, "2026-06-01T00:00:00Z", compromise_kids=[KID1])
+
+
+def test_rotate_rejects_no_change() -> None:
+    v1 = _two_active_v1()
+    with pytest.raises(ValueError):
+        manifests.rotate_key_manifest(v1, KP1, KID1, "2026-06-01T00:00:00Z")
+
+
+def test_rotate_rejects_new_kid_already_present() -> None:
+    v1 = _two_active_v1()
+    with pytest.raises(ValueError):
+        manifests.rotate_key_manifest(
+            v1,
+            KP1,
+            KID1,
+            "2026-06-01T00:00:00Z",
+            new_entry=manifests.key_entry(KID2, KP2.pub, "2026-06-01T00:00:00Z"),
+        )
