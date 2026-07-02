@@ -94,7 +94,9 @@ def verify_key_manifest(manifest: dict[str, Any]) -> bool:
         return keys.verify_strict(
             _signable(manifest), keys.b64u_decode(sig_block["sig"]), keys.b64u_decode(entry["pub"])
         )
-    except (KeyError, ValueError):
+    except (KeyError, ValueError, TypeError):
+        # Manifests arrive from untrusted sources with no schema gate here; fail
+        # closed on wrong-typed fields (e.g. non-str sig/pub -> TypeError) too.
         return False
 
 
@@ -143,7 +145,17 @@ def build_artifact_manifest(
 
 def verify_artifact_manifest(manifest: dict[str, Any], key_manifest: dict[str, Any]) -> bool:
     """Verify against `key_manifest`: signer must be `active` there, with `released_at`
-    covered by the signer key's `[valid_from, valid_to]` window, and issuers must match."""
+    covered by the signer key's `[valid_from, valid_to]` window, and issuers must match.
+
+    Defense-in-depth: the `key_manifest` must itself be self-consistent
+    (`verify_key_manifest`) so an attacker-fabricated key manifest paired with a
+    matching attacker-signed artifact manifest cannot verify. This does not
+    preempt the trust-store/TOFU/continuity decisions that live in verify.py —
+    a genuinely trusted key manifest always self-verifies, so the happy path is
+    unaffected.
+    """
+    if not verify_key_manifest(key_manifest):
+        return False
     sig_block = manifest.get("manifest_signature")
     if not isinstance(sig_block, dict):
         return False
@@ -162,5 +174,6 @@ def verify_artifact_manifest(manifest: dict[str, Any], key_manifest: dict[str, A
         return keys.verify_strict(
             _signable(manifest), keys.b64u_decode(sig_block["sig"]), keys.b64u_decode(entry["pub"])
         )
-    except (KeyError, ValueError):
+    except (KeyError, ValueError, TypeError):
+        # Fail closed on wrong-typed fields (e.g. non-str released_at -> TypeError).
         return False
