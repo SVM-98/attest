@@ -1,7 +1,8 @@
 {
   "payload": {
+    "attest_version": "0.1",
     "buyer": {
-      "commitment": "4-s9PgtuDL3ZR7tlAVZpQCfPVMntewAQyqdLxtICPvg",
+      "commitment": "RsKsjOk2kYydyaISKPgHb1tyf8g_k4iGsFCpdMQIL5I",
       "identifier_type": "email",
       "pubkey": null
     },
@@ -13,12 +14,11 @@
     "license": {
       "drm": "drm-free",
       "grant": "perpetual",
-      "legal_text_sha256": "fd626193eb454bce229584a139d223f8e15f2b0c4693739b81fa31ea330d6bc2",
+      "legal_text_sha256": "a9e875fe29704222a432410b0c160f5a2e5ef48effa8b51a5017c640e21c109c",
       "revocability": "none",
-      "terms_uri": "https://store.example.com/opr/license-templates/standard-v1",
+      "terms_uri": "https://store.example.com/attest/license-templates/standard-v1",
       "transferable": false
     },
-    "opr_version": "0.1",
     "receipt_id": "01JZ5PDHT0000G40R40M30E209",
     "supersedes": null,
     "survivability": {
@@ -40,7 +40,7 @@
     {
       "alg": "Ed25519",
       "kid": "store.example.com/keys/2025-01#ed25519-1",
-      "sig": "-SwiYqeW_2z1jJoJ8M5j6cKkXliBH4HP0EXkS_XfOXLGb58KI9uaYFgV1j1hEQXJZRaAYMVjtABwq9_X0KX_CA"
+      "sig": "VQyW-jPurRH5P6Hvv1Ac_LJx-kr_jGQbsMP9xXTo9gAyRRibRLNp9cCHq7xOWODRZKTHu5VyjSitX1viUj67Dg"
     }
   ]
 }

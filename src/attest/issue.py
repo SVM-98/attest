@@ -12,7 +12,7 @@ import hashlib
 from datetime import UTC, datetime
 from typing import Any
 
-from opr import canon, commitment, keys, ulid, validate
+from attest import canon, commitment, keys, ulid, validate
 
 _ALG = "Ed25519"  # hard-coded — never selected from any field, see §3
 
@@ -161,7 +161,7 @@ def build_payload(
         survivability["mirror_policy_sha256"] = mirror_policy_sha256
 
     return {
-        "opr_version": "0.1",
+        "attest_version": "0.1",
         "receipt_id": receipt_id if receipt_id is not None else ulid.generate(),
         "issued_at": issued_at if issued_at is not None else _now_iso(),
         "supersedes": supersedes,

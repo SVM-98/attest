@@ -4,9 +4,9 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from opr import canon
+from attest import canon
 
-# RFC 8785-style expectations (integer-only OPR profile)
+# RFC 8785-style expectations (integer-only attest profile)
 
 
 def test_sorts_keys_by_utf16_code_units() -> None:

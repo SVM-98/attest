@@ -1,7 +1,8 @@
 {
   "payload": {
+    "attest_version": "0.1",
     "buyer": {
-      "commitment": "Xi_Lo3j4HWtbvg_8ehNpgbqIZXtg6LQ-SXMlPjrJBOY",
+      "commitment": "o9ryRDRXrndWeZUJVoMEXlx-cdktlWY3jozvTCqnkhw",
       "identifier_type": "issuer-account",
       "pubkey": null
     },
@@ -13,12 +14,11 @@
     "license": {
       "drm": "drm-free",
       "grant": "perpetual",
-      "legal_text_sha256": "fd626193eb454bce229584a139d223f8e15f2b0c4693739b81fa31ea330d6bc2",
+      "legal_text_sha256": "a9e875fe29704222a432410b0c160f5a2e5ef48effa8b51a5017c640e21c109c",
       "revocability": "none",
-      "terms_uri": "https://store.example.com/opr/license-templates/standard-v1",
+      "terms_uri": "https://store.example.com/attest/license-templates/standard-v1",
       "transferable": false
     },
-    "opr_version": "0.1",
     "receipt_id": "01JZ5PDHT0000G40R40M30E209",
     "supersedes": null,
     "survivability": {
@@ -40,7 +40,7 @@
     {
       "alg": "Ed25519",
       "kid": "store.example.com/keys/2025-01#ed25519-1",
-      "sig": "k6tcyrkdFjqJgO4pNANw0-fM-Y9XyGnntKpApHv5_FEP1ggbT7sbso_UqoCu4IaEqv9K308yvldaFWnq6dqLEw"
+      "sig": "m1jYQ0fN4E_7qg9Px4nE-xzFnX6B2ypxZRYyoxWtDIY_IgcmCt2z8qDVFPA4CTcFJg4NRQ3hvja4h0pQpzXFGA"
     }
   ]
 }

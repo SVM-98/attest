@@ -1,4 +1,4 @@
-"""`opr` command-line interface — the operator surface (design §10).
+"""`attest` command-line interface — the operator surface (design §10).
 
 Every verb wraps a single library call 1:1: no domain logic (schema rules,
 crypto, revocation classification, bundle packaging...) lives here, only
@@ -35,7 +35,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from opr import bundle, canon, issue, keys, manifests, verify
+from attest import bundle, canon, issue, keys, manifests, verify
 
 EXIT_OK = 0
 EXIT_VERIFICATION_FAILED = 1
@@ -383,10 +383,10 @@ def _cmd_export(args: argparse.Namespace) -> int:
         content = path.read_bytes()
         legal_texts[hashlib.sha256(content).hexdigest()] = content
 
-    oprx_path, private_path = bundle.export(
+    attest_path, private_path = bundle.export(
         receipts, key_manifests, artifact_manifests, legal_texts, args.out_dir, args.name
     )
-    _print_json({"oprx": str(oprx_path), "private": str(private_path)})
+    _print_json({"attest": str(attest_path), "private": str(private_path)})
     return EXIT_OK
 
 
@@ -397,7 +397,7 @@ def _cmd_import(args: argparse.Namespace) -> int:
     trust_dir = args.out_dir / "trust"
     for envelope in imported.receipts:
         receipt_id = envelope["payload"]["receipt_id"]
-        _write_json_file(receipts_dir / f"{receipt_id}.opr.json", envelope)
+        _write_json_file(receipts_dir / f"{receipt_id}.attest.json", envelope)
 
     for issuer, chain in imported.trust_store.chains.items():
         for version_manifest in chain:
@@ -489,7 +489,7 @@ def _cmd_check_artifact(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="opr", description="Open Purchase Receipt (OPR) v0.1 operator CLI"
+        prog="attest", description="attest v0.1 operator CLI"
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -580,7 +580,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", required=True, help="output file, or directory (created if missing)")
     p.set_defaults(func=_cmd_disclose)
 
-    p = sub.add_parser("export", help="Export a shareable .oprx + secrets .private.oprx")
+    p = sub.add_parser("export", help="Export a shareable .attest + secrets .private.attest")
     p.add_argument("--receipt", required=True, action="append", type=Path, help="repeatable")
     p.add_argument("--key-manifest", required=True, action="append", type=Path, help="repeatable")
     p.add_argument("--artifact-manifest", action="append", type=Path, default=[], help="repeatable")
@@ -595,9 +595,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--name", required=True)
     p.set_defaults(func=_cmd_export)
 
-    p = sub.add_parser("import", help="Reconstruct receipts + a trust store from a .oprx bundle")
+    p = sub.add_parser("import", help="Reconstruct receipts + a trust store from a .attest bundle")
     p.add_argument("--bundle", required=True, type=Path)
-    p.add_argument("--private", type=Path, default=None, help=".private.oprx sibling, for salts")
+    p.add_argument("--private", type=Path, default=None, help=".private.attest sibling, for salts")
     p.add_argument("--out-dir", required=True, type=Path)
     p.set_defaults(func=_cmd_import)
 

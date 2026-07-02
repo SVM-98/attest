@@ -1,5 +1,5 @@
-from opr import OPR_VERSION
+from attest import ATTEST_VERSION
 
 
 def test_version() -> None:
-    assert OPR_VERSION == "0.1"
+    assert ATTEST_VERSION == "0.1"
