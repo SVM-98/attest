@@ -30,6 +30,8 @@ def _serialize_string(s: str) -> str:
     out = ['"']
     for ch in s:
         cp = ord(ch)
+        if 0xD800 <= cp <= 0xDFFF:
+            raise CanonError("lone surrogate not allowed in the OPR-JCS profile")
         if cp in _ESCAPES:
             out.append(_ESCAPES[cp])
         elif cp < 0x20:
@@ -65,7 +67,7 @@ def _serialize(obj: Any, out: list[str]) -> None:
             if not isinstance(k, str):
                 raise CanonError(f"non-string object key: {k!r}")
         out.append("{")
-        for i, k in enumerate(sorted(obj, key=lambda k: k.encode("utf-16-be"))):
+        for i, k in enumerate(sorted(obj, key=lambda k: k.encode("utf-16-be", "surrogatepass"))):
             if i:
                 out.append(",")
             out.append(_serialize_string(k))
@@ -100,13 +102,32 @@ def _reject_float(_s: str) -> Any:
     raise CanonError("floats are not allowed in the OPR-JCS profile")
 
 
+def _has_surrogate(s: str) -> bool:
+    return any(0xD800 <= ord(ch) <= 0xDFFF for ch in s)
+
+
+def _reject_surrogates(obj: Any) -> None:
+    """Reject lone surrogates that entered via \\uXXXX escapes (keys or values)."""
+    if isinstance(obj, str):
+        if _has_surrogate(obj):
+            raise CanonError("lone surrogate not allowed in the OPR-JCS profile")
+    elif isinstance(obj, dict):
+        for k, v in obj.items():
+            if _has_surrogate(k):
+                raise CanonError("lone surrogate not allowed in the OPR-JCS profile")
+            _reject_surrogates(v)
+    elif isinstance(obj, list):
+        for item in obj:
+            _reject_surrogates(item)
+
+
 def loads_strict(data: bytes) -> object:
     try:
         text = data.decode("utf-8", errors="strict")
     except UnicodeDecodeError as exc:
         raise CanonError(f"input is not valid UTF-8: {exc}") from exc
     try:
-        return json.loads(
+        parsed = json.loads(
             text,
             object_pairs_hook=_pairs_hook,
             parse_float=_reject_float,
@@ -114,3 +135,5 @@ def loads_strict(data: bytes) -> object:
         )
     except json.JSONDecodeError as exc:
         raise CanonError(f"invalid JSON: {exc}") from exc
+    _reject_surrogates(parsed)
+    return parsed

@@ -63,6 +63,27 @@ def test_loads_strict_rejects_floats_and_bad_utf8() -> None:
         canon.loads_strict(b'\xff{"a":1}')
 
 
+def test_dumps_rejects_lone_surrogate_value() -> None:
+    with pytest.raises(canon.CanonError):
+        canon.dumps({"a": "\ud800"})
+
+
+def test_canonical_bytes_rejects_lone_surrogate_value() -> None:
+    # Signing path: must raise CanonError, never a raw UnicodeEncodeError.
+    with pytest.raises(canon.CanonError):
+        canon.canonical_bytes({"a": "\ud800"})
+
+
+def test_dumps_rejects_lone_surrogate_key() -> None:
+    with pytest.raises(canon.CanonError):
+        canon.dumps({"\ud800": 1})
+
+
+def test_loads_strict_rejects_escaped_lone_surrogate() -> None:
+    with pytest.raises(canon.CanonError):
+        canon.loads_strict(b'{"a":"\\ud800"}')
+
+
 @given(
     st.recursive(
         st.none()
