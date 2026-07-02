@@ -131,7 +131,7 @@ requests must pass all 23 conformance vector leaves and keep both the Python and
 TypeScript suites green.
 
 **Contact.** Use GitHub Issues for technical bugs, GitHub Discussions for
-everything else, or email `<CONTACT_EMAIL>` (placeholder until publication).
+everything else, or email `svm.overspend656@8shield.net`.
 Security issues follow a different path — see [`SECURITY.md`](SECURITY.md), and
 do not open a public issue for a vulnerability.
 
