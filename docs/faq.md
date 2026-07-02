@@ -28,8 +28,8 @@ algorithm in the spec (§11): resolve the issuer's key material, check the
 signature and canonicalization, then layer in trust provenance and any
 revocation status. Two independent implementations — a Python reference
 implementation and a TypeScript verifier, built separately — already agree on
-every conformance vector, which is the strongest evidence that the algorithm
-itself is unambiguous rather than tied to one codebase's interpretation.
+every conformance vector, which is strong evidence that the algorithm itself is
+unambiguous rather than tied to one codebase's interpretation.
 
 ## Does this save my existing Steam / PlayStation / Kindle library?
 
