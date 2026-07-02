@@ -27,4 +27,12 @@ describe('commitment', () => {
     expect(() => computeCommitment('a@b.com', 'email', salt.slice(0, 8))).toThrow(/salt/)
     expect(() => computeCommitment('a', 'nope', salt)).toThrow(/identifier_type/)
   })
+  it('rejects NUL byte in normalized identifier (Python commitment.py parity)', () => {
+    expect(() => normalizeIdentifier('a\x00b@c.com', 'email')).toThrow(/0x00/)
+    expect(() => computeCommitment('a\x00b@c.com', 'email', salt)).toThrow(/0x00/)
+  })
+  it('accepts a plain ASCII space (only NUL is forbidden, matching Python)', () => {
+    expect(() => normalizeIdentifier('a b', 'issuer-account')).not.toThrow()
+    expect(normalizeIdentifier('a b', 'issuer-account')).toBe('a b')
+  })
 })

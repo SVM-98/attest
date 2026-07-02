@@ -20,7 +20,7 @@ export function normalizeIdentifier(identifier: string, identifierType: string):
   } else {
     norm = identifier.normalize('NFC') // issuer-account: NFC only, case preserved
   }
-  if (norm.includes(' ')) throw new Error('normalized identifier must not contain 0x00')
+  if (norm.includes('\x00')) throw new Error('normalized identifier must not contain 0x00')
   return norm
 }
 
