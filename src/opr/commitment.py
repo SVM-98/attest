@@ -39,8 +39,13 @@ def compute(identifier: str, identifier_type: str, salt: bytes) -> bytes:
     norm = normalize(identifier, identifier_type)
     password = LABEL_COMMITMENT + b"\x00" + identifier_type.encode() + b"\x00" + norm.encode()
     return hashlib.scrypt(
-        password, salt=salt, n=_SCRYPT_N, r=_SCRYPT_R, p=_SCRYPT_P,
-        maxmem=_SCRYPT_MAXMEM, dklen=_SCRYPT_DKLEN,
+        password,
+        salt=salt,
+        n=_SCRYPT_N,
+        r=_SCRYPT_R,
+        p=_SCRYPT_P,
+        maxmem=_SCRYPT_MAXMEM,
+        dklen=_SCRYPT_DKLEN,
     )
 
 

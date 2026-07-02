@@ -375,3 +375,82 @@ def test_disclose_raises_when_no_key_manifest_matches_signing_kid(tmp_path: Path
     with pytest.raises(bundle.BundleError):
         # No manifests at all -> nothing lists the signing kid.
         bundle.disclose([envelope], [], {receipt_id: SALT_A}, receipt_id, tmp_path)
+
+
+# --- import: decompression size-cap (zip-bomb hardening) ----------------------
+
+
+def _make_raw_zip(tmp_path: Path, members: dict[str, bytes], name: str) -> Path:
+    """Build a raw .oprx-shaped zip with arbitrary members, bypassing export()
+    — used to craft hostile bundles export() would never produce."""
+    path = tmp_path / name
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for member_name, data in members.items():
+            zf.writestr(member_name, data)
+    return path
+
+
+def test_import_rejects_member_over_per_member_cap(tmp_path: Path) -> None:
+    """A single member that decompresses past max_member_bytes is refused.
+    This verifies the per-member cap is enforced from bytes actually
+    streamed out of the member, independent of the entry's declared
+    `file_size` header — `zipfile.writestr` always writes a truthful header,
+    so this test cannot construct a genuinely forged low-lying one; that
+    case is out of scope here because stdlib `zipfile`'s writer has no way
+    to emit it."""
+    bomb = _make_raw_zip(
+        tmp_path, {"receipts/bomb.opr.json": b"\0" * (2 * 1024 * 1024)}, "bomb.oprx"
+    )
+    with pytest.raises(bundle.BundleError):
+        bundle.import_bundle(bomb, max_member_bytes=1024, max_total_bytes=10 * 1024 * 1024)
+
+
+def test_import_rejects_honestly_declared_oversize_via_early_gate(tmp_path: Path) -> None:
+    """Members whose DECLARED uncompressed total exceeds the aggregate cap are
+    rejected by the zero-cost early gate before any decompression."""
+    z = _make_raw_zip(
+        tmp_path,
+        {
+            "receipts/a.opr.json": b"\0" * (1024 * 1024),
+            "receipts/b.opr.json": b"\0" * (1024 * 1024),
+        },
+        "aggregate.oprx",
+    )
+    with pytest.raises(bundle.BundleError):
+        bundle.import_bundle(z, max_member_bytes=10 * 1024 * 1024, max_total_bytes=1024)
+
+
+def test_import_rejects_too_many_entries(tmp_path: Path) -> None:
+    """A central directory with more entries than max_entries is refused
+    before anything is read."""
+    many = {f"receipts/{i:04d}.opr.json": b"{}" for i in range(50)}
+    z = _make_raw_zip(tmp_path, many, "manyentries.oprx")
+    with pytest.raises(bundle.BundleError):
+        bundle.import_bundle(z, max_entries=10)
+
+
+def test_import_caps_private_salts_json(tmp_path: Path) -> None:
+    """The .private.oprx salts.json read is capped too — a valid .oprx paired
+    with a bomb private file is refused."""
+    envelope = _envelope(receipt_id="01J1V5B4M9Z8QWERTY12345691")
+    oprx_path, _private = bundle.export(
+        [envelope], [_key_manifest()], [], _legal_texts(), tmp_path, "mylibrary"
+    )
+    evil_private = _make_raw_zip(
+        tmp_path, {"salts.json": b"\0" * (2 * 1024 * 1024)}, "evil.private.oprx"
+    )
+    with pytest.raises(bundle.BundleError):
+        # 256 KiB cap: comfortably above every legit .oprx member, far below the
+        # 2 MiB salts bomb, so the failure is the salts file, not the .oprx.
+        bundle.import_bundle(oprx_path, evil_private, max_member_bytes=256 * 1024)
+
+
+def test_import_happy_path_unaffected_by_default_caps(tmp_path: Path) -> None:
+    """Regression: a normal exported bundle imports fine under default caps —
+    the caps are invisible to legitimate bundles."""
+    envelope = _envelope(receipt_id="01J1V5B4M9Z8QWERTY12345690")
+    oprx_path, private_path = bundle.export(
+        [envelope], [_key_manifest()], [], _legal_texts(), tmp_path, "mylibrary"
+    )
+    imported = bundle.import_bundle(oprx_path, private_path)
+    assert len(imported.receipts) == 1
