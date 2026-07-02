@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import stat
 from pathlib import Path
 from typing import Any
@@ -305,6 +306,34 @@ def test_inspect_no_warning_when_no_salt_present(tmp_path: Path, capsys: CapSys)
     assert result["warnings"] == []
 
 
+def test_inspect_redacts_the_salt_value_from_stdout(tmp_path: Path, capsys: CapSys) -> None:
+    """The raw buyer-binding secret must never appear in `inspect` output —
+    an operator pasting it into a ticket/Slack/shell-history would leak the
+    very secret `inspect` warns about. The warning still fires; the value is
+    replaced by a redaction placeholder, and the on-disk file is untouched."""
+    seed, _pub = _keygen(tmp_path, "issuer")
+    payload_path = _write_payload(tmp_path)
+    raw_salt = bytes(range(16))
+    salt_b64u = keys.b64u(raw_salt)
+    salt_path = _write_salt_file(tmp_path, "salt.b64u", raw_salt)
+    envelope_path = _issue(tmp_path, seed, payload_path, salt=salt_path)
+
+    capsys.readouterr()
+    rc = cli.main(["inspect", str(envelope_path)])
+    stdout = capsys.readouterr().out
+    result = json.loads(stdout)
+
+    assert rc == 0
+    # The raw secret must not be anywhere in what was printed.
+    assert salt_b64u not in stdout
+    assert result["envelope"]["delivery"]["salt"] != salt_b64u
+    # ...but the warning about salt presence must still fire.
+    assert any("salt" in w for w in result["warnings"])
+    # ...and the on-disk file must be untouched (still carries the real salt).
+    on_disk = json.loads(envelope_path.read_text(encoding="utf-8"))
+    assert on_disk["delivery"]["salt"] == salt_b64u
+
+
 # --- issue: --salt / --salt-out ---------------------------------------------
 
 
@@ -332,6 +361,32 @@ def test_issue_salt_out_writes_the_same_salt_with_0600_perms(tmp_path: Path) -> 
     assert salt_out_path.read_text(encoding="utf-8").strip() == keys.b64u(raw_salt)
     mode = stat.S_IMODE(salt_out_path.stat().st_mode)
     assert mode == 0o600
+
+
+def test_issue_salt_bearing_envelope_out_file_is_0600(tmp_path: Path) -> None:
+    """A `--out` envelope that embeds `delivery.salt` carries the same secret
+    as the `--salt-out` copy and must be locked down identically (0600), not
+    left world-readable at the default umask."""
+    seed, _pub = _keygen(tmp_path, "issuer")
+    payload_path = _write_payload(tmp_path)
+    raw_salt = bytes(range(16))
+    salt_path = _write_salt_file(tmp_path, "salt.b64u", raw_salt)
+
+    envelope_path = _issue(tmp_path, seed, payload_path, salt=salt_path)
+
+    assert oct(os.stat(envelope_path).st_mode)[-3:] == "600"
+
+
+def test_issue_saltless_envelope_out_file_keeps_default_perms(tmp_path: Path) -> None:
+    """A saltless envelope carries no secret, so it need not be 0600 — it
+    should be created with normal (default-umask) permissions, i.e. NOT the
+    restrictive owner-only mode a salt-bearing file gets."""
+    seed, _pub = _keygen(tmp_path, "issuer")
+    payload_path = _write_payload(tmp_path)
+
+    envelope_path = _issue(tmp_path, seed, payload_path)
+
+    assert oct(os.stat(envelope_path).st_mode)[-3:] != "600"
 
 
 def test_issue_salt_out_without_salt_is_usage_error(tmp_path: Path, capsys: CapSys) -> None:
