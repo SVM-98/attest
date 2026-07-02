@@ -1,0 +1,53 @@
+{
+  "buyer": {
+    "commitment": "Xi_Lo3j4HWtbvg_8ehNpgbqIZXtg6LQ-SXMlPjrJBOY",
+    "identifier_type": "issuer-account",
+    "pubkey": "7UkoxijRwsbq6QM4kFmVYSlZJzpcY_k2NsFGFKyHN9E"
+  },
+  "issued_at": "2025-07-02T13:50:00Z",
+  "issuer": {
+    "display_name": "Example Games Store",
+    "id": "store.example.com"
+  },
+  "license": {
+    "drm": "drm-bound",
+    "grant": "perpetual",
+    "jurisdiction_flags": {
+      "eu_usedsoft_asserted": false
+    },
+    "legal_text_sha256": "fd626193eb454bce229584a139d223f8e15f2b0c4693739b81fa31ea330d6bc2",
+    "revocability": "refund_window",
+    "revocation_window_days": 14,
+    "terms_uri": "https://store.example.com/opr/license-templates/standard-v1",
+    "transferable": false
+  },
+  "opr_version": "0.1",
+  "receipt_id": "01JZ5PDHT0000G40R40M30E209",
+  "supersedes": "01J1V5B4M9Z8QWERTY12345678",
+  "survivability": {
+    "end_of_life": "escrow",
+    "eol_commitment_sha256": "834351fc4e424ccf654598ad80939613566d3e41fdfe9b5c61f7eede6243f834",
+    "eol_commitment_uri": "https://store.example.com/opr/eol-commitment-v1",
+    "mirror_policy_sha256": "17ee1b3fc41e1e683de2017988602aa567a244901e3665c4ffecf81e8f2f26d5",
+    "mirror_policy_uri": "https://store.example.com/opr/mirror-policy-v1",
+    "redownload_right": true
+  },
+  "work": {
+    "artifact_series": "store.example.com/works/EXG-001",
+    "artifacts": [
+      {
+        "filename": "example-game-1.0-setup.exe",
+        "platform": "windows-x86_64",
+        "role": "installer",
+        "sha256": "265afa7622f09842258fe8a6ea0ed33ce274f4b308501ceb664b8024f6ebdac0",
+        "size_bytes": 734003200
+      }
+    ],
+    "edition": "Deluxe",
+    "identifiers": {
+      "issuer_sku": "EXG-001"
+    },
+    "publisher": "Example Publisher srl",
+    "title": "Example Game"
+  }
+}

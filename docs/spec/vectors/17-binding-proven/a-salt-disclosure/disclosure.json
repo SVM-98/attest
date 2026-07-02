@@ -1,0 +1,5 @@
+{
+  "identifier": "buyer-001",
+  "identifier_type": "issuer-account",
+  "salt_b64u": "AAECAwQFBgcICQoLDA0ODw"
+}
