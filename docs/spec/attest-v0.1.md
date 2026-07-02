@@ -13,6 +13,8 @@ Passages introduced with **Non-normative note:** are explanatory or historical c
 
 ## 2. Scope
 
+**Non-normative note:** attest is a standard for universal digital purchase receipts — games, music, film, TV, and books. DRM-free PC gaming is the adoption wedge for the reference implementation and initial conformance vectors, not a boundary on the scope defined below; nothing in this specification restricts a receipt to any single medium.
+
 attest v0.1 defines: a signed receipt envelope and payload format; a restricted JSON canonicalization profile; a pinned Ed25519 signing/verification ruleset; a buyer-binding commitment scheme; issuer key and artifact manifest formats with rotation and compromise rules; a layered verification algorithm; revocation-record semantics; and two export bundle formats.
 
 The following are explicitly **out of scope** for v0.1 and MUST NOT be assumed by a conforming implementation:
