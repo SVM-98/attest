@@ -30,6 +30,10 @@ Vector-directory conventions (a "vector case" is any directory containing
     (manifest-tamper) — the untampered, self-consistent manifest, checked
     directly against the tampered copy in `manifests.json` via
     `manifests.verify_key_manifest()`.
+  - optional `revocation.json` (Fase 2, vectors 15/16): a single issuer-signed
+    revocation record, fed to `verify()` as `revocation_view=[record]`.
+    Vectors 14/14b (Fase 2) need no new file — they populate `manifests.json`'s
+    already-reserved `"chains"` member instead.
 """
 
 from __future__ import annotations
@@ -72,6 +76,13 @@ def _trust_store(vector_dir: Path) -> verify.TrustStore:
     )
 
 
+def _revocation_view(vector_dir: Path) -> list[dict[str, Any]] | None:
+    path = vector_dir / "revocation.json"
+    if not path.exists():
+        return None
+    return [_load_json(path)]
+
+
 def _disclosure(vector_dir: Path) -> verify.Disclosure | None:
     path = vector_dir / "disclosure.json"
     if not path.exists():
@@ -94,8 +105,11 @@ def test_vector_matches_spec_intended_result(vector_dir: Path) -> None:
     envelope_bytes = _envelope_bytes(vector_dir)
     trust_store = _trust_store(vector_dir)
     disclosure = _disclosure(vector_dir)
+    revocation_view = _revocation_view(vector_dir)
 
-    result = verify.verify(envelope_bytes, trust_store, disclosure=disclosure)
+    result = verify.verify(
+        envelope_bytes, trust_store, revocation_view=revocation_view, disclosure=disclosure
+    )
 
     assert result.signature == expected["signature"]
     assert result.schema == expected["schema"]
@@ -139,4 +153,5 @@ def test_manifest_tamper_breaks_self_consistency(vector_dir: Path) -> None:
 def test_vectors_directory_is_nonempty() -> None:
     """Guard against a silently-empty parametrize list (e.g. a wrong
     `VECTORS_DIR` path) making the whole suite above vacuously pass."""
-    assert len(_VECTOR_DIRS) >= 11
+    # 14 Fase 1 leaves (07/09 multi-part) + 9 Fase 2 leaves (14/14b + 15-16 + 17 a/b + 18).
+    assert len(_VECTOR_DIRS) >= 23

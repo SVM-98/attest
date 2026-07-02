@@ -1,4 +1,5 @@
-"""Generate the OPR v0.1 language-neutral conformance vectors (design §11 Fase 1).
+"""Generate the OPR v0.1 language-neutral conformance vectors (design §11,
+Fase 1 vectors 1-11 plus Fase 2 lifecycle/policy vectors 12-18).
 
 Deterministic by construction: every keypair, salt, timestamp and ULID
 randomness source below is a FIXED constant — no wall-clock reads
@@ -25,11 +26,29 @@ holds:
     `warnings_contains`.
   - optional `disclosure.json` — `{"identifier", "identifier_type",
     "salt_b64u"}` (salt path) or `{"nonce_b64u", "sig_b64u"}` (challenge
-    path) for the §6 step 7 binding check (vector 09).
+    path) for the §6 step 7 binding check (vector 09, and Fase 2 vector 17).
   - optional `manifest_pristine.json` — only for vector 11 (manifest-tamper):
     the untampered, self-consistent manifest, so the replay test can also
     assert the self-consistency delta directly via
     `manifests.verify_key_manifest()`.
+
+Fase 2 (lifecycle/policy, vectors 12-18, design §11) additions to the format
+above, following the same fixed-input determinism discipline:
+
+  - optional `revocation.json` — a single issuer-signed revocation record
+    (`opr.revocation.build_record()` output), fed to the replay test as
+    `revocation_view=[record]` (vectors 15, 16). Per the Task 9 hardening, a
+    record only authenticates if signed by a key that is `active` in the
+    issuer manifest with a `[valid_from, valid_to]` window covering the
+    record's own `revoked_at` — every revocation.json shipped here satisfies
+    that, checked with a generator-time `revocation.verify_record()` assert.
+  - `manifests.json`'s `"chains"` member (always present, empty `{}` by
+    default since Task 10) is populated for vectors 14/14b:
+    `{issuer_id: [manifest_v1, manifest_v2]}`, oldest first, ending with the
+    same manifest keyed under `"manifests"` for that issuer — exactly the
+    shape `verify.TrustStore.chains` and the replay test's `_trust_store()`
+    already consume. No new file convention needed; Task 10 already reserved
+    this field, just never populated it.
 """
 
 from __future__ import annotations
@@ -42,7 +61,7 @@ import unicodedata
 from pathlib import Path
 from typing import Any
 
-from opr import canon, commitment, issue, keys, manifests, ulid, validate
+from opr import canon, commitment, issue, keys, manifests, revocation, ulid, validate
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 VECTORS_DIR = REPO_ROOT / "docs" / "spec" / "vectors"
@@ -88,6 +107,34 @@ PRIOR_RECEIPT_ID = "01J1V5B4M9Z8QWERTY12345678"  # design §3.1 example, reused 
 INT_MAX_ACCEPTED = 2**53 - 1  # I-JSON safe range boundary (design §3.1, canon.py _INT_MAX)
 INT_MAX_REJECTED = 2**53
 
+# --- Fase 2 (lifecycle/policy, vectors 12-18) additional fixed inputs ------
+#
+# Continuing the seed numbering already used above (1=issuer, 2=wrong-key,
+# 3=buyer-pubkey, 9=evil-issuer): 4 and 5 are new keys needed only for the
+# rotation-continuity vectors (12/13/15/16/17/18 all reuse ISSUER_KP/ISSUER_KID
+# under a different manifest `status`, or ISSUER_KP's existing signature — no
+# new key material needed for those).
+
+ROTATED_KEY_SEED = bytes([4]) * 32  # the genuinely new key introduced by rotation (vector 14)
+ROGUE_KEY_SEED = bytes([5]) * 32  # a key never active in the trusted root (vector 14b)
+
+ROTATED_KP = keys.from_seed(ROTATED_KEY_SEED)
+ROGUE_KP = keys.from_seed(ROGUE_KEY_SEED)
+
+ROTATION_ISSUED_AT = "2025-04-01T00:00:00Z"  # v2 manifest issued_at / old key's retirement valid_to
+ROTATED_KID = f"{ISSUER_ID}/keys/2025-04#ed25519-2"
+# ROGUE_KID: same domain (passes the step-2 domain match) but never listed in v1.
+ROGUE_KID = f"{ISSUER_ID}/keys/2025-04#ed25519-3"
+
+# within both ROTATED_KP's and ROGUE_KP's validity window
+RECEIPT_ISSUED_AFTER_ROTATION = "2025-05-01T00:00:00Z"
+
+# revocation record timestamp (vectors 15, 16); within ISSUER_KID's open-ended validity
+REVOKED_AT = "2025-08-01T00:00:00Z"
+
+# 16 fixed bytes, distinct from SALT (bytes(range(16))) — vector 17b
+CHALLENGE_NONCE = bytes(range(32, 48))
+
 
 # --- generic helpers --------------------------------------------------------
 
@@ -111,12 +158,21 @@ def _manifest_material(
 
 def _trust_material(
     *issuer_manifest_provenance: tuple[str, dict[str, Any], str],
+    chains: dict[str, list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
-    """Assemble a `manifests.json` payload from `(issuer_id, manifest, provenance)` triples."""
+    """Assemble a `manifests.json` payload from `(issuer_id, manifest, provenance)` triples.
+
+    `chains`, when supplied, is embedded verbatim under `"chains"` — the same
+    shape `verify.TrustStore.chains` and the replay test's `_trust_store()`
+    already expect (design §5/§7.3): `{issuer_id: [manifest_v1, manifest_v2,
+    ...]}`, oldest first, ending with the same manifest passed under
+    `manifests` for that issuer. Only vectors 14/14b populate it; every other
+    vector keeps the Task-10 default of an empty `chains` object.
+    """
     return {
         "manifests": {issuer: manifest for issuer, manifest, _ in issuer_manifest_provenance},
         "provenance": {issuer: prov for issuer, _, prov in issuer_manifest_provenance},
-        "chains": {},
+        "chains": chains if chains is not None else {},
     }
 
 
@@ -156,7 +212,8 @@ def _assert_schema_valid(payload: dict[str, Any]) -> None:
 def write_vector(name: str, *, payload: dict[str, Any] | None, envelope: dict[str, Any] | None,
                   envelope_raw: bytes | None, trust: dict[str, Any], expected: dict[str, Any],
                   disclosure: dict[str, Any] | None = None,
-                  manifest_pristine: dict[str, Any] | None = None) -> None:
+                  manifest_pristine: dict[str, Any] | None = None,
+                  revocation_record: dict[str, Any] | None = None) -> None:
     vector_dir = VECTORS_DIR / name
     if payload is not None:
         _write_json(vector_dir / "payload.json", payload)
@@ -170,6 +227,8 @@ def write_vector(name: str, *, payload: dict[str, Any] | None, envelope: dict[st
         _write_json(vector_dir / "disclosure.json", disclosure)
     if manifest_pristine is not None:
         _write_json(vector_dir / "manifest_pristine.json", manifest_pristine)
+    if revocation_record is not None:
+        _write_json(vector_dir / "revocation.json", revocation_record)
 
 
 # --- vector 01: valid-minimal ------------------------------------------------
@@ -573,6 +632,318 @@ def gen_11_manifest_tamper() -> None:
                  trust=trust, expected=expected, manifest_pristine=pristine_manifest)
 
 
+# --- vector 12: retired-key-ok ------------------------------------------------
+
+
+def gen_12_retired_key_ok() -> None:
+    """A receipt genuinely signed while `ISSUER_KID` was `active`, verified
+    against a trust-store manifest where that same key is now `retired`
+    (design §7.3: "Receipts signed while a key was active remain valid after
+    that key is later retired"). `verify()` step 3 only rejects on
+    `compromised`; `retired` continues verification but MUST emit a warning
+    (§11.2) — this vector is that warning path, distinct from vector 13
+    (compromised) which rejects outright."""
+    payload = issue.build_payload(**_base_payload_kwargs())
+    _assert_schema_valid(payload)
+    envelope = issue.issue(payload, ISSUER_KP, ISSUER_KID)
+    manifest = _manifest_material(ISSUER_ID, ISSUER_KID, ISSUER_KP, status="retired")
+    trust = _trust_material((ISSUER_ID, manifest, "tls"))
+    expected = {
+        "signature": "valid",
+        "schema": "valid",
+        "revocation": "unknown",
+        "binding": "not_checked",
+        "trust": "verified",
+        "ok": True,
+        "errors": [],
+        "warnings_contains": ["retired"],
+    }
+    write_vector("12-retired-key-ok", payload=payload, envelope=envelope, envelope_raw=None,
+                 trust=trust, expected=expected)
+
+
+# --- vector 13: compromised-key -------------------------------------------------
+
+
+def gen_13_compromised_key() -> None:
+    """A receipt genuinely signed by `ISSUER_KID`, verified against a
+    trust-store manifest where that key is now `compromised`. Unlike vector
+    11 (manifest-tamper, where the manifest's OWN signature breaks because a
+    field was mutated post-signing), this manifest is fully self-consistent
+    — it is the ordinary, honestly-authored lifecycle state an issuer
+    publishes after a real compromise. §7.3 / §11 step 3: `compromised`
+    fails closed unconditionally, checked BEFORE the `issued_at`-in-window
+    test in `verify.py` — so rejection here does not depend on `issued_at`
+    at all, which is the concrete evidence for "ALL its signatures invalid
+    regardless of issued_at" (design §11 vector 13)."""
+    payload = issue.build_payload(**_base_payload_kwargs())
+    _assert_schema_valid(payload)
+    envelope = issue.issue(payload, ISSUER_KP, ISSUER_KID)  # genuinely signed while active
+    manifest = _manifest_material(ISSUER_ID, ISSUER_KID, ISSUER_KP, status="compromised")
+    assert manifests.verify_key_manifest(manifest) is True  # self-consistent, unlike vector 11
+    trust = _trust_material((ISSUER_ID, manifest, "tls"))
+    expected = {
+        "signature": "invalid",
+        "schema": "not_checked",
+        "revocation": "unknown",
+        "binding": "not_checked",
+        "trust": "verified",
+        "ok": False,
+        "errors_contains": ["compromised"],
+        "warnings": [],
+    }
+    write_vector("13-compromised-key", payload=payload, envelope=envelope, envelope_raw=None,
+                 trust=trust, expected=expected)
+
+
+# --- vector 14 / 14b: rotation continuity / discontinuity -----------------------
+
+
+def gen_14_rotation_continuity() -> None:
+    """A two-manifest chain: v1 (`ISSUER_KID` sole active key) -> v2, where v2
+    introduces a genuinely NEW active key (`ROTATED_KID`) and retires the old
+    one, but v2 is itself signed by the OLD key — the standard "old key
+    signs off on the new one" handoff (design §7.3). `manifests.check_continuity`
+    requires the signer to be `active` in the TRUSTED (v1) manifest; it is,
+    so the chain is continuous and `trust` stays at its provenance-derived
+    value (`verified`, since provenance is `tls`) rather than being forced
+    to `unverified_rotation`. The receipt itself is issued by the NEW key,
+    proving verification correctly resolves against the CURRENT (v2) manifest."""
+    v1 = _manifest_material(ISSUER_ID, ISSUER_KID, ISSUER_KP)  # version 1, sole active key
+    entries_v2 = [
+        manifests.key_entry(
+            ISSUER_KID, ISSUER_KP.pub, KEY_VALID_FROM, ROTATION_ISSUED_AT, "retired"
+        ),
+        manifests.key_entry(ROTATED_KID, ROTATED_KP.pub, ROTATION_ISSUED_AT, None, "active"),
+    ]
+    v2 = manifests.build_key_manifest(
+        ISSUER_ID, 2, ROTATION_ISSUED_AT, entries_v2, ISSUER_KP, ISSUER_KID
+    )
+    assert manifests.check_continuity(v1, v2) is True
+
+    payload = issue.build_payload(**_base_payload_kwargs(issued_at=RECEIPT_ISSUED_AFTER_ROTATION))
+    _assert_schema_valid(payload)
+    envelope = issue.issue(payload, ROTATED_KP, ROTATED_KID)
+
+    trust = _trust_material((ISSUER_ID, v2, "tls"), chains={ISSUER_ID: [v1, v2]})
+    expected = {
+        "signature": "valid",
+        "schema": "valid",
+        "revocation": "unknown",
+        "binding": "not_checked",
+        "trust": "verified",
+        "ok": True,
+        "errors": [],
+        "warnings": [],
+    }
+    write_vector("14-rotation-continuity", payload=payload, envelope=envelope, envelope_raw=None,
+                 trust=trust, expected=expected)
+
+
+def gen_14b_rotation_discontinuous() -> None:
+    """Same v1 root as vector 14, but the candidate v2 is signed by
+    `ROGUE_KID` — a key that is never listed, active or otherwise, in v1.
+    `manifests.check_continuity` looks up the CANDIDATE's signer inside the
+    TRUSTED manifest's own keys; that lookup misses, so the chain is
+    discontinuous (design §7.3: "if intermediates are unavailable, the
+    manifest MUST be treated as reached via a discontinuous rotation").
+    `verify()` forces `trust: "unverified_rotation"`, overriding provenance,
+    even though the receipt's own signature (by `ROGUE_KID`, which IS active
+    in the CURRENT/v2 manifest actually used to resolve it) verifies cleanly
+    — `trust` is not one of the four components `VerificationResult.ok`
+    checks (§11.1: signature/schema/revocation/errors only), so `ok` stays
+    `True` by explicit spec definition: this is a trust *downgrade* signal
+    for the caller to act on, not a rejection. (Mirrors the existing
+    `test_rotation_discontinuous_chain_yields_unverified_rotation` unit test
+    in `tests/test_verify.py`.)"""
+    v1 = _manifest_material(ISSUER_ID, ISSUER_KID, ISSUER_KP)  # same root as vector 14
+    rogue_entries = [
+        manifests.key_entry(ROGUE_KID, ROGUE_KP.pub, ROTATION_ISSUED_AT, None, "active")
+    ]
+    v2_rogue = manifests.build_key_manifest(
+        ISSUER_ID, 2, ROTATION_ISSUED_AT, rogue_entries, ROGUE_KP, ROGUE_KID
+    )
+    assert manifests.check_continuity(v1, v2_rogue) is False  # signer absent from the trusted root
+
+    payload = issue.build_payload(**_base_payload_kwargs(issued_at=RECEIPT_ISSUED_AFTER_ROTATION))
+    _assert_schema_valid(payload)
+    envelope = issue.issue(payload, ROGUE_KP, ROGUE_KID)
+
+    trust = _trust_material((ISSUER_ID, v2_rogue, "tls"), chains={ISSUER_ID: [v1, v2_rogue]})
+    expected = {
+        "signature": "valid",
+        "schema": "valid",
+        "revocation": "unknown",
+        "binding": "not_checked",
+        "trust": "unverified_rotation",
+        "ok": True,
+        "errors": [],
+        "warnings": [],
+    }
+    write_vector("14b-rotation-discontinuous", payload=payload, envelope=envelope,
+                 envelope_raw=None, trust=trust, expected=expected)
+
+
+# --- vector 15: revoked-policy ---------------------------------------------------
+
+
+def gen_15_revoked_policy() -> None:
+    """A `revocability: "policy"` receipt plus an authenticated, matching
+    revocation record: per §12.2, `policy` honors an effective record as-is
+    -> `revocation: "revoked"`, `ok: False`. The record is signed by
+    `ISSUER_KID` while it is `active` with a `[valid_from, valid_to]` window
+    covering `REVOKED_AT` — the Task 9 hardening
+    (`revocation.verify_record`, mirroring `manifests.verify_artifact_manifest`)
+    requires exactly this or the record is silently ignored; the generator
+    asserts `verify_record` is True so a future regression here fails loudly
+    at generation time, not just at replay time."""
+    payload = issue.build_payload(**_base_payload_kwargs(revocability="policy"))
+    _assert_schema_valid(payload)
+    envelope = issue.issue(payload, ISSUER_KP, ISSUER_KID)
+    issuer_manifest = _manifest_material(ISSUER_ID, ISSUER_KID, ISSUER_KP)
+    trust = _trust_material((ISSUER_ID, issuer_manifest, "tls"))
+    record = revocation.build_record(RECEIPT_ID, "revoked", REVOKED_AT, ISSUER_KP, ISSUER_KID)
+    assert revocation.verify_record(record, issuer_manifest) is True
+    expected = {
+        "signature": "valid",
+        "schema": "valid",
+        "revocation": "revoked",
+        "binding": "not_checked",
+        "trust": "verified",
+        "ok": False,
+        "errors": [],
+        "warnings": [],
+    }
+    write_vector("15-revoked-policy", payload=payload, envelope=envelope, envelope_raw=None,
+                 trust=trust, expected=expected, revocation_record=record)
+
+
+# --- vector 16: revocation-against-none-ignored ----------------------------------
+
+
+def gen_16_revocation_against_none_ignored() -> None:
+    """A `revocability: "none"` receipt (the `_base_payload_kwargs()` default)
+    plus an authenticated, matching revocation record: §6.2 / §12.2's
+    irrevocability guarantee means the record itself is treated as invalid —
+    `revocation: "invalid_revocation_ignored"`, a warning is emitted, and the
+    receipt's `ok` is UNAFFECTED (`True`). Without this rule the revocation
+    mechanism would falsify every `revocability: "none"` receipt's own
+    claim (design vector 16 is exactly this regression test)."""
+    payload = issue.build_payload(**_base_payload_kwargs())  # revocability defaults to "none"
+    _assert_schema_valid(payload)
+    envelope = issue.issue(payload, ISSUER_KP, ISSUER_KID)
+    issuer_manifest = _manifest_material(ISSUER_ID, ISSUER_KID, ISSUER_KP)
+    trust = _trust_material((ISSUER_ID, issuer_manifest, "tls"))
+    record = revocation.build_record(RECEIPT_ID, "revoked", REVOKED_AT, ISSUER_KP, ISSUER_KID)
+    assert revocation.verify_record(record, issuer_manifest) is True  # authenticated, but ignored
+    expected = {
+        "signature": "valid",
+        "schema": "valid",
+        "revocation": "invalid_revocation_ignored",
+        "binding": "not_checked",
+        "trust": "verified",
+        "ok": True,
+        "errors": [],
+        "warnings_contains": ["revocability is 'none'"],
+    }
+    write_vector("16-revocation-against-none-ignored", payload=payload, envelope=envelope,
+                 envelope_raw=None, trust=trust, expected=expected, revocation_record=record)
+
+
+# --- vector 17: binding-proven (two sub-cases) -----------------------------------
+
+
+def gen_17_binding_proven() -> None:
+    """§8/§11 step 7 buyer binding, both proof paths (design vector 17):
+
+    (a) salt disclosure — `(identifier, identifier_type, salt)` recomputes
+    `buyer.commitment`; a clean minimal-receipt case (the default
+    `_base_payload_kwargs()` identity), isolating the binding proof itself
+    from the normalization edge cases already covered by vector 09.
+
+    (b) pubkey challenge-response — `buyer.pubkey` is populated at issuance;
+    the disclosure carries `(nonce, sig)` where `sig` is the buyer's own
+    Ed25519 signature (§8.2) over the fixed challenge transcript, proving
+    possession of the private key without ever revealing an identifier.
+    Neither vectors 01-16 nor vector 09 exercise this path — vector 09 only
+    ever populates the salt path."""
+    # (a) salt disclosure
+    payload_a = issue.build_payload(**_base_payload_kwargs())
+    _assert_schema_valid(payload_a)
+    envelope_a = issue.issue(payload_a, ISSUER_KP, ISSUER_KID)
+    trust = _issuer_only_trust()
+    disclosure_a = {
+        "identifier": "buyer-001",  # matches _base_payload_kwargs()'s buyer_identifier default
+        "identifier_type": "issuer-account",
+        "salt_b64u": keys.b64u(SALT),
+    }
+    expected_a = {
+        "signature": "valid",
+        "schema": "valid",
+        "revocation": "unknown",
+        "binding": "proven",
+        "trust": "verified",
+        "ok": True,
+        "errors": [],
+        "warnings": [],
+    }
+    write_vector("17-binding-proven/a-salt-disclosure", payload=payload_a, envelope=envelope_a,
+                 envelope_raw=None, trust=trust, expected=expected_a, disclosure=disclosure_a)
+
+    # (b) pubkey challenge-response transcript
+    payload_b = issue.build_payload(**_base_payload_kwargs(buyer_pubkey=BUYER_KP.pub))
+    _assert_schema_valid(payload_b)
+    envelope_b = issue.issue(payload_b, ISSUER_KP, ISSUER_KID)
+    receipt_id_b = payload_b["receipt_id"]
+    challenge_sig = commitment.sign_challenge(receipt_id_b, CHALLENGE_NONCE, BUYER_KP)
+    assert commitment.verify_challenge(receipt_id_b, CHALLENGE_NONCE, challenge_sig, BUYER_KP.pub)
+    disclosure_b = {
+        "nonce_b64u": keys.b64u(CHALLENGE_NONCE),
+        "sig_b64u": keys.b64u(challenge_sig),
+    }
+    expected_b = {
+        "signature": "valid",
+        "schema": "valid",
+        "revocation": "unknown",
+        "binding": "proven",
+        "trust": "verified",
+        "ok": True,
+        "errors": [],
+        "warnings": [],
+    }
+    write_vector("17-binding-proven/b-pubkey-challenge", payload=payload_b, envelope=envelope_b,
+                 envelope_raw=None, trust=trust, expected=expected_b, disclosure=disclosure_b)
+
+
+# --- vector 18: drm-bound ---------------------------------------------------------
+
+
+def gen_18_drm_bound() -> None:
+    """`license.drm == "drm-bound"` MUST verify green but MUST carry a
+    mandatory warning (§5.5, §11.2) — a receipt never removes DRM and this
+    specification never claims it does. `revocability` is bumped off the
+    schema default `"none"` to `"policy"` purely because §6.1's conditional
+    requires `drm == "drm-free"` when `revocability == "none"`; `"policy"`
+    carries no such constraint, so this is the minimal change that keeps the
+    payload schema-valid while setting `drm: "drm-bound"`."""
+    payload = issue.build_payload(**_base_payload_kwargs(revocability="policy", drm="drm-bound"))
+    _assert_schema_valid(payload)
+    envelope = issue.issue(payload, ISSUER_KP, ISSUER_KID)
+    trust = _issuer_only_trust()
+    expected = {
+        "signature": "valid",
+        "schema": "valid",
+        "revocation": "unknown",
+        "binding": "not_checked",
+        "trust": "verified",
+        "ok": True,
+        "errors": [],
+        "warnings_contains": ["drm-bound"],
+    }
+    write_vector("18-drm-bound", payload=payload, envelope=envelope, envelope_raw=None,
+                 trust=trust, expected=expected)
+
+
 def main() -> None:
     shutil.rmtree(VECTORS_DIR, ignore_errors=True)
     VECTORS_DIR.mkdir(parents=True, exist_ok=True)
@@ -587,6 +958,14 @@ def main() -> None:
     gen_09_commitment()
     gen_10_unknown_field()
     gen_11_manifest_tamper()
+    gen_12_retired_key_ok()
+    gen_13_compromised_key()
+    gen_14_rotation_continuity()
+    gen_14b_rotation_discontinuous()
+    gen_15_revoked_policy()
+    gen_16_revocation_against_none_ignored()
+    gen_17_binding_proven()
+    gen_18_drm_bound()
     leaf_count = sum(1 for _ in VECTORS_DIR.rglob("expected.json"))
     print(f"generated {leaf_count} vector cases under {VECTORS_DIR}")
 
