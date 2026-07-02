@@ -1,1 +1,1 @@
-"""Demo scripts for OPR v0.1 — not part of the `opr` library or CLI."""
+"""Demo scripts for attest v0.1 — not part of the `attest` library or CLI."""

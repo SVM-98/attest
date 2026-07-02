@@ -1,5 +1,5 @@
-// Hand-rolled structural validator for the OPR v0.1 receipt payload schema
-// (docs/spec/schema/opr-receipt.schema.json). No JSON-Schema dependency: this
+// Hand-rolled structural validator for the attest v0.1 receipt payload schema
+// (docs/spec/schema/attest-receipt.schema.json). No JSON-Schema dependency: this
 // ports only the required/type/enum/pattern/conditional rules that schema
 // actually pins. `format: "uri"` is annotation-only in draft 2020-12 and is
 // deliberately NOT enforced here (Task 5 adjudication) -- we just require
@@ -7,7 +7,7 @@
 import type { JsonObject, JsonValue } from './canon.js'
 
 export const SCHEMA_TOP_LEVEL_KEYS: ReadonlySet<string> = new Set([
-  'opr_version',
+  'attest_version',
   'receipt_id',
   'issued_at',
   'supersedes',
@@ -204,8 +204,8 @@ function validateRevocabilityNoneConditional(payload: JsonObject, errors: string
 export function validatePayload(payload: JsonObject): string[] {
   const errors: string[] = []
 
-  if (check(errors, 'opr_version' in payload, 'opr_version: required')) {
-    check(errors, payload['opr_version'] === '0.1', "opr_version: must be the constant '0.1'")
+  if (check(errors, 'attest_version' in payload, 'attest_version: required')) {
+    check(errors, payload['attest_version'] === '0.1', "attest_version: must be the constant '0.1'")
   }
   if (check(errors, 'receipt_id' in payload, 'receipt_id: required')) {
     check(errors, typeof payload['receipt_id'] === 'string' && RECEIPT_ID_RE.test(payload['receipt_id']), 'receipt_id: must be a 26-char ULID')

@@ -1,6 +1,7 @@
 {
+  "attest_version": "0.1",
   "buyer": {
-    "commitment": "Xi_Lo3j4HWtbvg_8ehNpgbqIZXtg6LQ-SXMlPjrJBOY",
+    "commitment": "o9ryRDRXrndWeZUJVoMEXlx-cdktlWY3jozvTCqnkhw",
     "identifier_type": "issuer-account",
     "pubkey": null
   },
@@ -12,12 +13,11 @@
   "license": {
     "drm": "drm-free",
     "grant": "perpetual",
-    "legal_text_sha256": "fd626193eb454bce229584a139d223f8e15f2b0c4693739b81fa31ea330d6bc2",
+    "legal_text_sha256": "a9e875fe29704222a432410b0c160f5a2e5ef48effa8b51a5017c640e21c109c",
     "revocability": "none",
-    "terms_uri": "https://store.example.com/opr/license-templates/standard-v1",
+    "terms_uri": "https://store.example.com/attest/license-templates/standard-v1",
     "transferable": false
   },
-  "opr_version": "0.1",
   "receipt_id": "01JZ5PDHT0000G40R40M30E209",
   "supersedes": null,
   "survivability": {
@@ -33,7 +33,7 @@
         "filename": "example-game-1.0-setup.exe",
         "platform": "windows-x86_64",
         "role": "installer",
-        "sha256": "265afa7622f09842258fe8a6ea0ed33ce274f4b308501ceb664b8024f6ebdac0",
+        "sha256": "3f33b4d5852414a2de7bfbe6d2fafb054d5b4460d77b06b4d9273b4ed8b5fc3a",
         "size_bytes": 9007199254740991
       }
     ],

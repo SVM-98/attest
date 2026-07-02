@@ -14,7 +14,7 @@ describe('message contract', () => {
       M.ERR.MISSING_PAYLOAD, M.ERR.MISSING_SIGNATURES, M.ERR.MALFORMED_SIG_BLOCK,
       M.ERR.MALFORMED_SIG_BLOCK_TYPES, M.ERR.MISSING_ISSUER_ID,
       M.noKeyInManifest('store.example.com/keys/2025-01#ed25519-9'),
-      M.keyCompromised('kid'), M.keyRetired('kid'), M.duplicateKey('opr_version'),
+      M.keyCompromised('kid'), M.keyRetired('kid'), M.duplicateKey('attest_version'),
       M.intOutOfRange(9007199254740992n), M.unknownField('promo_code'),
       M.WARN.DRM_BOUND, M.WARN.REVOCABILITY_NONE_IGNORED,
     ].join('')

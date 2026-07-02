@@ -1,8 +1,8 @@
 import { scrypt } from '@noble/hashes/scrypt'
 import { verifyStrict } from './ed25519.js'
 
-const LABEL_COMMITMENT = 'OPR-buyer-commitment-v1'
-const LABEL_CHALLENGE = 'OPR-binding-challenge-v1'
+const LABEL_COMMITMENT = 'Attest-buyer-commitment-v1'
+const LABEL_CHALLENGE = 'Attest-binding-challenge-v1'
 const SCRYPT = { N: 32768, r: 8, p: 1, dkLen: 32 } as const // fixed, never configurable
 const IDENTIFIER_TYPES = new Set(['issuer-account', 'email'])
 

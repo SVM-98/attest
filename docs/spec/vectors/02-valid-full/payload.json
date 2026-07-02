@@ -1,6 +1,7 @@
 {
+  "attest_version": "0.1",
   "buyer": {
-    "commitment": "Xi_Lo3j4HWtbvg_8ehNpgbqIZXtg6LQ-SXMlPjrJBOY",
+    "commitment": "o9ryRDRXrndWeZUJVoMEXlx-cdktlWY3jozvTCqnkhw",
     "identifier_type": "issuer-account",
     "pubkey": "7UkoxijRwsbq6QM4kFmVYSlZJzpcY_k2NsFGFKyHN9E"
   },
@@ -15,21 +16,20 @@
     "jurisdiction_flags": {
       "eu_usedsoft_asserted": false
     },
-    "legal_text_sha256": "fd626193eb454bce229584a139d223f8e15f2b0c4693739b81fa31ea330d6bc2",
+    "legal_text_sha256": "a9e875fe29704222a432410b0c160f5a2e5ef48effa8b51a5017c640e21c109c",
     "revocability": "refund_window",
     "revocation_window_days": 14,
-    "terms_uri": "https://store.example.com/opr/license-templates/standard-v1",
+    "terms_uri": "https://store.example.com/attest/license-templates/standard-v1",
     "transferable": false
   },
-  "opr_version": "0.1",
   "receipt_id": "01JZ5PDHT0000G40R40M30E209",
   "supersedes": "01J1V5B4M9Z8QWERTY12345678",
   "survivability": {
     "end_of_life": "escrow",
-    "eol_commitment_sha256": "834351fc4e424ccf654598ad80939613566d3e41fdfe9b5c61f7eede6243f834",
-    "eol_commitment_uri": "https://store.example.com/opr/eol-commitment-v1",
-    "mirror_policy_sha256": "17ee1b3fc41e1e683de2017988602aa567a244901e3665c4ffecf81e8f2f26d5",
-    "mirror_policy_uri": "https://store.example.com/opr/mirror-policy-v1",
+    "eol_commitment_sha256": "80aca4243d66610ec6f0137cd36ae4c4b479f373b69f4a6eed7cc290b2f34629",
+    "eol_commitment_uri": "https://store.example.com/attest/eol-commitment-v1",
+    "mirror_policy_sha256": "5b5a33972bba0465fb0353befad4c666d95c4733c1c363b95eb76ce5c24b9f52",
+    "mirror_policy_uri": "https://store.example.com/attest/mirror-policy-v1",
     "redownload_right": true
   },
   "work": {
@@ -39,7 +39,7 @@
         "filename": "example-game-1.0-setup.exe",
         "platform": "windows-x86_64",
         "role": "installer",
-        "sha256": "265afa7622f09842258fe8a6ea0ed33ce274f4b308501ceb664b8024f6ebdac0",
+        "sha256": "3f33b4d5852414a2de7bfbe6d2fafb054d5b4460d77b06b4d9273b4ed8b5fc3a",
         "size_bytes": 734003200
       }
     ],

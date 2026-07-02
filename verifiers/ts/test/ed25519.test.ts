@@ -5,7 +5,7 @@ import { verifyStrict, Ed25519LengthError } from '../src/ed25519.js'
 const L = 2n ** 252n + 27742317777372353535851937790883648493n
 const seed = Uint8Array.from({ length: 32 }, () => 1)
 const pub = ed25519.getPublicKey(seed)
-const msg = new TextEncoder().encode('OPR test message')
+const msg = new TextEncoder().encode('attest test message')
 const sig = ed25519.sign(msg, seed)
 
 function numberToLE(n: bigint, len: number): Uint8Array {
@@ -22,7 +22,7 @@ function leToNumber(b: Uint8Array): bigint {
 describe('verifyStrict', () => {
   it('accepts a valid signature', () => { expect(verifyStrict(msg, sig, pub)).toBe(true) })
   it('rejects a tampered message', () => {
-    const bad = new TextEncoder().encode('OPR test messagE')
+    const bad = new TextEncoder().encode('attest test messagE')
     expect(verifyStrict(bad, sig, pub)).toBe(false)
   })
   it('rejects non-canonical S = S + L (malleability, vector 08 shape)', () => {

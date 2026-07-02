@@ -1,8 +1,8 @@
-# OPR v0.1 conformance vectors
+# attest v0.1 conformance vectors
 
-This directory holds the OPR v0.1 conformance suite: fixed, language-neutral test cases against which any implementation of [`docs/spec/opr-v0.1.md`](../opr-v0.1.md) can be checked. Each vector is a leaf directory (identified by containing `expected.json`) holding the raw inputs to feed the verification algorithm and the exact `VerificationResult` a conformant verifier must produce.
+This directory holds the attest v0.1 conformance suite: fixed, language-neutral test cases against which any implementation of [`docs/spec/attest-v0.1.md`](../attest-v0.1.md) can be checked. Each vector is a leaf directory (identified by containing `expected.json`) holding the raw inputs to feed the verification algorithm and the exact `VerificationResult` a conformant verifier must produce.
 
-**Normative conformance requirement**: an implementation is OPR-conformant iff it produces every vector's expected result. There is no partial conformance — any single mismatch is a conformance failure.
+**Normative conformance requirement**: an implementation is attest-conformant iff it produces every vector's expected result. There is no partial conformance — any single mismatch is a conformance failure.
 
 ## Vector format
 

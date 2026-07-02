@@ -7,7 +7,7 @@ export interface JsonObject { [k: string]: JsonValue }
 
 // ---- strict recursive-descent parser (replaces JSON.parse) ----
 // Cap nesting so untrusted input cannot overflow the native call stack (which
-// would throw a non-CanonError RangeError). 256 is a huge margin over real OPR
+// would throw a non-CanonError RangeError). 256 is a huge margin over real attest
 // receipts (~4-5 deep) yet far below the JS stack limit, keeping the parsed tree
 // shallow enough that rejectSurrogates and the Task 5 serializer recurse safely.
 const MAX_DEPTH = 256

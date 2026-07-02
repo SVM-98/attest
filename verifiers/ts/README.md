@@ -1,10 +1,10 @@
-# @opr/verifier
+# attest-verifier
 
-An independent TypeScript implementation of an [Open Purchase Receipt (OPR) v0.1](../../docs/spec/opr-v0.1.md) verifier. It checks a signed OPR receipt envelope and reports its signature, schema, trust, revocation, and buyer-binding status — it does not issue, sign, or mutate receipts, manifests, or revocation records. Issuance is the Python reference implementation's job (`opr` package, repo root); this package only ever reads.
+An independent TypeScript implementation of an [attest v0.1](../../docs/spec/attest-v0.1.md) verifier. It checks a signed attest receipt envelope and reports its signature, schema, trust, revocation, and buyer-binding status — it does not issue, sign, or mutate receipts, manifests, or revocation records. Issuance is the Python reference implementation's job (`attest` package, repo root); this package only ever reads.
 
 ## Independence claim
 
-This verifier shares no code with the Python reference implementation. It is a from-scratch reimplementation of the OPR v0.1 algorithm (design §11) in TypeScript:
+This verifier shares no code with the Python reference implementation. It is a from-scratch reimplementation of the attest v0.1 algorithm (design §11) in TypeScript:
 
 - **No shared modules, no shared runtime.** The strict JSON parser, JCS-style canonical serializer, Ed25519 verification, key/artifact manifest logic, revocation classification, and buyer-binding checks are each written independently in `src/`, against the spec text and the language-neutral conformance vectors — not against the Python source.
 - **Crypto via [`@noble/curves`](https://github.com/paulmillr/noble-curves) and [`@noble/hashes`](https://github.com/paulmillr/noble-hashes)**, pure-JS, audited, dependency-minimal libraries — not libsodium (which the Python reference uses via `pynacl`) and not any WASM build of libsodium. Base64url encode/decode (`src/b64u.ts`) is hand-rolled on `btoa`/`atob`, with no external dependency.
@@ -39,9 +39,9 @@ export function isOk(r: VerificationResult): boolean // signature=valid && schem
 
 ```ts
 import { readFileSync } from 'node:fs'
-import { verify, isOk, loadsStrict } from '@opr/verifier'
+import { verify, isOk, loadsStrict } from 'attest-verifier'
 
-const envelopeBytes = readFileSync('./receipt.opr.json')
+const envelopeBytes = readFileSync('./receipt.attest.json')
 const trustData = loadsStrict(readFileSync('./issuer-manifests.json')) as any
 
 const result = verify(envelopeBytes, {
@@ -63,9 +63,9 @@ Nothing in `src/` touches `node:*` APIs — base64 uses `btoa`/`atob`, crypto is
 
 ```html
 <script type="module">
-  import { verify, isOk, loadsStrict } from 'https://esm.sh/@opr/verifier'
+  import { verify, isOk, loadsStrict } from 'https://esm.sh/attest-verifier'
 
-  const envelopeBytes = new Uint8Array(await (await fetch('/receipt.opr.json')).arrayBuffer())
+  const envelopeBytes = new Uint8Array(await (await fetch('/receipt.attest.json')).arrayBuffer())
   const trustData = loadsStrict(new Uint8Array(await (await fetch('/issuer-manifests.json')).arrayBuffer())) as any
 
   const result = verify(envelopeBytes, {
@@ -86,4 +86,4 @@ npm test -- conformance
 
 This runs `test/conformance.test.ts`, which discovers every leaf directory under [`docs/spec/vectors/`](../../docs/spec/vectors/) (any directory containing an `expected.json`, walked recursively so multi-part vectors like `07-unicode-canon/a-...` and `17-binding-proven/b-...` are included), feeds each vector's envelope bytes, trust store, revocation view, and disclosure through this package's `verify()`, and asserts the result matches `expected.json` — exact match on `signature`/`schema`/`trust`, exact match on `revocation`/`binding`/`ok` when the key is present, exact list match on `errors`/`warnings` when present, and substring containment for `errors_contains`/`warnings_contains`. These are the same match rules the Python reference implementation's `tests/test_vectors.py` applies to the identical vector files. A guard test asserts at least 23 leaves are discovered, so a loader bug that silently skips vectors fails loudly instead of passing on a truncated set.
 
-**Passing every vector in `docs/spec/vectors/` — reproducing every `expected.json` exactly, with zero vectors skipped — is the definition of OPR v0.1 conformance for this implementation.** Run `npm test` for the full suite (parser, canonicalization, Ed25519, manifests, revocation, commitment, schema, and this conformance runner together).
+**Passing every vector in `docs/spec/vectors/` — reproducing every `expected.json` exactly, with zero vectors skipped — is the definition of attest v0.1 conformance for this implementation.** Run `npm test` for the full suite (parser, canonicalization, Ed25519, manifests, revocation, commitment, schema, and this conformance runner together).

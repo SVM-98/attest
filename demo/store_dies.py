@@ -1,6 +1,6 @@
 """demo/store_dies.py — "The store dies. The receipt survives."
 
-A narrated, end-to-end walkthrough of the OPR v0.1 promise: a purchase
+A narrated, end-to-end walkthrough of the attest v0.1 promise: a purchase
 receipt issued by a store remains independently verifiable — offline,
 without that store's cooperation or even its continued existence — because
 everything a verifier needs (the issuer's signing key manifest, the
@@ -18,8 +18,8 @@ The scenario, step by step:
      Casey, embedding Casey's buyer-binding salt directly in the receipt
      (`delivery.salt`) so the file is self-contained. The salt is also
      saved to Casey's own private storage, independent of the store.
-  4. It exports a shareable bundle (`.oprx` + the secret-bearing
-     `.private.oprx`) — Casey's copy of "the deal", not just the receipt.
+  4. It exports a shareable bundle (`.attest` + the secret-bearing
+     `.private.attest`) — Casey's copy of "the deal", not just the receipt.
   5. **The store is deleted.** Its whole directory — signing keys, key
      manifest, artifact manifest, everything — is `rmtree`'d. From this
      point on, nothing in this scenario ever reads from the store again.
@@ -36,7 +36,7 @@ The scenario, step by step:
      store, with identical bytes — still hashes to exactly what the
      surviving receipt says it should.
 
-This module is driven through the `opr` CLI (`opr.cli.main`) exactly as a
+This module is driven through the `attest` CLI (`attest.cli.main`) exactly as a
 real operator would use it, one call per verb; the only place it falls back
 to the library directly is building the receipt *payload* itself
 (`issue.build_payload`), because the CLI's `issue` verb intentionally takes
@@ -59,7 +59,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from opr import cli, issue, keys
+from attest import cli, issue, keys
 
 ISSUER = "store.dies.example"
 KID = f"{ISSUER}/keys/bootstrap-1#ed25519-1"
@@ -71,13 +71,13 @@ BUYER_IDENTIFIER_TYPE = "email"
 ARTIFACT_SERIES = f"{ISSUER}/works/INDIE-001"
 GAME_FILENAME = "indie-game-1.0-setup.bin"
 GAME_BYTES = (
-    b"OPR-DEMO-GAME-BINARY\n"
+    b"ATTEST-DEMO-GAME-BINARY\n"
     b"This stands in for a real, DRM-free game installer.\n"
     b"Its bytes are what the receipt's artifact hash actually commits to.\n"
 ) * 64
 
 LEGAL_TEXT_BYTES = (
-    b"OPR demo standard license v1\n"
+    b"attest demo standard license v1\n"
     b"Casey owns this copy of Indie Game, perpetually, irrevocably, "
     b"DRM-free, transferable: no.\n"
 )
@@ -100,8 +100,8 @@ def _verb_label(argv: list[str]) -> str:
 
 
 def _run_cli(argv: list[str]) -> tuple[int, str, str]:
-    """Call `opr.cli.main` exactly as a real operator's shell would invoke
-    the installed `opr` binary, returning `(exit_code, stdout, stderr)`.
+    """Call `attest.cli.main` exactly as a real operator's shell would invoke
+    the installed `attest` binary, returning `(exit_code, stdout, stderr)`.
 
     `cli.main` only returns an exit code — its status result is the JSON it
     prints to stdout, and its errors go to stderr — so both streams are
@@ -133,10 +133,10 @@ def _run_cli_json(argv: list[str]) -> dict[str, Any]:
     rc, stdout, stderr = _run_cli(argv)
     verb = _verb_label(argv)
     if rc != 0:
-        raise RuntimeError(f"demo step failed: `opr {verb}` exited {rc}: {stderr.strip()}")
+        raise RuntimeError(f"demo step failed: `attest {verb}` exited {rc}: {stderr.strip()}")
     result = json.loads(stdout)
     if not isinstance(result, dict):
-        raise RuntimeError(f"expected a JSON object from `opr {verb}`, got: {stdout!r}")
+        raise RuntimeError(f"expected a JSON object from `attest {verb}`, got: {stdout!r}")
     return result
 
 
@@ -151,7 +151,7 @@ def _run_cli_capture(argv: list[str]) -> tuple[int, dict[str, Any]]:
     result = json.loads(stdout)
     if not isinstance(result, dict):
         verb = _verb_label(argv)
-        raise RuntimeError(f"expected a JSON object from `opr {verb}`, got: {stdout!r}")
+        raise RuntimeError(f"expected a JSON object from `attest {verb}`, got: {stdout!r}")
     return rc, result
 
 
@@ -275,7 +275,7 @@ def run_demo(workspace: Path) -> dict[str, Any]:
     legal_text_path.write_bytes(LEGAL_TEXT_BYTES)
     legal_text_sha256 = hashlib.sha256(LEGAL_TEXT_BYTES).hexdigest()
 
-    # `opr issue` takes an already-built payload (design: payload assembly,
+    # `attest issue` takes an already-built payload (design: payload assembly,
     # including computing `buyer.commitment`, is out of the CLI's scope per
     # Task 14) — build it with the library, then hand it to the CLI to sign.
     payload = issue.build_payload(
@@ -288,7 +288,7 @@ def run_demo(workspace: Path) -> dict[str, Any]:
         publisher="Indie Games Co-op",
         identifiers={"issuer_sku": "INDIE-001"},
         artifact_series=ARTIFACT_SERIES,
-        terms_uri=f"https://{ISSUER}/opr/license-templates/standard-v1",
+        terms_uri=f"https://{ISSUER}/attest/license-templates/standard-v1",
         legal_text_sha256=legal_text_sha256,
         artifacts=[artifact_entry],
         revocability="none",
@@ -298,8 +298,8 @@ def run_demo(workspace: Path) -> dict[str, Any]:
     payload_path.write_text(json.dumps(payload), encoding="utf-8")
 
     # `--salt` embeds `delivery.salt` in the `--out` envelope itself, making
-    # it a single self-contained `.opr.json` (§9 delivery member).
-    receipt_path = buyer_dir / "receipt.opr.json"
+    # it a single self-contained `.attest.json` (§9 delivery member).
+    receipt_path = buyer_dir / "receipt.attest.json"
     issue_report = _run_cli_json(
         [
             "issue",
@@ -337,9 +337,9 @@ def run_demo(workspace: Path) -> dict[str, Any]:
             "casey-library",
         ]
     )
-    oprx_path = Path(export_report["oprx"])
+    attest_path = Path(export_report["attest"])
     private_path = Path(export_report["private"])
-    outcomes["export"] = {"oprx": str(oprx_path), "private": str(private_path)}
+    outcomes["export"] = {"attest": str(attest_path), "private": str(private_path)}
 
     # --- Step 5: the store dies ----------------------------------------------
     _narrate("Step 5: the store is deleted — keys, manifests, everything")
@@ -358,7 +358,7 @@ def run_demo(workspace: Path) -> dict[str, Any]:
         [
             "import",
             "--bundle",
-            str(oprx_path),
+            str(attest_path),
             "--private",
             str(private_path),
             "--out-dir",
@@ -367,7 +367,7 @@ def run_demo(workspace: Path) -> dict[str, Any]:
     )
     outcomes["import"] = import_report
 
-    imported_receipt = next((import_dir / "receipts").glob("*.opr.json"))
+    imported_receipt = next((import_dir / "receipts").glob("*.attest.json"))
     trust_dir = import_dir / "trust"
 
     # Deliberately no --revocations: this is the honest case where the
@@ -415,7 +415,7 @@ def run_demo(workspace: Path) -> dict[str, Any]:
 
 
 def main() -> int:
-    with tempfile.TemporaryDirectory(prefix="opr-store-dies-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="attest-store-dies-") as tmp:
         outcomes = run_demo(Path(tmp))
 
     print("\n=== Summary ===")

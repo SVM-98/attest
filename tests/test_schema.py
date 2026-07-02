@@ -1,11 +1,11 @@
-"""Tests for opr.validate — JSON Schema (draft 2020-12) validation of OPR payloads."""
+"""Tests for attest.validate — JSON Schema (draft 2020-12) validation of attest payloads."""
 
 from __future__ import annotations
 
 import importlib.resources
 from pathlib import Path
 
-from opr import validate
+from attest import validate
 
 from .helpers import make_payload
 
@@ -53,7 +53,7 @@ def test_size_bytes_at_2_pow_53_fails() -> None:
 
 def test_packaged_schema_is_byte_identical_to_normative_copy() -> None:
     repo_root = Path(__file__).parent.parent
-    normative = repo_root / "docs" / "spec" / "schema" / "opr-receipt.schema.json"
-    packaged = importlib.resources.files("opr.schema").joinpath("opr-receipt.schema.json")
+    normative = repo_root / "docs" / "spec" / "schema" / "attest-receipt.schema.json"
+    packaged = importlib.resources.files("attest.schema").joinpath("attest-receipt.schema.json")
 
     assert packaged.read_bytes() == normative.read_bytes()

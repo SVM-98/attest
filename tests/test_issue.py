@@ -1,4 +1,4 @@
-"""Tests for opr.issue (receipt issuance envelope) and opr.ulid (receipt_id)."""
+"""Tests for attest.issue (receipt issuance envelope) and attest.ulid (receipt_id)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import re
 
 import pytest
 
-from opr import canon, commitment, issue, keys, ulid, validate
+from attest import canon, commitment, issue, keys, ulid, validate
 from tests.helpers import make_payload
 
 _CROCKFORD_EXCLUDED = set("ILOU")
@@ -65,7 +65,7 @@ class TestIssue:
 
     def test_schema_invalid_payload_raises_issue_error(self) -> None:
         payload = make_payload()
-        del payload["opr_version"]
+        del payload["attest_version"]
         with pytest.raises(issue.IssueError):
             issue.issue(payload, _kp(), _KID)
 
@@ -101,7 +101,7 @@ class TestBuildPayload:
             "publisher": "Example Publisher srl",
             "identifiers": {"issuer_sku": "EXG-001"},
             "artifact_series": "store.example.com/works/EXG-001",
-            "terms_uri": "https://store.example.com/opr/license-templates/standard-v1",
+            "terms_uri": "https://store.example.com/attest/license-templates/standard-v1",
             "legal_text_sha256": hashlib.sha256(b"legal-text").hexdigest(),
         }
 
