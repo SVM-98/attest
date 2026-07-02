@@ -153,6 +153,30 @@ def test_missing_payload_key_is_invalid() -> None:
     assert result.errors
 
 
+def test_missing_signatures_member_is_invalid() -> None:
+    envelope = issue.issue(make_payload(), KP, KID)
+    del envelope["signatures"]
+    result = verify.verify(_to_bytes(envelope), _trust_store(_key_manifest()))
+    assert result.signature == "invalid"
+    assert any("signatures" in e for e in result.errors)
+
+
+def test_unsupported_opr_version_is_invalid() -> None:
+    """`opr_version` is gated by verify() itself (step 1), independent of and
+    before the jsonschema `const` check in step 5 — hand-sign to bypass
+    issue()'s own schema gate and exercise verify()'s own check directly."""
+    payload = make_payload()
+    payload["opr_version"] = "0.2"
+    sig = keys.sign(canon.canonical_bytes(payload), KP)
+    envelope = {
+        "payload": payload,
+        "signatures": [{"kid": KID, "alg": "Ed25519", "sig": keys.b64u(sig)}],
+    }
+    result = verify.verify(_to_bytes(envelope), _trust_store(_key_manifest()))
+    assert result.signature == "invalid"
+    assert any("opr_version" in e for e in result.errors)
+
+
 # --- step 2: issuer binding -----------------------------------------------------
 
 
@@ -185,6 +209,22 @@ def test_unknown_issuer_no_manifest_is_invalid() -> None:
     assert result.errors
 
 
+def test_missing_issuer_id_is_invalid() -> None:
+    """`issuer.id` is read directly off the payload before any manifest lookup —
+    a payload lacking it must fail closed even though a trusted manifest for
+    the "real" issuer exists in the store."""
+    payload = make_payload()
+    payload["issuer"] = {"display_name": "Example Games Store"}  # no "id"
+    sig = keys.sign(canon.canonical_bytes(payload), KP)
+    envelope = {
+        "payload": payload,
+        "signatures": [{"kid": KID, "alg": "Ed25519", "sig": keys.b64u(sig)}],
+    }
+    result = verify.verify(_to_bytes(envelope), _trust_store(_key_manifest()))
+    assert result.signature == "invalid"
+    assert any("issuer.id" in e for e in result.errors)
+
+
 # --- step 3: key checks (compromise, retirement, validity window) --------------
 
 
@@ -210,6 +250,38 @@ def test_issued_at_outside_validity_window_is_invalid() -> None:
     envelope = issue.issue(make_payload(), KP, KID)  # issued_at 2026-07-02, after valid_to
     result = verify.verify(_to_bytes(envelope), _trust_store(manifest))
     assert result.signature == "invalid"
+
+
+def test_issued_at_before_valid_from_is_invalid() -> None:
+    """The other edge of the validity window: a receipt claiming to have been
+    issued before its own signing key's `valid_from` must be rejected too,
+    not just the after-`valid_to` case above."""
+    manifest = _key_manifest(valid_from="2027-01-01T00:00:00Z")  # after payload's issued_at
+    envelope = issue.issue(make_payload(), KP, KID)  # issued_at 2026-07-02
+    result = verify.verify(_to_bytes(envelope), _trust_store(manifest))
+    assert result.signature == "invalid"
+
+
+def test_manifest_entry_missing_valid_from_fails_closed() -> None:
+    """A corrupted/hand-edited trust-store manifest entry (missing `valid_from`
+    entirely) must never resurrect a receipt into validity — `_within_validity`
+    fails closed on the KeyError rather than raising or defaulting to valid."""
+    entry = {"kid": KID, "pub": keys.b64u(KP.pub), "valid_to": None, "status": "active"}
+    manifest = {"issuer": ISSUER, "keys": [entry]}
+    envelope = issue.issue(make_payload(), KP, KID)
+    result = verify.verify(_to_bytes(envelope), _trust_store(manifest))
+    assert result.signature == "invalid"
+
+
+def test_manifest_entry_missing_pub_fails_closed_with_malformed_key_material() -> None:
+    """A trust-store manifest entry missing `pub` must fail closed with a clear
+    "malformed key material" error, never crash with an unhandled KeyError."""
+    entry = {"kid": KID, "valid_from": "2026-01-01T00:00:00Z", "valid_to": None, "status": "active"}
+    manifest = {"issuer": ISSUER, "keys": [entry]}
+    envelope = issue.issue(make_payload(), KP, KID)
+    result = verify.verify(_to_bytes(envelope), _trust_store(manifest))
+    assert result.signature == "invalid"
+    assert any("malformed key material" in e for e in result.errors)
 
 
 # --- step 5: schema validation + warnings ---------------------------------------
@@ -280,6 +352,24 @@ def test_revocation_against_none_class_is_ignored() -> None:
     assert result.revocation == "invalid_revocation_ignored"
     assert result.ok is True
     assert any("revocability" in w and "none" in w for w in result.warnings)
+
+
+def test_revocability_none_with_non_matching_record_reports_not_revoked_as_of() -> None:
+    """An irrevocable receipt still gets an honest freshness anchor from the
+    feed when nothing in it revokes THIS receipt — distinct from the
+    "matching record present" vector-16 case above (`valid` stays empty here,
+    exercising the "none" class's own not-revoked fallback rather than the
+    ignored-record path)."""
+    payload = make_payload()  # revocability: none (base default)
+    envelope = issue.issue(payload, KP, KID)
+    other_record = revocation.build_record(
+        "01J1V5B4M9Z8QWERTY99999999", "revoked", "2026-07-05T00:00:00Z", KP, KID
+    )
+    result = verify.verify(
+        _to_bytes(envelope), _trust_store(_key_manifest()), revocation_view=[other_record]
+    )
+    assert result.revocation == "not_revoked_as_of:2026-07-05T00:00:00Z"
+    assert result.ok is True
 
 
 def test_revocation_refund_window_inside_window_is_revoked() -> None:
@@ -520,6 +610,19 @@ def test_binding_challenge_disclosure_null_pubkey_is_not_proven() -> None:
     nonce = bytes(range(16))
     sig = commitment.sign_challenge(payload["receipt_id"], nonce, buyer_kp)
     disclosure = verify.Disclosure(challenge=(nonce, sig))
+    result = verify.verify(
+        _to_bytes(envelope), _trust_store(_key_manifest()), disclosure=disclosure
+    )
+    assert result.binding == "not_proven"
+
+
+def test_binding_salt_disclosure_without_identifier_fails_closed() -> None:
+    """The docstring's canonical malformed-disclosure example: `salt` without
+    `identifier` is a partial salt path, so it must fail closed to
+    "not_proven" rather than being evaluated (or raising)."""
+    payload = make_payload()
+    envelope = issue.issue(payload, KP, KID)
+    disclosure = verify.Disclosure(salt=bytes(16))  # identifier/identifier_type left None
     result = verify.verify(
         _to_bytes(envelope), _trust_store(_key_manifest()), disclosure=disclosure
     )
