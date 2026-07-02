@@ -19,18 +19,18 @@ The following are explicitly **out of scope** for v0.1 and MUST NOT be assumed b
 
 - **DRM.** OPR MUST NOT be used, marketed, or implemented as a means of circumventing DRM or stripping protection from an artifact. OPR defines no DRM-stripping functionality.
 - **Content hosting/indexing.** A conforming OPR implementation or registry node MUST NOT host or index the copyrighted works a receipt refers to; OPR is content-free by design.
-- **Resale/transfer.** v0.1 defines no resale or transfer protocol. `license.transferable` (§5.4) is a reserved field: implementations MUST NOT treat `transferable: true` as authorization to resell or transfer a license in v0.1 — that requires a future, rights-holder-authorized transfer profile.
-- **Blockchain.** On-chain anchoring is an optional future transparency layer (§14, non-normative). No conforming v0.1 implementation MUST depend on blockchain infrastructure to issue or verify a receipt.
+- **Resale/transfer.** v0.1 defines no resale or transfer protocol. `license.transferable` (§5.5) is a reserved field: implementations MUST NOT treat `transferable: true` as authorization to resell or transfer a license in v0.1 — that requires a future, rights-holder-authorized transfer profile.
+- **Blockchain.** On-chain anchoring is an optional future transparency layer (Appendix B, non-normative). A conforming v0.1 implementation MUST NOT require blockchain infrastructure to issue or verify a receipt.
 - **Payment processing.** A receipt records the outcome of a purchase, not the purchase transaction itself; it MUST NOT be construed as a payment instrument or as processing payment.
 
-**What a receipt is.** A signed OPR receipt is evidence of a license grant and its terms, signed by the issuer identified in the receipt. A receipt is not a claim of "ownership"; it does not promise access "forever" — it promises that the *evidence* verifies indefinitely and that the referenced *terms* remain producible (§4.2, §10). A receipt does not itself determine any seller's regulatory compliance (§5.4).
+**What a receipt is.** A signed OPR receipt is evidence of a license grant and its terms, signed by the issuer identified in the receipt. A receipt is not a claim of "ownership"; it does not promise access "forever" — it promises that the *evidence* verifies indefinitely and that the referenced *terms* remain producible (§7.4, §14). A receipt does not itself determine any seller's regulatory compliance (§5.4).
 
 ## 3. Terminology and actors
 
 - **Issuer**: the entity that signs receipts, identified by a DNS domain it controls (§7). A marketplace or merchant-of-record MAY act as issuer on behalf of a named `work.publisher` (delegated-issuer path).
 - **Buyer**: the holder of exported receipts.
-- **Verifier**: any software that runs the algorithm in §9 against a receipt envelope.
-- **Registry node**: an independent replicator of verification material (key/artifact manifests, revocation records, license/policy texts). Registry nodes are out of scope for v0.1 conformance (§14, non-normative).
+- **Verifier**: any software that runs the algorithm in §11 against a receipt envelope.
+- **Registry node**: an independent replicator of verification material (key/artifact manifests, revocation records, license/policy texts). Registry nodes are out of scope for v0.1 conformance (Appendix B, non-normative).
 
 ## 4. Envelope structure
 
@@ -48,7 +48,7 @@ A receipt is transmitted as a JSON envelope with exactly three top-level members
 
 ### 4.1 `signatures`
 
-- `signatures` MUST be a JSON array. A conforming verifier MUST reject an envelope whose `signatures` array does not contain **exactly one** entry (§9 step 1).
+- `signatures` MUST be a JSON array. A conforming verifier MUST reject an envelope whose `signatures` array does not contain **exactly one** entry (§11 step 1).
 - Each entry MUST have `kid` (string) and `sig` (string, base64url, 64 decoded bytes) members.
 - `alg` MUST equal the literal string `"Ed25519"`. A verifier MUST reject any other value. `alg` MUST NOT be used to select a verification primitive: the algorithm for `opr_version: "0.1"` is fixed at Ed25519 by this specification; a future version that adds algorithms MUST do so via a new `opr_version`, never via `alg` dispatch.
 
@@ -59,20 +59,20 @@ A receipt is transmitted as a JSON envelope with exactly three top-level members
 - `delivery` is UNSIGNED (it is not part of `payload` and is not covered by the signature) and OPTIONAL.
 - `delivery.salt`, if present, MUST be the base64url (no padding) encoding of the 16 raw bytes used as the buyer-commitment salt (§8).
 - `delivery.issuer_manifest`, if present, MUST be a key-manifest object (§7.1) usable as a trust-store entry.
-- An envelope carrying `delivery.salt` is a **private artifact**. Implementations MUST strip `delivery.salt` before treating an envelope as shareable (§13, `.oprx`).
+- An envelope carrying `delivery.salt` is a **private artifact**. Implementations MUST strip `delivery.salt` before treating an envelope as shareable (§14, `.oprx`).
 - Tampering with `delivery` cannot forge or invalidate a receipt: the salt is meaningful only insofar as it reproduces the signed `buyer.commitment` (§8), and any embedded manifest snapshot is independently signature-checked against its own `manifest_signature` (§7.1).
 
 ## 5. Payload field registry
 
-`payload` is the sole signed object. Its JSON Schema is normative and lives at [`docs/spec/schema/opr-receipt.schema.json`](schema/opr-receipt.schema.json); this section is the field-by-field prose companion. Every property in every object below is permitted to carry additional, unlisted properties (the schema sets no `additionalProperties: false` anywhere) — see §9 on unknown-field handling.
+`payload` is the sole signed object. Its JSON Schema is normative and lives at [`docs/spec/schema/opr-receipt.schema.json`](schema/opr-receipt.schema.json); this section is the field-by-field prose companion. Every property in every object below is permitted to carry additional, unlisted properties (the schema sets no `additionalProperties: false` anywhere) — see §11.2 on unknown-field handling.
 
 ### 5.1 Top level
 
 | Field | Type | Required | Semantics |
 | --- | --- | --- | --- |
-| `opr_version` | string, const `"0.1"` | REQUIRED | Fixes the payload shape and the crypto suite (§6, §8) for this receipt. |
-| `receipt_id` | string, ULID (`^[0-9A-HJKMNP-TV-Z]{26}$`) | REQUIRED | Sortable, coordination-free identifier. MUST be unique per issuer. |
-| `issued_at` | string, `YYYY-MM-DDTHH:MM:SSZ` (UTC) | REQUIRED | Issuance timestamp; anchors key-validity checks (§9 step 3) and `refund_window` revocation (§11). |
+| `opr_version` | string, const `"0.1"` | REQUIRED | Fixes the payload shape and the crypto suite (§8–§10) for this receipt. |
+| `receipt_id` | string, ULID (`^[0-9A-HJKMNP-TV-Z]{26}$`) | REQUIRED | ULID: sortable and coordination-free; its randomness provides practical collision-resistance. |
+| `issued_at` | string, `YYYY-MM-DDTHH:MM:SSZ` (UTC) | REQUIRED | Issuance timestamp; anchors key-validity checks (§11 step 3) and `refund_window` revocation (§12). |
 | `supersedes` | string (ULID) or `null` | Schema-optional; the reference issuer always emits it (defaulting to `null`) | Informational lineage pointer to a prior `receipt_id` this one replaces. A superseding re-issue does **not** invalidate the superseded receipt absent buyer consent; a verifier MUST treat it as lineage metadata only, never as an implicit revocation. |
 | `issuer` | object | REQUIRED | See §5.2. |
 | `buyer` | object | REQUIRED | See §5.3. |
@@ -84,7 +84,7 @@ A receipt is transmitted as a JSON envelope with exactly three top-level members
 
 | Field | Type | Required | Semantics |
 | --- | --- | --- | --- |
-| `issuer.id` | string, lowercase DNS domain (≥2 labels) | REQUIRED | The issuer's identity. Roots key discovery (§7) and issuer-binding (§9 step 2). |
+| `issuer.id` | string, lowercase DNS domain (≥2 labels) | REQUIRED | The issuer's identity. Roots key discovery (§7) and issuer-binding (§11 step 2). |
 | `issuer.display_name` | string, non-empty | REQUIRED | Human-readable name; carries no cryptographic weight. |
 
 ### 5.3 `buyer`
@@ -113,21 +113,21 @@ Each `work.artifacts[]` item:
 | `role` | string, non-empty | REQUIRED | e.g. `installer`. |
 | `platform` | string, non-empty | REQUIRED | e.g. `windows-x86_64`. |
 | `filename` | string, non-empty | REQUIRED | |
-| `size_bytes` | integer, `0 ≤ n ≤ 2^53 − 1` | REQUIRED | See §6, correction on where over-range values are actually rejected. |
-| `sha256` | string, `^[0-9a-f]{64}$` | REQUIRED | Lowercase hex (§6.4). |
+| `size_bytes` | integer, `0 ≤ n ≤ 2^53 − 1` | REQUIRED | See §9, correction on where over-range values are actually rejected. |
+| `sha256` | string, `^[0-9a-f]{64}$` | REQUIRED | Lowercase hex (§9.1). |
 
-The `license.transferable` reserved flag notwithstanding (§2), artifact hashes here and in artifact manifests (§7.2) identify content **authorized** under the issuer's mirror policy (§5.6); they MUST NOT be construed as a license or invitation to source matching-hash files from arbitrary or unauthorized hosts.
+Artifact hashes here and in artifact manifests (§7.2) identify content **authorized** under the issuer's mirror policy (§5.6); they MUST NOT be construed as a license or invitation to source matching-hash files from arbitrary or unauthorized hosts.
 
 ### 5.5 `license`
 
 | Field | Type | Required | Semantics |
 | --- | --- | --- | --- |
 | `grant` | enum `perpetual` \| `subscription` | REQUIRED | |
-| `revocability` | enum `none` \| `refund_window` \| `policy` | REQUIRED | Governs revocation-record effectiveness; see §11. |
-| `revocation_window_days` | integer, `1 ≤ n ≤ 3650` | REQUIRED iff `revocability == "refund_window"` | The window is anchored to `issued_at` and evaluated against a revocation record's own signed time, never the verifier's clock (§11). |
+| `revocability` | enum `none` \| `refund_window` \| `policy` | REQUIRED | Governs revocation-record effectiveness; see §12.2. |
+| `revocation_window_days` | integer, `1 ≤ n ≤ 3650` | REQUIRED iff `revocability == "refund_window"` | The window is anchored to `issued_at` and evaluated against a revocation record's own signed time, never the verifier's clock (§12.2). |
 | `transferable` | boolean | REQUIRED | Reserved; see §2. |
-| `drm` | enum `drm-free` \| `drm-bound` | REQUIRED | v0.1 issuers SHOULD only issue `drm-free` receipts. `drm-bound` is permitted (a receipt is still better than nothing), but a verifier MUST NOT present a `drm-bound` receipt as a platform-independent entitlement, and MUST emit a warning on `drm-bound` (§9, §11). A receipt never removes DRM and this specification never claims it does. |
-| `terms_uri` | string, `format: "uri"` | REQUIRED | See §6.5 on the annotation-only status of `format: "uri"`. |
+| `drm` | enum `drm-free` \| `drm-bound` | REQUIRED | v0.1 issuers SHOULD only issue `drm-free` receipts. `drm-bound` is permitted (a receipt is still better than nothing), but a verifier MUST NOT present a `drm-bound` receipt as a platform-independent entitlement, and MUST emit a warning on `drm-bound` (§11.2). A receipt never removes DRM and this specification never claims it does. |
+| `terms_uri` | string, `format: "uri"` | REQUIRED | See §9 on the annotation-only status of `format: "uri"`. |
 | `legal_text_sha256` | string, `^[0-9a-f]{64}$` | REQUIRED | SHA-256 of the license text at `terms_uri`, hash-binding it into the signed payload. |
 | `jurisdiction_flags` | object, boolean-valued, open vocabulary | OPTIONAL | See `eu_usedsoft_asserted` below. |
 
@@ -138,17 +138,17 @@ The `license.transferable` reserved flag notwithstanding (§2), artifact hashes 
 | Field | Type | Required | Semantics |
 | --- | --- | --- | --- |
 | `redownload_right` | boolean | REQUIRED | |
-| `mirror_policy_uri` | string, `format: "uri"` | OPTIONAL | See §6.5. |
-| `mirror_policy_sha256` | string, `^[0-9a-f]{64}$` | OPTIONAL | Hash-binds the mirror policy text into the signed payload so the issuer cannot silently rewrite obligations post-issuance; the policy text itself travels in the export bundle (§13). |
-| `end_of_life` | string, non-empty, open versioned vocabulary | REQUIRED | v0.1 seed values: `artifacts-remain-redownloadable`, `escrow`, `none`. Unknown values are valid-with-warning (§9, §11), never a schema error — this keeps the field extensible toward a future EU end-of-life industry code of conduct without a new `opr_version`. |
-| `eol_commitment_uri` | string or `null`, `format: "uri"` | OPTIONAL | See §6.5. |
+| `mirror_policy_uri` | string, `format: "uri"` | OPTIONAL | See §9. |
+| `mirror_policy_sha256` | string, `^[0-9a-f]{64}$` | OPTIONAL | Hash-binds the mirror policy text into the signed payload so the issuer cannot silently rewrite obligations post-issuance; the policy text itself travels in the export bundle (§14). |
+| `end_of_life` | string, non-empty, open versioned vocabulary | REQUIRED | v0.1 seed values: `artifacts-remain-redownloadable`, `escrow`, `none`. Unknown values are valid-with-warning (§11.2), never a schema error — this keeps the field extensible toward a future EU end-of-life industry code of conduct without a new `opr_version`. |
+| `eol_commitment_uri` | string or `null`, `format: "uri"` | OPTIONAL | See §9. |
 | `eol_commitment_sha256` | string or `null`, `^[0-9a-f]{64}$` | OPTIONAL | Hash-binds a future end-of-life commitment document once referenced. |
 
 ## 6. Legal-weight field semantics
 
 ### 6.1 `revocability: "none"` conditional
 
-When `license.revocability == "none"`, the schema imposes an `allOf`/`if`/`then` conditional (see [`opr-receipt.schema.json`](schema/opr-receipt.schema.json)) that a conforming issuer implementation MUST satisfy at issuance time and a conforming verifier MUST enforce at schema-validation time (§9 step 5):
+When `license.revocability == "none"`, the schema imposes an `allOf`/`if`/`then` conditional (see [`opr-receipt.schema.json`](schema/opr-receipt.schema.json)) that a conforming issuer implementation MUST satisfy at issuance time and a conforming verifier MUST enforce at schema-validation time (§11 step 5):
 
 - `license.drm` MUST equal `"drm-free"`;
 - `survivability.redownload_right` MUST equal `true`;
@@ -158,7 +158,7 @@ A receipt meeting this conditional supports an argument that the sale falls unde
 
 ### 6.2 Revocation semantics follow the class
 
-Revocation records against a `revocability: "none"` receipt are **invalid and MUST be ignored** by a conforming verifier — flagged as a warning, never as an invalidation — because the only thing that MAY invalidate such a receipt is key compromise (§7.3). `refund_window` and `policy` records are honored per §11's revocation-by-class table. Without this rule, the protocol's own revocation machinery would falsify every irrevocability assertion made under §6.1.
+Revocation records against a `revocability: "none"` receipt are **invalid and MUST be ignored** by a conforming verifier — flagged as a warning, never as an invalidation — because the only thing that MAY invalidate such a receipt is key compromise (§7.3). `refund_window` and `policy` records are honored per §12.2's revocation-by-class table. Without this rule, the protocol's own revocation machinery would falsify every irrevocability assertion made under §6.1.
 
 ### 6.3 Immutability
 
@@ -173,7 +173,7 @@ An issuer's identity is its DNS domain (`issuer.id` / manifest `issuer`). An iss
 | Field | Type | Required | Semantics |
 | --- | --- | --- | --- |
 | `issuer` | string, DNS domain | REQUIRED | MUST equal the domain prefix of every listed `kid`. |
-| `manifest_version` | integer, ≥1 | REQUIRED | Monotonically increasing per issuer; rotation continuity (§7.3) keys off `N → N+1`. |
+| `manifest_version` | integer, monotonically increasing per issuer | REQUIRED | Rotation continuity (§7.3) keys off `N → N+1`. |
 | `issued_at` | string, UTC `Z` timestamp | REQUIRED | |
 | `keys` | array of key-entry objects | REQUIRED | See below. |
 | `manifest_signature` | object `{kid, sig}` | REQUIRED | Ed25519 signature over `JCS(manifest)` with this member removed. Every listed key's `kid`, `pub`, `valid_from`, `valid_to`, `status` is inside the signed body — nothing about a key's lifecycle is tamperable without breaking the signature. |
@@ -188,7 +188,7 @@ Key-entry object (`keys[]`):
 | `valid_to` | string, UTC `Z` timestamp, or `null` | REQUIRED | `null` = open-ended. |
 | `status` | enum `active` \| `retired` \| `compromised` | REQUIRED | See §7.3. |
 
-**Non-normative note:** the design's illustrative manifest JSON (design §5) also shows a per-key `alg` member; the reference implementation and every shipped vector omit it, because v0.1 fixes exactly one algorithm (Ed25519, §8) for the whole manifest scope — a per-key `alg` would be redundant. This specification follows the implementation: `keys[]` entries carry no `alg` member.
+**Non-normative note:** the design's illustrative manifest JSON (design §5) also shows a per-key `alg` member; the reference implementation and every shipped vector omit it, because v0.1 fixes exactly one algorithm (Ed25519, §10) for the whole manifest scope — a per-key `alg` would be redundant. This specification follows the implementation: `keys[]` entries carry no `alg` member.
 
 ### 7.2 Artifact manifests
 
@@ -207,9 +207,9 @@ An artifact manifest is valid only if: its resolving key manifest is self-consis
 
 ### 7.3 Rotation continuity and key compromise
 
-**Rotation continuity is normative, not best-effort.** A manifest with `manifest_version` N+1 is auto-trusted by a verifier only if it was signed by a key that was `active` in the version-N manifest the verifier already trusts. Version gaps are bridgeable only by validating every intermediate manifest in sequence; if intermediates are unavailable, the manifest MUST be treated as reached via a **discontinuous** rotation. On a discontinuous manifest, or on conflicting manifests for the same issuer, a verifier MUST report `trust: "unverified_rotation"` (§9, §10) and MUST NOT auto-accept the manifest. Receipts signed while a key was `active` remain valid after that key is later `retired`.
+**Rotation continuity is normative, not best-effort.** A manifest with `manifest_version` N+1 is auto-trusted by a verifier only if it was signed by a key that was `active` in the version-N manifest the verifier already trusts. Version gaps are bridgeable only by validating every intermediate manifest in sequence; if intermediates are unavailable, the manifest MUST be treated as reached via a **discontinuous** rotation. On a discontinuous manifest, or on conflicting manifests for the same issuer, a verifier MUST report `trust: "unverified_rotation"` (§11.1) and MUST NOT auto-accept the manifest. Receipts signed while a key was `active` remain valid after that key is later `retired`.
 
-**Key compromise fails closed.** A key marked `compromised` invalidates **all** signatures ever made with it, regardless of `issued_at` — because `issued_at` lives inside the signed payload and is controlled by whoever holds the key, a back-dated forgery is undetectable without an external trusted timestamp. A verifier MUST reject any receipt signature resolving to a `compromised` key (§9 step 3) unconditionally. The same fail-closed rule governs revocation records: a revocation record signed by a key that is not `status == "active"` in its resolving key manifest — including `compromised` and `retired` keys — MUST be treated as failing authentication and MUST be ignored (with a warning), never treated as effective (§12.2). Issuers SHOULD use one signing key per period (e.g. quarterly `kid`s) to bound the blast radius of a compromise, and SHOULD re-issue affected receipts after one.
+**Key compromise fails closed.** A key marked `compromised` invalidates **all** signatures ever made with it, regardless of `issued_at` — because `issued_at` lives inside the signed payload and is controlled by whoever holds the key, a back-dated forgery is undetectable without an external trusted timestamp. A verifier MUST reject any receipt signature resolving to a `compromised` key (§11 step 3) unconditionally. The same fail-closed rule governs revocation records: a revocation record signed by a key that is not `status == "active"` in its resolving key manifest — including `compromised` and `retired` keys — MUST be treated as failing authentication and MUST be ignored (with a warning), never treated as effective (§12.2). Issuers SHOULD use one signing key per period (e.g. quarterly `kid`s) to bound the blast radius of a compromise, and SHOULD re-issue affected receipts after one.
 
 ### 7.4 Offline verification and trust bootstrapping
 
@@ -227,7 +227,7 @@ commitment = scrypt(P, salt, N=32768, r=8, p=1, dkLen=32)
 ```
 
 - The domain label is the ASCII string `OPR-buyer-commitment-v1`.
-- `salt` MUST be exactly 16 raw bytes, generated per receipt by the issuer, hashed as **raw bytes** (never as base64url text), and delivered to the buyer (`delivery.salt` and/or export bundle, §13).
+- `salt` MUST be exactly 16 raw bytes, generated per receipt by the issuer, hashed as **raw bytes** (never as base64url text), and delivered to the buyer (`delivery.salt` and/or export bundle, §14).
 - scrypt parameters are fixed by this specification version: `N=32768, r=8, p=1, dkLen=32`. Implementations MUST use these exact parameters; they MUST NOT be configurable per-issuer.
 - `identifier_type` MUST be one of `issuer-account` or `email` (§5.3).
 
@@ -237,7 +237,7 @@ commitment = scrypt(P, salt, N=32768, r=8, p=1, dkLen=32)
 2. If `identifier_type == "issuer-account"`: apply Unicode NFC normalization only; the string is otherwise used exactly as given (no whitespace stripping, no case folding).
 3. In both cases, the resulting normalized string MUST NOT contain the byte `0x00`; an implementation MUST reject an identifier that does.
 
-**Non-normative note:** scrypt, not plain SHA-256, is used because identifiers are low-entropy (emails); a leaked salt must not enable cheap dictionary recovery. SHA-256 remains the hash for high-entropy inputs (artifacts, legal texts, §6.4).
+**Non-normative note:** scrypt, not plain SHA-256, is used because identifiers are low-entropy (emails); a leaked salt must not enable cheap dictionary recovery. SHA-256 remains the hash for high-entropy inputs (artifacts, legal texts, §10).
 
 **Disclosure semantics.** Revealing `(identifier, salt)` to a verifier is a replayable bearer proof that also hands over the identifier: it permanently burns that receipt's binding secrecy toward that verifier and, for `email`, links the buyer across issuers. Per-receipt salts confine this damage to one receipt. A verifier MUST treat a disclosed identifier as personal data not to be retained beyond the verification. Issuers SHOULD offer re-issue (via `supersedes`) after a disclosure.
 
@@ -253,7 +253,7 @@ buyer signs: UTF8("OPR-binding-challenge-v1") || 0x00 || receipt_id || 0x00 || n
 - The domain label is the ASCII string `OPR-binding-challenge-v1`.
 - `nonce` MUST be at least 16 bytes, freshly generated per challenge.
 - `receipt_id` is the receipt's own `payload.receipt_id`, encoded as UTF-8 text (not decoded/re-encoded).
-- Keys SHOULD be per-receipt (a fresh keypair per purchase, stored alongside the salt in the private bundle, §13; deterministic derivation from a buyer master key is acceptable — only the public key is ever signed into the payload). A verifier MUST NOT treat `buyer.pubkey` equality across two receipts as proof of buyer identity.
+- Keys SHOULD be per-receipt (a fresh keypair per purchase, stored alongside the salt in the private bundle, §14; deterministic derivation from a buyer master key is acceptable — only the public key is ever signed into the payload). A verifier MUST NOT treat `buyer.pubkey` equality across two receipts as proof of buyer identity.
 - `pubkey: null` is the default for client-less flows; mandatory key custody is out of scope for v0.1.
 
 ## 9. OPR-JCS canonicalization profile
@@ -267,14 +267,14 @@ Canonicalization follows RFC 8785 (JSON Canonicalization Scheme, JCS) over `payl
 >
 > This is a restriction of, not an incompatible extension to, RFC 8785: every OPR-JCS output is also a valid JCS output.
 
-The signature input for a receipt is exactly `JCS(payload)` — as produced by the OPR-JCS profile above — encoded as UTF-8 bytes. Additional canonicalization-time requirements, applied at parse time before any signature or schema step runs (§10 step 0):
+The signature input for a receipt is exactly `JCS(payload)` — as produced by the OPR-JCS profile above — encoded as UTF-8 bytes. Additional canonicalization-time requirements, applied at parse time before any signature or schema step runs (§11 step 0):
 
 - The input MUST be valid UTF-8.
 - A JSON object containing a **duplicate member name** MUST be rejected outright (parse failure) — RFC 8785 requires rejection, never silent last-value-wins deduplication.
 - Object keys MUST be serialized in the order produced by sorting their UTF-16BE code-unit sequences.
 - Lone UTF-16 surrogates (whether arriving as literal bytes or via `\uXXXX` escapes) MUST be rejected.
 
-**Correction (over-range integers, normative).** An integer with `|n| ≥ 2^53` inside `payload` is rejected **at canonicalization**, not at schema validation: the value fails the OPR-JCS precondition in §9 before `JCS(payload)` can even be computed, so the signature-verification step (§10 step 4, which requires `JCS(payload)` as its input) reports `signature: "invalid"` and `schema: "not_checked"` — schema validation never runs, because it operates on the same already-parsed object and the pipeline only proceeds past a canonicalization failure by rejecting outright. The JSON Schema's own `maximum: 9007199254740991` constraint on integer fields such as `size_bytes` (§5.4) is a defense-in-depth backstop for callers that invoke `validate_payload` directly and unsigned (bypassing canonicalization entirely) — it MUST NOT be relied upon as the primary enforcement point when verifying a signed envelope.
+**Correction (over-range integers, normative).** An integer with `|n| ≥ 2^53` inside `payload` is rejected **at canonicalization**, not at schema validation: the value fails the OPR-JCS precondition in §9 before `JCS(payload)` can even be computed, so the signature-verification step (§11 step 4, which requires `JCS(payload)` as its input) reports `signature: "invalid"` and `schema: "not_checked"` — schema validation never runs, because it operates on the same already-parsed object and the pipeline only proceeds past a canonicalization failure by rejecting outright. The JSON Schema's own `maximum: 9007199254740991` constraint on integer fields such as `size_bytes` (§5.4) is a defense-in-depth backstop for callers that invoke `validate_payload` directly and unsigned (bypassing canonicalization entirely) — it MUST NOT be relied upon as the primary enforcement point when verifying a signed envelope.
 
 **`format: "uri"` is annotation-only in v0.1.** `license.terms_uri`, `survivability.mirror_policy_uri`, and `survivability.eol_commitment_uri` are declared `format: "uri"` in the JSON Schema, but a conforming v0.1 validator is **not required to, and the reference implementation does not,** assert URI well-formedness as a validation failure — wiring a format-checker is an additional dependency the OPR-JCS/schema profile does not require, and JSON Schema draft 2020-12 treats unassserted `format` as annotation-only by default. Integrity of the document a URI field points to is guaranteed by its accompanying SHA-256 hash binding (`legal_text_sha256`, `mirror_policy_sha256`, `eol_commitment_sha256`), never by URI syntax validation.
 
@@ -293,7 +293,7 @@ The signature input for a receipt is exactly `JCS(payload)` — as produced by t
 - **Receipt hash** (for bundles, dedup, and future transparency use): `SHA-256(JCS(payload))`. It MUST NOT be computed over the envelope, which contains unsigned, malleable members (`delivery`).
 - **Hashes**: SHA-256 for artifacts, legal texts, and policies (§9.1); scrypt (§8.1) exclusively for the buyer commitment.
 
-**Non-normative note:** the pinned ruleset exists so that implementations built on different backends (libsodium, OpenSSL, `ed25519-dalek`, …) disagree loudly at conformance-test time (§14) rather than silently accepting a malleable signature in the field.
+**Non-normative note:** the pinned ruleset exists so that implementations built on different backends (libsodium, OpenSSL, `ed25519-dalek`, …) disagree loudly at conformance-test time (§15) rather than silently accepting a malleable signature in the field.
 
 ## 11. Verification algorithm
 
@@ -336,7 +336,7 @@ Unknown top-level payload fields (any key of `payload` not present in the top-le
 
 A conforming verifier MUST emit a warning for each of the following conditions when it applies, independent of and in addition to the layered result above:
 
-- a signing key resolved with `status == "retired"` (§9 step 3);
+- a signing key resolved with `status == "retired"` (§11 step 3);
 - `license.drm == "drm-bound"` (§5.5);
 - `survivability.end_of_life` is not one of the v0.1 seed vocabulary values (§5.6);
 - an unrecognized top-level payload field, as above;
