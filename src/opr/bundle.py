@@ -57,6 +57,15 @@ from opr import keys, manifests, verify
 _PROVENANCE_BUNDLE = "bundle"
 _SECRET_FILE_MODE = 0o600  # disclose output carries delivery.salt (a bearer secret)
 
+# Decompression caps for import_bundle (zip-bomb hardening). A .oprx is
+# attacker-supplied — it is meant to survive peer-to-peer — so every member is
+# read under a bound. Defaults are generous for real libraries (JSON + legal
+# text) and still stop a bomb by orders of magnitude.
+_MAX_MEMBER_BYTES = 64 * 1024 * 1024  # 64 MiB per decompressed member
+_MAX_TOTAL_BYTES = 1024 * 1024 * 1024  # 1 GiB decompressed across one bundle
+_MAX_ENTRIES = 100_000  # central-directory entry count
+_READ_CHUNK = 1024 * 1024  # 1 MiB streaming read granularity
+
 _README_TEMPLATE = """<!doctype html>
 <html lang="en">
 <head>
@@ -273,25 +282,101 @@ def export(
     return oprx_path, private_path
 
 
-def import_bundle(oprx_path: Path, private_path: Path | None = None) -> ImportedBundle:
+class _SizeBudget:
+    """Reads zip members under a per-member cap and a shared aggregate cap,
+    streaming so a member is never fully decompressed into memory before its
+    size is known. The streamed byte count — not the (spoofable)
+    `ZipInfo.file_size` header — is authoritative, which is what catches a
+    bomb whose header lies low."""
+
+    def __init__(self, max_member_bytes: int, max_total_bytes: int) -> None:
+        self._max_member = max_member_bytes
+        self._max_total = max_total_bytes
+        self._spent = 0
+
+    def read(self, zf: zipfile.ZipFile, name: str) -> bytes:
+        cap = min(self._max_member, self._max_total - self._spent)
+        chunks: list[bytes] = []
+        got = 0
+        with zf.open(name) as member:
+            while True:
+                chunk = member.read(_READ_CHUNK)
+                if not chunk:
+                    break
+                got += len(chunk)
+                if got > cap:
+                    raise BundleError(
+                        f"member {name!r} exceeds the decompression size cap "
+                        f"(max {self._max_member} bytes/member, {self._max_total} "
+                        "bytes/bundle) — refusing to import a possible zip bomb"
+                    )
+                chunks.append(chunk)
+        self._spent += got
+        return b"".join(chunks)
+
+
+def _guard_zip(zf: zipfile.ZipFile, max_entries: int, max_total_bytes: int) -> None:
+    """Zero-cost pre-read gates: reject a central directory with too many
+    entries, or one whose DECLARED uncompressed total already exceeds the
+    aggregate cap (catches an honest-but-huge bundle, and a header lying high,
+    before a single byte is decompressed)."""
+    infos = zf.infolist()
+    if len(infos) > max_entries:
+        raise BundleError(
+            f"bundle declares {len(infos)} entries, over the {max_entries} cap "
+            "— refusing to import a possible zip bomb"
+        )
+    declared_total = sum(info.file_size for info in infos)
+    if declared_total > max_total_bytes:
+        raise BundleError(
+            f"bundle declares {declared_total} uncompressed bytes, over the "
+            f"{max_total_bytes} cap — refusing to import a possible zip bomb"
+        )
+
+
+def import_bundle(
+    oprx_path: Path,
+    private_path: Path | None = None,
+    *,
+    max_member_bytes: int = _MAX_MEMBER_BYTES,
+    max_total_bytes: int = _MAX_TOTAL_BYTES,
+    max_entries: int = _MAX_ENTRIES,
+) -> ImportedBundle:
     """Reconstruct receipts, a working `verify.TrustStore`, artifact
     manifests and legal texts from a `.oprx` (and, if given, its
     `.private.oprx` sibling for salts). Every issuer found in the bundle is
     trusted with provenance `"bundle"` — offline-imported manifests are
     unauthenticated TOFU by construction (design §5), never silently
     upgraded to `"verified"`.
+
+    `max_member_bytes`, `max_total_bytes` and `max_entries` are keyword-only
+    zip-bomb decompression caps (§2.1), each defaulting to its module
+    constant: a per-member cap on bytes actually streamed out of one zip
+    entry, an aggregate cap on the running total decompressed across every
+    member read during this call (`.oprx` and, when given, `.private.oprx`
+    share one budget), and a cap on the central directory's entry count.
+    Exceeding any of them raises `BundleError` rather than importing a
+    possible bomb.
     """
     receipts: list[dict[str, Any]] = []
     key_manifests_by_issuer: dict[str, list[dict[str, Any]]] = {}
     artifact_manifests: dict[str, list[dict[str, Any]]] = {}
     legal_texts: dict[str, bytes] = {}
 
+    # One shared budget for the whole call (spec §2.1: the aggregate cap is a
+    # running total of decompressed bytes across ALL members read during one
+    # import_bundle call, not per-zip) — reused below for the .private.oprx
+    # salts read so a hostile .oprx/.private.oprx pair cannot each spend up
+    # to max_total_bytes and together decompress 2x the aggregate ceiling.
+    budget = _SizeBudget(max_member_bytes, max_total_bytes)
+
     with zipfile.ZipFile(oprx_path, "r") as zf:
+        _guard_zip(zf, max_entries, max_total_bytes)
         for filename in sorted(zf.namelist()):
             if filename.startswith("receipts/") and filename.endswith(".opr.json"):
-                receipts.append(json.loads(zf.read(filename)))
+                receipts.append(json.loads(budget.read(zf, filename)))
             elif filename.startswith("manifests/") and filename.endswith(".json"):
-                blob = json.loads(zf.read(filename))
+                blob = json.loads(budget.read(zf, filename))
                 issuer = blob.get("issuer")
                 if not isinstance(issuer, str):
                     continue
@@ -302,7 +387,7 @@ def import_bundle(oprx_path: Path, private_path: Path | None = None) -> Imported
                         artifact_manifests.setdefault(series, []).append(am)
             elif filename.startswith("legal/") and filename.endswith(".txt"):
                 digest = filename[len("legal/") : -len(".txt")]
-                content = zf.read(filename)
+                content = budget.read(zf, filename)
                 if hashlib.sha256(content).hexdigest() != digest:
                     raise BundleError(
                         f"legal text {digest!r} failed its own integrity check on import "
@@ -329,8 +414,9 @@ def import_bundle(oprx_path: Path, private_path: Path | None = None) -> Imported
     salts: dict[str, bytes] = {}
     if private_path is not None:
         with zipfile.ZipFile(private_path, "r") as zf:
+            _guard_zip(zf, max_entries, max_total_bytes)
             if "salts.json" in zf.namelist():
-                raw_salts: dict[str, str] = json.loads(zf.read("salts.json"))
+                raw_salts: dict[str, str] = json.loads(budget.read(zf, "salts.json"))
                 salts = {receipt_id: keys.b64u_decode(s) for receipt_id, s in raw_salts.items()}
 
     return ImportedBundle(

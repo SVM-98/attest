@@ -13,8 +13,13 @@ from typing import Any
 
 _INT_MAX = 2**53  # exclusive
 _ESCAPES = {
-    0x08: "\\b", 0x09: "\\t", 0x0A: "\\n", 0x0C: "\\f", 0x0D: "\\r",
-    0x22: '\\"', 0x5C: "\\\\",
+    0x08: "\\b",
+    0x09: "\\t",
+    0x0A: "\\n",
+    0x0C: "\\f",
+    0x0D: "\\r",
+    0x22: '\\"',
+    0x5C: "\\\\",
 }
 
 

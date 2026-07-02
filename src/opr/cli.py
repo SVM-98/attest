@@ -170,18 +170,45 @@ def _cmd_manifest_rotate(args: argparse.Namespace) -> int:
     if not isinstance(existing, dict) or "keys" not in existing:
         raise CliUsageError(f"{args.manifest_in} is not a key manifest")
 
-    signing_kp = _load_seed_kp(args.signing_seed)
-    new_pub = _read_b64u_file(args.new_pub)
-    new_entry = manifests.key_entry(args.new_kid, new_pub, args.valid_from, args.valid_to)
+    retire_kids: list[str] = args.retire_kid or []
+    compromise_kids: list[str] = args.compromise_kid or []
 
-    new_version = existing["manifest_version"] + 1
-    key_entries = [*existing["keys"], new_entry]
-    manifest = manifests.build_key_manifest(
-        existing["issuer"], new_version, args.issued_at, key_entries, signing_kp, args.signing_kid
-    )
+    new_entry = None
+    if args.new_kid is not None or args.new_pub is not None:
+        if args.new_kid is None or args.new_pub is None:
+            raise CliUsageError("--new-kid and --new-pub must be given together")
+        if args.valid_from is None:
+            raise CliUsageError("--valid-from is required when adding a new key")
+        new_pub = _read_b64u_file(args.new_pub)
+        new_entry = manifests.key_entry(args.new_kid, new_pub, args.valid_from, args.valid_to)
+
+    if new_entry is None and not retire_kids and not compromise_kids:
+        raise CliUsageError(
+            "nothing to do: supply a new key (--new-kid/--new-pub) and/or "
+            "--retire-kid/--compromise-kid"
+        )
+
+    signing_kp = _load_seed_kp(args.signing_seed)
+    try:
+        manifest = manifests.rotate_key_manifest(
+            existing,
+            signing_kp,
+            args.signing_kid,
+            args.issued_at,
+            new_entry=new_entry,
+            retire_kids=retire_kids,
+            compromise_kids=compromise_kids,
+        )
+    except ValueError as exc:
+        raise CliUsageError(str(exc)) from exc
+
     _write_json_file(args.out, manifest)
     _print_json(
-        {"out": str(args.out), "issuer": existing["issuer"], "manifest_version": new_version}
+        {
+            "out": str(args.out),
+            "issuer": existing["issuer"],
+            "manifest_version": manifest["manifest_version"],
+        }
     )
     return EXIT_OK
 
@@ -450,9 +477,7 @@ def _cmd_check_artifact(args: argparse.Namespace) -> int:
     except FileNotFoundError as exc:
         raise CliUsageError(f"file not found: {args.file}") from exc
 
-    match = next(
-        (a for a in artifacts if isinstance(a, dict) and a.get("sha256") == digest), None
-    )
+    match = next((a for a in artifacts if isinstance(a, dict) and a.get("sha256") == digest), None)
     _print_json(
         {"file": str(args.file), "sha256": digest, "match": match is not None, "artifact": match}
     )
@@ -486,14 +511,31 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", required=True, type=Path)
     p.set_defaults(func=_cmd_manifest_init)
 
-    p = manifest_sub.add_parser("rotate", help="Add a new key, signed by a currently-active one")
+    p = manifest_sub.add_parser(
+        "rotate", help="Add a new key and/or retire/compromise existing ones"
+    )
     p.add_argument("--in", dest="manifest_in", required=True, type=Path, help="trusted manifest")
     p.add_argument("--signing-kid", required=True, help="active kid from the trusted manifest")
     p.add_argument("--signing-seed", required=True, type=Path)
-    p.add_argument("--new-kid", required=True)
-    p.add_argument("--new-pub", required=True, type=Path, help="public key file of the new key")
-    p.add_argument("--valid-from", required=True)
+    p.add_argument("--new-kid", default=None, help="kid of a new key to add (with --new-pub)")
+    p.add_argument("--new-pub", type=Path, default=None, help="public key file of the new key")
+    p.add_argument("--valid-from", default=None, help="required only when adding a new key")
     p.add_argument("--valid-to", default=None)
+    p.add_argument(
+        "--retire-kid",
+        action="append",
+        default=[],
+        help="repeatable; set an existing key's status to retired (past signatures stay valid)",
+    )
+    p.add_argument(
+        "--compromise-kid",
+        action="append",
+        default=[],
+        help=(
+            "repeatable; set an existing key's status to compromised "
+            "(invalidates its past signatures)"
+        ),
+    )
     p.add_argument("--issued-at", required=True)
     p.add_argument("--out", required=True, type=Path)
     p.set_defaults(func=_cmd_manifest_rotate)
