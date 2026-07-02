@@ -6,8 +6,14 @@ export type JsonValue = null | boolean | bigint | string | JsonValue[] | JsonObj
 export interface JsonObject { [k: string]: JsonValue }
 
 // ---- strict recursive-descent parser (replaces JSON.parse) ----
+// Cap nesting so untrusted input cannot overflow the native call stack (which
+// would throw a non-CanonError RangeError). 256 is a huge margin over real OPR
+// receipts (~4-5 deep) yet far below the JS stack limit, keeping the parsed tree
+// shallow enough that rejectSurrogates and the Task 5 serializer recurse safely.
+const MAX_DEPTH = 256
 class Reader {
   i = 0
+  depth = 0
   constructor(readonly s: string) {}
   err(msg: string): never { throw new CanonError(invalidJson(`${msg} at ${this.i}`)) }
   ws() { while (this.i < this.s.length && ' \t\n\r'.includes(this.s[this.i]!)) this.i++ }
@@ -30,11 +36,12 @@ function parseValue(r: Reader): JsonValue {
 }
 
 function parseObject(r: Reader): JsonObject {
+  if (++r.depth > MAX_DEPTH) r.err('maximum nesting depth exceeded')
   r.i++ // {
   const obj: JsonObject = Object.create(null)
   const seen = new Set<string>()
   r.ws()
-  if (r.s[r.i] === '}') { r.i++; return obj }
+  if (r.s[r.i] === '}') { r.i++; r.depth--; return obj }
   for (;;) {
     r.ws()
     if (r.s[r.i] !== '"') r.err('expected object key')
@@ -48,22 +55,23 @@ function parseObject(r: Reader): JsonObject {
     r.ws()
     const d = r.s[r.i]
     if (d === ',') { r.i++; continue }
-    if (d === '}') { r.i++; return obj }
+    if (d === '}') { r.i++; r.depth--; return obj }
     r.err("expected ',' or '}'")
   }
 }
 
 function parseArray(r: Reader): JsonValue[] {
+  if (++r.depth > MAX_DEPTH) r.err('maximum nesting depth exceeded')
   r.i++ // [
   const arr: JsonValue[] = []
   r.ws()
-  if (r.s[r.i] === ']') { r.i++; return arr }
+  if (r.s[r.i] === ']') { r.i++; r.depth--; return arr }
   for (;;) {
     arr.push(parseValue(r))
     r.ws()
     const d = r.s[r.i]
     if (d === ',') { r.i++; continue }
-    if (d === ']') { r.i++; return arr }
+    if (d === ']') { r.i++; r.depth--; return arr }
     r.err("expected ',' or ']'")
   }
 }
@@ -145,9 +153,19 @@ export function loadsStrict(bytes: Uint8Array): JsonValue {
   } catch (e) {
     throw new CanonError(notUtf8(e instanceof Error ? e.message : String(e)))
   }
-  const r = new Reader(text)
-  const value = parseValue(r)
-  r.end()
-  rejectSurrogates(value)
-  return value
+  // Backstop the CanonError-only contract that Task 12's verify() relies on:
+  // remap any residual non-CanonError (e.g. RangeError from an oversized BigInt
+  // token) into a CanonError. The depth cap already prevents native stack
+  // overflow, so this is belt-and-suspenders for anything the parser doesn't
+  // surface as a CanonError itself.
+  try {
+    const r = new Reader(text)
+    const value = parseValue(r)
+    r.end()
+    rejectSurrogates(value)
+    return value
+  } catch (e) {
+    if (e instanceof CanonError) throw e
+    throw new CanonError(invalidJson(e instanceof Error ? e.message : String(e)))
+  }
 }
