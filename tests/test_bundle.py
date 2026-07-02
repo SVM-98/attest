@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -278,6 +279,20 @@ def test_disclose_output_contains_exactly_one_salt(tmp_path: Path) -> None:
     assert disclosed["delivery"]["salt"] == keys.b64u(SALT_A)
     # Never the whole map — only this receipt's own salt travels.
     assert disclosed["delivery"]["salt"] != keys.b64u(SALT_B)
+
+
+def test_disclose_output_is_written_0600(tmp_path: Path) -> None:
+    """The disclose output always embeds `delivery.salt` — a buyer-binding
+    bearer secret — so it must be owner-only (0600), never the default
+    world-readable 0644, matching the CLI's secret-file discipline."""
+    receipt_id = "01J1V5B4M9Z8QWERTY1234568F"
+    envelope = _envelope(receipt_id=receipt_id, salt=SALT_A)
+
+    out_path = bundle.disclose(
+        [envelope], [_key_manifest()], {receipt_id: SALT_A}, receipt_id, tmp_path
+    )
+
+    assert oct(os.stat(out_path).st_mode)[-3:] == "600"
 
 
 def test_disclose_output_is_self_contained_and_verifies(tmp_path: Path) -> None:

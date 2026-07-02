@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -54,6 +55,7 @@ from typing import Any
 from opr import keys, manifests, verify
 
 _PROVENANCE_BUNDLE = "bundle"
+_SECRET_FILE_MODE = 0o600  # disclose output carries delivery.salt (a bearer secret)
 
 _README_TEMPLATE = """<!doctype html>
 <html lang="en">
@@ -196,6 +198,24 @@ def _group_manifests_by_issuer(
 
 def _render_readme(name: str) -> str:
     return _README_TEMPLATE.replace("__BUNDLE_NAME__", name)
+
+
+def _write_secret_json(path: Path, obj: dict[str, Any]) -> None:
+    """Write a secret-bearing JSON file (the disclose output embeds
+    `delivery.salt`) created atomically with owner-only 0600 permissions.
+
+    `os.open(..., O_CREAT, 0600)` sets the mode at creation time, so there is
+    never the world-readable window a plain `write_text(...)` + `chmod(...)`
+    leaves under the default umask. `os.fchmod` on the already-open fd then
+    also pins the mode when `path` pre-existed with looser perms (a re-run
+    overwriting a prior disclosure) — race-free, it acts on the fd not the
+    path. Mirrors `cli._write_secret_text` deliberately.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _SECRET_FILE_MODE)
+    with os.fdopen(fd, "w") as fh:  # takes ownership of fd; closes even on raise
+        os.fchmod(fh.fileno(), _SECRET_FILE_MODE)
+        json.dump(obj, fh)
 
 
 def export(
@@ -372,6 +392,5 @@ def disclose(
         disclosed["delivery"] = delivery
 
     target = out / f"{receipt_id}.opr.json" if out.is_dir() else out
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(disclosed), encoding="utf-8")
+    _write_secret_json(target, disclosed)
     return target
