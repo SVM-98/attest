@@ -1,0 +1,13 @@
+{
+  "binding": "not_checked",
+  "errors_contains": [
+    "compromised"
+  ],
+  "note": "manifests.json carries the TAMPERED manifest (what verify() is fed); manifest_pristine.json is the untampered, self-consistent original.",
+  "ok": false,
+  "revocation": "unknown",
+  "schema": "not_checked",
+  "signature": "invalid",
+  "trust": "verified",
+  "warnings": []
+}

@@ -1,0 +1,12 @@
+{
+  "binding": "proven",
+  "commitment_b64u": "o8d7eFF6kEARvjqqsK_13BuWTdoaByHY7IKLYbhNMfk",
+  "errors": [],
+  "normalized_identifier": "Za\u00f1y_ID-042",
+  "ok": true,
+  "revocation": "unknown",
+  "schema": "valid",
+  "signature": "valid",
+  "trust": "verified",
+  "warnings": []
+}

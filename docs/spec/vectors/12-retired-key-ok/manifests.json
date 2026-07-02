@@ -1,0 +1,26 @@
+{
+  "chains": {},
+  "manifests": {
+    "store.example.com": {
+      "issued_at": "2025-01-01T00:00:00Z",
+      "issuer": "store.example.com",
+      "keys": [
+        {
+          "kid": "store.example.com/keys/2025-01#ed25519-1",
+          "pub": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
+          "status": "retired",
+          "valid_from": "2025-01-01T00:00:00Z",
+          "valid_to": null
+        }
+      ],
+      "manifest_signature": {
+        "kid": "store.example.com/keys/2025-01#ed25519-1",
+        "sig": "lNjNvk_vYsFfyCgjC0RF7jqRzMX4zEsG0nSjMpt8avATt8v62GeVX1XK0Wd5_5yPs5XcFwXZYEX_QR0xOJBTAQ"
+      },
+      "manifest_version": 1
+    }
+  },
+  "provenance": {
+    "store.example.com": "tls"
+  }
+}
