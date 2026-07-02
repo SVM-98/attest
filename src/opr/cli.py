@@ -27,6 +27,7 @@ rather than `"verified"` even when the signature checks out.
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -42,6 +43,7 @@ EXIT_USAGE_ERROR = 2
 
 _SECRET_FILE_MODE = 0o600
 _PROVENANCE_BUNDLE = "bundle"  # local trust material is unauthenticated TOFU (design §5)
+_REDACTED_SALT = "<redacted: run on the .private material to see it>"
 
 
 class CliUsageError(Exception):
@@ -64,16 +66,33 @@ def _read_json(path: Path) -> Any:
         raise CliUsageError(f"invalid JSON in {path}: {exc}") from exc
 
 
-def _write_json_file(path: Path, obj: Any) -> None:
+def _write_json_file(path: Path, obj: Any, *, secret: bool = False) -> None:
+    text = json.dumps(obj, indent=2, sort_keys=True)
+    if secret:
+        _write_secret_text(path, text)
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(obj, indent=2, sort_keys=True), encoding="utf-8")
+    path.write_text(text, encoding="utf-8")
 
 
 def _write_secret_text(path: Path, text: str) -> None:
-    """Write a secret (seed, salt) to `path` and lock it down to 0600."""
+    """Write a secret (seed, salt, salt-bearing envelope, salts.json) to
+    `path`, created atomically with owner-only 0600 permissions.
+
+    `os.open(..., O_CREAT, 0600)` sets the mode at creation time, so there is
+    never the brief window `write_text(...)` + `chmod(...)` leaves where the
+    file exists world-readable at the default umask. `os.fchmod` on the
+    already-open fd then also pins the mode when `path` pre-existed with
+    looser perms (a re-run overwriting a prior file) — still race-free
+    because it operates on the fd, not the path.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
-    os.chmod(path, _SECRET_FILE_MODE)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _SECRET_FILE_MODE)
+    # `os.fdopen` takes ownership of `fd`, so the `with` closes it even if
+    # `fchmod`/`write` raise — no manual close, no double-close.
+    with os.fdopen(fd, "w") as fh:
+        os.fchmod(fh.fileno(), _SECRET_FILE_MODE)
+        fh.write(text)
 
 
 def _read_b64u_file(path: Path) -> bytes:
@@ -209,7 +228,13 @@ def _cmd_issue(args: argparse.Namespace) -> int:
     envelope = issue.issue(
         payload, signing_kp, args.kid, salt=salt, manifest_snapshot=manifest_snapshot
     )
-    _write_json_file(args.out, envelope)
+    # An envelope that embeds delivery.salt carries the buyer-binding secret
+    # in cleartext, so its --out file must be as locked-down (0600) as the
+    # redundant --salt-out copy. A saltless envelope has no secret and keeps
+    # default perms.
+    delivery = envelope.get("delivery")
+    salt_bearing = isinstance(delivery, dict) and "salt" in delivery
+    _write_json_file(args.out, envelope, secret=salt_bearing)
     if args.salt_out is not None and salt is not None:
         _write_secret_text(args.salt_out, keys.b64u(salt))
 
@@ -381,12 +406,21 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
 
     warnings: list[str] = []
     delivery = envelope.get("delivery")
-    if isinstance(delivery, dict) and "salt" in delivery:
+    salt_present = isinstance(delivery, dict) and "salt" in delivery
+    if salt_present:
         warnings.append(
             "delivery.salt is present — a shareable file should not carry a buyer-binding salt"
         )
 
-    _print_json({"envelope": envelope, "warnings": warnings})
+    # Never print the raw buyer-binding secret to stdout: an operator pasting
+    # inspect output into a ticket/Slack/shell-history would leak the very
+    # secret this verb warns about. Redact it on a deep copy so the on-disk
+    # file and the parsed object stay untouched.
+    printed = copy.deepcopy(envelope)
+    if salt_present:
+        printed["delivery"]["salt"] = _REDACTED_SALT
+
+    _print_json({"envelope": printed, "warnings": warnings})
     return EXIT_OK
 
 
