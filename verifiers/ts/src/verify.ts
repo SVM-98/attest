@@ -7,7 +7,7 @@ import { classifyRevocation } from './revocation.js'
 import { computeCommitment, verifyChallenge } from './commitment.js'
 import { b64uEncode } from './b64u.js'
 import {
-  ERR, WARN, unsupportedOprVersion, signaturesCount, unsupportedSigAlg, noTrustedManifest,
+  ERR, WARN, unsupportedAttestVersion, signaturesCount, unsupportedSigAlg, noTrustedManifest,
   noKeyInManifest, keyCompromised, keyRetired, issuedAtOutsideWindow, malformedKeyMaterial,
   malformedSigMaterial, unknownField, unknownEol,
 } from './messages.js'
@@ -128,8 +128,8 @@ export function verify(
   }
 
   // Step 1 — envelope shape
-  const oprVersion = payload['opr_version']
-  if (oprVersion !== '0.1') return invalid(unsupportedOprVersion(oprVersion))
+  const attestVersion = payload['attest_version']
+  if (attestVersion !== '0.1') return invalid(unsupportedAttestVersion(attestVersion))
   if (signatures.length !== 1) return invalid(signaturesCount(signatures.length))
   const sigBlock = obj(signatures[0])
   if (!sigBlock) return invalid(ERR.MALFORMED_SIG_BLOCK)

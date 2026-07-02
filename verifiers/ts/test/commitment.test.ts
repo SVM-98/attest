@@ -17,11 +17,11 @@ describe('commitment', () => {
   })
   it('reproduces the reference commitments (09a/09b/09c)', () => {
     expect(b64uEncode(computeCommitment('Buyer@Example.com', 'email', salt)))
-      .toBe('4-s9PgtuDL3ZR7tlAVZpQCfPVMntewAQyqdLxtICPvg')
+      .toBe('RsKsjOk2kYydyaISKPgHb1tyf8g_k4iGsFCpdMQIL5I')
     expect(b64uEncode(computeCommitment('Büyér+Tag@Example.com', 'email', salt)))
-      .toBe('PlNdv5Y_WqRKtnoRa9ssAsz2e4lT8jxjCXJDC3MquV0')
+      .toBe('obc4b7CzVQ3d5-Bf7L2umqLdokMQkLMUs62Bdy25Qws')
     expect(b64uEncode(computeCommitment('Zañy_ID-042', 'issuer-account', salt)))
-      .toBe('o8d7eFF6kEARvjqqsK_13BuWTdoaByHY7IKLYbhNMfk')
+      .toBe('1PfyzQjFrlssflVr4sdbDF7JABB-8DHa0v6JmQBMR4k')
   })
   it('rejects wrong salt length and unknown type', () => {
     expect(() => computeCommitment('a@b.com', 'email', salt.slice(0, 8))).toThrow(/salt/)

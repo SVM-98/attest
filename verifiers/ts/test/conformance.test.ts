@@ -2,14 +2,14 @@
 // `docs/spec/vectors/` and asserts the produced VerificationResult matches
 // its `expected.json`, using the exact same match rules as the Python
 // reference's `tests/test_vectors.py`. Passing this suite in full IS the
-// definition of OPR v0.1 conformance for this implementation (see README).
+// definition of attest v0.1 conformance for this implementation (see README).
 import { describe, it, expect } from 'vitest'
 import { verify, isOk } from '../src/index.js'
 import * as V from './helpers/vectors.js'
 
 const leaves = V.findLeafDirs()
 
-describe('OPR v0.1 conformance vectors', () => {
+describe('attest v0.1 conformance vectors', () => {
   it('discovers the full vector suite (>= 23 leaves)', () => {
     expect(leaves.length).toBeGreaterThanOrEqual(23)
   })
