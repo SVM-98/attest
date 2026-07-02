@@ -19,7 +19,7 @@ February 2025; Sony ends PlayStation disc production for new games in
 January 2028, pushing more purchases into pure platform dependency. None of this is
 hypothetical or gaming-specific — it is what "buy" already means for every kind of
 digital media, and regulators are starting to notice: California's AB 2426 and
-Maryland's HB 208 both require disclosure that a digital "purchase" is a license,
+Maryland's [HB 208](https://mgaleg.maryland.gov/mgawebsite/Legislation/Details/hb0208?ys=2025RS) both require disclosure that a digital "purchase" is a license,
 and the EU's end-of-life industry code of conduct is due by the end of 2026. What's
 missing is not more disclosure law — it's an open technical standard for a purchase
 record the buyer actually holds, independent of whether the seller survives.
