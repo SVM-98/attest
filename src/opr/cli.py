@@ -292,6 +292,14 @@ def _cmd_verify(args: argparse.Namespace) -> int:
 
     trust_store = _load_trust_dir(args.trust_dir)
     revocation_view = _read_json(args.revocations) if args.revocations is not None else None
+    # Security: require an explicit JSON array. A lone record object (exactly
+    # what `revocation.build_record` emits) would otherwise be forwarded
+    # untyped and silently ignored by the revocation check, passing a revoked
+    # receipt as ok. Do not auto-wrap — make the operator supply the array.
+    if revocation_view is not None and not isinstance(revocation_view, list):
+        raise CliUsageError(
+            "--revocations must contain a JSON array of records; wrap a single record in [ ]"
+        )
     disclosure = _build_disclosure(args)
 
     result = verify.verify(envelope_bytes, trust_store, revocation_view, disclosure)

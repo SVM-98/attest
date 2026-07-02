@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from opr import cli, keys
+from opr import cli, keys, revocation
 from tests.helpers import make_payload
 
 ISSUER = "store.example.com"
@@ -208,6 +208,82 @@ def test_verify_unknown_issuer_no_trust_dir_match_exits_1(
 
     assert rc == 1
     assert result["ok"] is False
+
+
+# --- verify: --revocations (security: must fail-closed on a mis-shaped file) --
+
+
+def _policy_revoked_setup(tmp_path: Path) -> tuple[Path, Path, dict[str, object]]:
+    """A `revocability: policy` receipt + a genuine revocation record for it,
+    signed by the same active in-window key as the issuer manifest (mirrors
+    design vector 15). Returns (envelope_path, trust_dir, record)."""
+    seed, _pub = _keygen(tmp_path, "issuer")
+    manifest_path = _manifest_init(tmp_path, seed)
+    payload_path = _write_payload(tmp_path, license={"revocability": "policy"})
+    envelope_path = _issue(tmp_path, seed, payload_path)
+    trust_dir = _trust_dir(tmp_path, manifest_path)
+
+    kp = keys.from_seed(keys.b64u_decode(seed.read_text(encoding="utf-8").strip()))
+    receipt_id = json.loads(payload_path.read_text(encoding="utf-8"))["receipt_id"]
+    record = revocation.build_record(receipt_id, "revoked", "2026-07-03T00:00:00Z", kp, KID)
+    return envelope_path, trust_dir, record
+
+
+def test_verify_revocations_array_with_authenticated_record_exits_1(
+    tmp_path: Path, capsys: CapSys
+) -> None:
+    """A `--revocations` file with a proper JSON array [record] that
+    authenticates against the issuer manifest revokes a policy receipt."""
+    envelope_path, trust_dir, record = _policy_revoked_setup(tmp_path)
+    recs_path = tmp_path / "revocations.json"
+    recs_path.write_text(json.dumps([record]), encoding="utf-8")
+
+    capsys.readouterr()
+    rc = cli.main(
+        [
+            "verify",
+            str(envelope_path),
+            "--trust-dir",
+            str(trust_dir),
+            "--revocations",
+            str(recs_path),
+        ]
+    )
+    result = json.loads(capsys.readouterr().out)
+
+    assert rc == 1
+    assert result["ok"] is False
+    assert result["revocation"] == "revoked"
+
+
+def test_verify_revocations_bare_object_exits_2_not_ok_true(
+    tmp_path: Path, capsys: CapSys
+) -> None:
+    """The SAME record written as a bare OBJECT (not wrapped in a list) — the
+    exact shape `revocation.build_record` returns — must be a usage error
+    (exit 2), NEVER silently ignored into an `ok: true` pass of a genuinely
+    revoked receipt (fail-closed on a mis-shaped security input)."""
+    envelope_path, trust_dir, record = _policy_revoked_setup(tmp_path)
+    recs_path = tmp_path / "revocations.json"
+    recs_path.write_text(json.dumps(record), encoding="utf-8")  # bare object, not [record]
+
+    capsys.readouterr()
+    rc = cli.main(
+        [
+            "verify",
+            str(envelope_path),
+            "--trust-dir",
+            str(trust_dir),
+            "--revocations",
+            str(recs_path),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert captured.err != ""
+    # Critically: it must NOT have printed a passing verdict for a revoked receipt.
+    assert '"ok": true' not in captured.out
 
 
 # --- check-artifact ------------------------------------------------------------

@@ -14,6 +14,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import pytest
+
 from opr import canon, commitment, issue, keys, manifests, revocation, verify
 from tests.helpers import make_payload
 
@@ -448,6 +450,20 @@ def test_no_revocation_view_reports_unknown() -> None:
     envelope = issue.issue(make_payload(), KP, KID)
     result = verify.verify(_to_bytes(envelope), _trust_store(_key_manifest()))
     assert result.revocation == "unknown"
+
+
+def test_non_list_revocation_view_raises_type_error() -> None:
+    """Caller-contract enforcement (security): a lone revocation-record OBJECT
+    (the exact shape `revocation.build_record` returns) passed where a list is
+    required must fail loud, never be silently iterated as dict keys — which
+    would authenticate nothing and pass a genuinely revoked receipt as ok."""
+    envelope = issue.issue(make_payload(), KP, KID)
+    with pytest.raises(TypeError):
+        verify.verify(
+            _to_bytes(envelope),
+            _trust_store(_key_manifest()),
+            revocation_view={"receipt_id": "01J1V5B4M9Z8QWERTY12345678"},  # type: ignore[arg-type]
+        )
 
 
 # --- step 6 hardening: authenticate records before honoring/anchoring them --------
