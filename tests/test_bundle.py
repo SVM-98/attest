@@ -28,8 +28,10 @@ KP = keys.from_seed(bytes([21]) * 32)
 
 _LEGAL_TEXT = b"opr-test-legal-text-v1"
 _MIRROR_POLICY_TEXT = b"opr-test-mirror-policy-v1"
+_EOL_COMMITMENT_TEXT = b"opr-test-eol-commitment-v1"
 _LEGAL_TEXT_SHA256 = hashlib.sha256(_LEGAL_TEXT).hexdigest()
 _MIRROR_POLICY_SHA256 = hashlib.sha256(_MIRROR_POLICY_TEXT).hexdigest()
+_EOL_COMMITMENT_SHA256 = hashlib.sha256(_EOL_COMMITMENT_TEXT).hexdigest()
 
 SALT_A = bytes([1]) * 16
 SALT_B = bytes([2]) * 16
@@ -48,12 +50,20 @@ def _legal_texts() -> dict[str, bytes]:
 
 
 def _envelope(
-    *, receipt_id: str, salt: bytes | None = SALT_A, snapshot: dict[str, Any] | None = None
+    *,
+    receipt_id: str,
+    salt: bytes | None = SALT_A,
+    snapshot: dict[str, Any] | None = None,
+    with_eol: bool = False,
 ) -> dict[str, Any]:
+    survivability: dict[str, Any] = {"mirror_policy_sha256": _MIRROR_POLICY_SHA256}
+    if with_eol:
+        survivability["eol_commitment_uri"] = "https://store.example.com/opr/eol-commitment-v1"
+        survivability["eol_commitment_sha256"] = _EOL_COMMITMENT_SHA256
     payload = make_payload(
         receipt_id=receipt_id,
         license={"legal_text_sha256": _LEGAL_TEXT_SHA256},
-        survivability={"mirror_policy_sha256": _MIRROR_POLICY_SHA256},
+        survivability=survivability,
     )
     return issue.issue(payload, KP, KID, salt=salt, manifest_snapshot=snapshot)
 
@@ -177,6 +187,49 @@ def test_export_fails_when_mirror_policy_hash_does_not_match(tmp_path: Path) -> 
         bundle.export([envelope], [_key_manifest()], [], wrong_texts, tmp_path, "mylibrary")
 
 
+def test_export_fails_when_eol_commitment_text_missing(tmp_path: Path) -> None:
+    """§9: a non-null `survivability.eol_commitment_sha256` is a hash-bound
+    term the bundle must preserve exactly like the license text and mirror
+    policy — omit its bytes and export must fail closed."""
+    envelope = _envelope(receipt_id="01J1V5B4M9Z8QWERTY123456EA", with_eol=True)
+    incomplete_texts = {
+        _LEGAL_TEXT_SHA256: _LEGAL_TEXT,
+        _MIRROR_POLICY_SHA256: _MIRROR_POLICY_TEXT,
+        # eol commitment text deliberately missing
+    }
+
+    with pytest.raises(bundle.BundleError):
+        bundle.export([envelope], [_key_manifest()], [], incomplete_texts, tmp_path, "mylibrary")
+
+
+def test_export_fails_when_eol_commitment_hash_does_not_match(tmp_path: Path) -> None:
+    envelope = _envelope(receipt_id="01J1V5B4M9Z8QWERTY123456EB", with_eol=True)
+    wrong_texts = {
+        _LEGAL_TEXT_SHA256: _LEGAL_TEXT,
+        _MIRROR_POLICY_SHA256: _MIRROR_POLICY_TEXT,
+        _EOL_COMMITMENT_SHA256: b"this is not the eol commitment text",
+    }
+
+    with pytest.raises(bundle.BundleError):
+        bundle.export([envelope], [_key_manifest()], [], wrong_texts, tmp_path, "mylibrary")
+
+
+def test_export_succeeds_and_writes_eol_commitment_text(tmp_path: Path) -> None:
+    envelope = _envelope(receipt_id="01J1V5B4M9Z8QWERTY123456EC", with_eol=True)
+    texts = {
+        _LEGAL_TEXT_SHA256: _LEGAL_TEXT,
+        _MIRROR_POLICY_SHA256: _MIRROR_POLICY_TEXT,
+        _EOL_COMMITMENT_SHA256: _EOL_COMMITMENT_TEXT,
+    }
+
+    oprx_path, _private_path = bundle.export(
+        [envelope], [_key_manifest()], [], texts, tmp_path, "mylibrary"
+    )
+
+    with zipfile.ZipFile(oprx_path) as zf:
+        assert zf.read(f"legal/{_EOL_COMMITMENT_SHA256}.txt") == _EOL_COMMITMENT_TEXT
+
+
 def test_export_succeeds_and_writes_legal_texts_keyed_by_hash(tmp_path: Path) -> None:
     envelope = _envelope(receipt_id="01J1V5B4M9Z8QWERTY12345687")
 
@@ -294,3 +347,16 @@ def test_disclose_unknown_receipt_id_raises_bundle_error(tmp_path: Path) -> None
         bundle.disclose(
             [envelope], [_key_manifest()], {receipt_id: SALT_A}, "nonexistent", tmp_path
         )
+
+
+def test_disclose_raises_when_no_key_manifest_matches_signing_kid(tmp_path: Path) -> None:
+    """§9: a disclosure must be self-contained ("one receipt + its manifests +
+    its salt"). With no key manifest listing the receipt's signing kid, the
+    emitted file could never verify standalone — `disclose()` must fail closed
+    rather than return a success path to a non-verifiable file."""
+    receipt_id = "01J1V5B4M9Z8QWERTY1234568E"
+    envelope = _envelope(receipt_id=receipt_id, salt=SALT_A)
+
+    with pytest.raises(bundle.BundleError):
+        # No manifests at all -> nothing lists the signing kid.
+        bundle.disclose([envelope], [], {receipt_id: SALT_A}, receipt_id, tmp_path)

@@ -352,15 +352,20 @@ def disclose(
         for m in key_manifests
         if m.get("issuer") == issuer_id and manifests.find_key(m, kid) is not None
     ]
-    manifest_snapshot = (
-        max(candidates, key=lambda m: m.get("manifest_version", 0)) if candidates else None
-    )
+    if not candidates:
+        # Fail closed: a disclosure with no key manifest listing the signing
+        # kid could never verify standalone, which defeats disclose's whole
+        # purpose (§9: "one receipt + its manifests + its salt"). Every other
+        # path in this module raises rather than emit a silently-degraded
+        # artifact; this one does too.
+        raise BundleError(
+            f"no key manifest for signing kid {kid!r}; cannot produce a self-contained disclosure"
+        )
+    manifest_snapshot = max(candidates, key=lambda m: m.get("manifest_version", 0))
 
-    delivery: dict[str, Any] = {}
+    delivery: dict[str, Any] = {"issuer_manifest": manifest_snapshot}
     if receipt_id in salts:
         delivery["salt"] = keys.b64u(salts[receipt_id])
-    if manifest_snapshot is not None:
-        delivery["issuer_manifest"] = manifest_snapshot
 
     disclosed: dict[str, Any] = {"payload": payload, "signatures": envelope["signatures"]}
     if delivery:
