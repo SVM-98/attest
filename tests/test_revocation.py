@@ -1,10 +1,10 @@
-"""Tests for opr.revocation — issuer-signed revocation records (design §3.1/§6/§8)."""
+"""Tests for attest.revocation — issuer-signed revocation records (design §3.1/§6/§8)."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from opr import keys, manifests, revocation
+from attest import keys, manifests, revocation
 
 ISSUER = "store.example.com"
 KID = f"{ISSUER}/keys/test#ed25519-1"

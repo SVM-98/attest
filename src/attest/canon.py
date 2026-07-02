@@ -1,9 +1,9 @@
-"""RFC 8785 (JCS) canonicalization — OPR integer-only profile.
+"""RFC 8785 (JCS) canonicalization — attest integer-only profile.
 
 Deviation-by-restriction from full JCS: numbers MUST be integers with
 |n| < 2**53. Floats are rejected at both serialization and parse time,
 which removes the ECMAScript Number::toString implementation burden and
-its cross-language interop risk. Normative for OPR v0.1 payloads.
+its cross-language interop risk. Normative for attest v0.1 payloads.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ _ESCAPES = {
 
 
 class CanonError(ValueError):
-    """Input not representable in the OPR-JCS profile."""
+    """Input not representable in the attest-JCS profile."""
 
 
 class DuplicateKeyError(CanonError):
@@ -36,7 +36,7 @@ def _serialize_string(s: str) -> str:
     for ch in s:
         cp = ord(ch)
         if 0xD800 <= cp <= 0xDFFF:
-            raise CanonError("lone surrogate not allowed in the OPR-JCS profile")
+            raise CanonError("lone surrogate not allowed in the attest-JCS profile")
         if cp in _ESCAPES:
             out.append(_ESCAPES[cp])
         elif cp < 0x20:
@@ -57,7 +57,7 @@ def _serialize(obj: Any, out: list[str]) -> None:
             raise CanonError(f"integer out of I-JSON safe range: {obj}")
         out.append(str(obj))
     elif isinstance(obj, float):
-        raise CanonError("floats are not allowed in the OPR-JCS profile")
+        raise CanonError("floats are not allowed in the attest-JCS profile")
     elif isinstance(obj, str):
         out.append(_serialize_string(obj))
     elif isinstance(obj, list):
@@ -90,7 +90,7 @@ def dumps(obj: object) -> str:
 
 
 def canonical_bytes(obj: object) -> bytes:
-    """The only byte form ever signed or hashed in OPR."""
+    """The only byte form ever signed or hashed in attest."""
     return dumps(obj).encode("utf-8")
 
 
@@ -104,7 +104,7 @@ def _pairs_hook(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 
 def _reject_float(_s: str) -> Any:
-    raise CanonError("floats are not allowed in the OPR-JCS profile")
+    raise CanonError("floats are not allowed in the attest-JCS profile")
 
 
 def _has_surrogate(s: str) -> bool:
@@ -115,11 +115,11 @@ def _reject_surrogates(obj: Any) -> None:
     """Reject lone surrogates that entered via \\uXXXX escapes (keys or values)."""
     if isinstance(obj, str):
         if _has_surrogate(obj):
-            raise CanonError("lone surrogate not allowed in the OPR-JCS profile")
+            raise CanonError("lone surrogate not allowed in the attest-JCS profile")
     elif isinstance(obj, dict):
         for k, v in obj.items():
             if _has_surrogate(k):
-                raise CanonError("lone surrogate not allowed in the OPR-JCS profile")
+                raise CanonError("lone surrogate not allowed in the attest-JCS profile")
             _reject_surrogates(v)
     elif isinstance(obj, list):
         for item in obj:

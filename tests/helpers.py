@@ -1,24 +1,24 @@
-"""Shared test payload builder for OPR receipt payload tests."""
+"""Shared test payload builder for attest receipt payload tests."""
 
 from __future__ import annotations
 
 import hashlib
 from typing import Any
 
-from opr.keys import b64u
+from attest.keys import b64u
 
 # Fixed 32 zero-bytes commitment/pubkey material — deterministic, test-only.
 _COMMITMENT = b64u(bytes(32))
 
-_LEGAL_TEXT_SHA256 = hashlib.sha256(b"opr-test-legal-text-v1").hexdigest()
-_MIRROR_POLICY_SHA256 = hashlib.sha256(b"opr-test-mirror-policy-v1").hexdigest()
-_ARTIFACT_SHA256 = hashlib.sha256(b"opr-test-artifact-v1").hexdigest()
+_LEGAL_TEXT_SHA256 = hashlib.sha256(b"attest-test-legal-text-v1").hexdigest()
+_MIRROR_POLICY_SHA256 = hashlib.sha256(b"attest-test-mirror-policy-v1").hexdigest()
+_ARTIFACT_SHA256 = hashlib.sha256(b"attest-test-artifact-v1").hexdigest()
 
 
 def _base_payload() -> dict[str, Any]:
     """The §3.1 example payload (docs/superpowers/specs/2026-07-02-opr-spec-design.md)."""
     return {
-        "opr_version": "0.1",
+        "attest_version": "0.1",
         "receipt_id": "01J1V5B4M9Z8QWERTY12345678",
         "issued_at": "2026-07-02T14:30:00Z",
         "supersedes": None,
@@ -52,13 +52,13 @@ def _base_payload() -> dict[str, Any]:
             "revocability": "none",
             "transferable": False,
             "drm": "drm-free",
-            "terms_uri": "https://store.example.com/opr/license-templates/standard-v1",
+            "terms_uri": "https://store.example.com/attest/license-templates/standard-v1",
             "legal_text_sha256": _LEGAL_TEXT_SHA256,
             "jurisdiction_flags": {"eu_usedsoft_asserted": False},
         },
         "survivability": {
             "redownload_right": True,
-            "mirror_policy_uri": "https://store.example.com/opr/mirror-policy-v1",
+            "mirror_policy_uri": "https://store.example.com/attest/mirror-policy-v1",
             "mirror_policy_sha256": _MIRROR_POLICY_SHA256,
             "end_of_life": "artifacts-remain-redownloadable",
             "eol_commitment_uri": None,

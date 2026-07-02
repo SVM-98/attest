@@ -1,4 +1,5 @@
-"""Tests for opr.manifests — key manifests, artifact manifests, rotation continuity (design §5)."""
+"""Tests for attest.manifests — key manifests, artifact manifests, rotation
+continuity (design §5)."""
 
 from __future__ import annotations
 
@@ -8,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from opr import issue, keys, manifests, verify
+from attest import issue, keys, manifests, verify
 from tests.helpers import make_payload
 
 ISSUER = "store.example.com"
@@ -23,7 +24,7 @@ KID1 = f"{ISSUER}/keys/test#ed25519-1"
 KID2 = f"{ISSUER}/keys/test#ed25519-2"
 KID3 = f"{ISSUER}/keys/test#ed25519-3"
 
-_ARTIFACT_SHA256 = hashlib.sha256(b"opr-test-artifact-manifest-v1").hexdigest()
+_ARTIFACT_SHA256 = hashlib.sha256(b"attest-test-artifact-manifest-v1").hexdigest()
 
 
 def _artifact() -> dict[str, Any]:

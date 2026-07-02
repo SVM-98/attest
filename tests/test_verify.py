@@ -1,4 +1,4 @@
-"""Tests for opr.verify — layered verification core, §6 steps 0-5.
+"""Tests for attest.verify — layered verification core, §6 steps 0-5.
 
 Security-critical: this module decides whether a receipt's signature is
 valid, from which issuer, and whether it is schema-conformant. Tests build
@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from opr import canon, commitment, issue, keys, manifests, revocation, verify
+from attest import canon, commitment, issue, keys, manifests, revocation, verify
 from tests.helpers import make_payload
 
 ISSUER = "store.example.com"
@@ -163,12 +163,12 @@ def test_missing_signatures_member_is_invalid() -> None:
     assert any("signatures" in e for e in result.errors)
 
 
-def test_unsupported_opr_version_is_invalid() -> None:
-    """`opr_version` is gated by verify() itself (step 1), independent of and
+def test_unsupported_attest_version_is_invalid() -> None:
+    """`attest_version` is gated by verify() itself (step 1), independent of and
     before the jsonschema `const` check in step 5 — hand-sign to bypass
     issue()'s own schema gate and exercise verify()'s own check directly."""
     payload = make_payload()
-    payload["opr_version"] = "0.2"
+    payload["attest_version"] = "0.2"
     sig = keys.sign(canon.canonical_bytes(payload), KP)
     envelope = {
         "payload": payload,
@@ -176,7 +176,7 @@ def test_unsupported_opr_version_is_invalid() -> None:
     }
     result = verify.verify(_to_bytes(envelope), _trust_store(_key_manifest()))
     assert result.signature == "invalid"
-    assert any("opr_version" in e for e in result.errors)
+    assert any("attest_version" in e for e in result.errors)
 
 
 # --- step 2: issuer binding -----------------------------------------------------

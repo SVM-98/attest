@@ -1,4 +1,4 @@
-"""Generate the OPR v0.1 language-neutral conformance vectors (design §11,
+"""Generate the attest v0.1 language-neutral conformance vectors (design §11,
 Fase 1 vectors 1-11 plus Fase 2 lifecycle/policy vectors 12-18).
 
 Deterministic by construction: every keypair, salt, timestamp and ULID
@@ -36,7 +36,7 @@ Fase 2 (lifecycle/policy, vectors 12-18, design §11) additions to the format
 above, following the same fixed-input determinism discipline:
 
   - optional `revocation.json` — a single issuer-signed revocation record
-    (`opr.revocation.build_record()` output), fed to the replay test as
+    (`attest.revocation.build_record()` output), fed to the replay test as
     `revocation_view=[record]` (vectors 15, 16). Per the Task 9 hardening, a
     record only authenticates if signed by a key that is `active` in the
     issuer manifest with a `[valid_from, valid_to]` window covering the
@@ -61,7 +61,7 @@ import unicodedata
 from pathlib import Path
 from typing import Any
 
-from opr import canon, commitment, issue, keys, manifests, revocation, ulid, validate
+from attest import canon, commitment, issue, keys, manifests, revocation, ulid, validate
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 VECTORS_DIR = REPO_ROOT / "docs" / "spec" / "vectors"
@@ -97,10 +97,10 @@ ISSUED_AT = "2025-07-02T13:50:00Z"
 KEY_VALID_FROM = "2025-01-01T00:00:00Z"
 MANIFEST_ISSUED_AT = "2025-01-01T00:00:00Z"
 
-LEGAL_TEXT_SHA256 = hashlib.sha256(b"opr-vectors-legal-text-v1").hexdigest()
-MIRROR_POLICY_SHA256 = hashlib.sha256(b"opr-vectors-mirror-policy-v1").hexdigest()
-EOL_COMMITMENT_SHA256 = hashlib.sha256(b"opr-vectors-eol-commitment-v1").hexdigest()
-ARTIFACT_SHA256 = hashlib.sha256(b"opr-vectors-artifact-v1").hexdigest()
+LEGAL_TEXT_SHA256 = hashlib.sha256(b"attest-vectors-legal-text-v1").hexdigest()
+MIRROR_POLICY_SHA256 = hashlib.sha256(b"attest-vectors-mirror-policy-v1").hexdigest()
+EOL_COMMITMENT_SHA256 = hashlib.sha256(b"attest-vectors-eol-commitment-v1").hexdigest()
+ARTIFACT_SHA256 = hashlib.sha256(b"attest-vectors-artifact-v1").hexdigest()
 
 PRIOR_RECEIPT_ID = "01J1V5B4M9Z8QWERTY12345678"  # design §3.1 example, reused as `supersedes`
 
@@ -194,7 +194,7 @@ def _base_payload_kwargs(**overrides: Any) -> dict[str, Any]:
         "publisher": "Example Publisher srl",
         "identifiers": {"issuer_sku": "EXG-001"},
         "artifact_series": f"{ISSUER_ID}/works/EXG-001",
-        "terms_uri": f"https://{ISSUER_ID}/opr/license-templates/standard-v1",
+        "terms_uri": f"https://{ISSUER_ID}/attest/license-templates/standard-v1",
         "legal_text_sha256": LEGAL_TEXT_SHA256,
         "receipt_id": RECEIPT_ID,
         "issued_at": ISSUED_AT,
@@ -276,10 +276,10 @@ def gen_02_valid_full() -> None:
             drm="drm-bound",
             jurisdiction_flags={"eu_usedsoft_asserted": False},
             redownload_right=True,
-            mirror_policy_uri=f"https://{ISSUER_ID}/opr/mirror-policy-v1",
+            mirror_policy_uri=f"https://{ISSUER_ID}/attest/mirror-policy-v1",
             mirror_policy_sha256=MIRROR_POLICY_SHA256,
             end_of_life="escrow",
-            eol_commitment_uri=f"https://{ISSUER_ID}/opr/eol-commitment-v1",
+            eol_commitment_uri=f"https://{ISSUER_ID}/attest/eol-commitment-v1",
             eol_commitment_sha256=EOL_COMMITMENT_SHA256,
             supersedes=PRIOR_RECEIPT_ID,
             buyer_pubkey=BUYER_KP.pub,
@@ -399,8 +399,8 @@ def gen_06_duplicate_key_reject() -> None:
     _assert_schema_valid(payload)
     envelope = issue.issue(payload, ISSUER_KP, ISSUER_KID)
     text = json.dumps(envelope, separators=(",", ":"))
-    marker = '"opr_version":"0.1"'
-    assert text.count(marker) == 1, "expected exactly one opr_version member to duplicate"
+    marker = '"attest_version":"0.1"'
+    assert text.count(marker) == 1, "expected exactly one attest_version member to duplicate"
     duplicated = text.replace(marker, marker + "," + marker, 1)
     assert json.loads(duplicated)  # sanity: still syntactically valid generic JSON
     trust = _issuer_only_trust()
@@ -494,7 +494,7 @@ def gen_07_unicode_canon() -> None:
 def _malleate_signature(sig: bytes) -> bytes:
     """S -> S + L (group order): mathematically the same scalar mod L, since
     `B` has order `L`, so `[S+L]B == [S]B` — a non-canonical re-encoding of
-    "the same" signature that the OPR pinned ruleset (design §4) must reject
+    "the same" signature that the attest pinned ruleset (design §4) must reject
     (SUF-CMA: reject S >= L)."""
     r, s = sig[:32], int.from_bytes(sig[32:], "little")
     malleated_s = s + keys.L

@@ -1,4 +1,4 @@
-"""Tests for opr.cli — the operator-facing command surface (design §10).
+"""Tests for attest.cli — the operator-facing command surface (design §10).
 
 `cli.main([...])` is driven directly (no subprocess), per Task 14's brief.
 Every verb is a thin wrapper around a single library call, so these tests
@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from opr import cli, keys, revocation
+from attest import cli, keys, revocation
 from tests.helpers import make_payload
 
 ISSUER = "store.example.com"
@@ -491,7 +491,7 @@ def test_verify_with_matching_disclosure_proves_binding(tmp_path: Path, capsys: 
     seed, _pub = _keygen(tmp_path, "issuer")
     manifest_path = _manifest_init(tmp_path, seed)
 
-    from opr import commitment
+    from attest import commitment
 
     raw_salt = bytes(range(16))
     identifier = "buyer@example.com"
@@ -566,7 +566,7 @@ def test_disclose_writes_into_a_not_yet_existing_directory(tmp_path: Path, capsy
 
     assert rc == 0
     written = Path(result["out"])
-    assert written == out_dir / f"{receipt_id}.opr.json"
+    assert written == out_dir / f"{receipt_id}.attest.json"
     assert written.exists()
 
     disclosed = json.loads(written.read_text(encoding="utf-8"))
@@ -582,7 +582,7 @@ def test_disclose_writes_to_exact_file_path(tmp_path: Path, capsys: CapSys) -> N
 
     payload = json.loads(payload_path.read_text(encoding="utf-8"))
     receipt_id = payload["receipt_id"]
-    exact_out = tmp_path / "my-receipt.opr.json"
+    exact_out = tmp_path / "my-receipt.attest.json"
 
     capsys.readouterr()
     rc = cli.main(
@@ -617,7 +617,7 @@ def test_export_then_import_then_verify_roundtrip(tmp_path: Path, capsys: CapSys
         make_payload()["license"]["legal_text_sha256"],  # unused, just documents shape
     )
     del legal_text
-    legal_text_bytes = b"opr-test-legal-text-v1"
+    legal_text_bytes = b"attest-test-legal-text-v1"
     assert (
         hashlib.sha256(legal_text_bytes).hexdigest()
         == json.loads(payload_path.read_text(encoding="utf-8"))["license"]["legal_text_sha256"]
@@ -625,7 +625,7 @@ def test_export_then_import_then_verify_roundtrip(tmp_path: Path, capsys: CapSys
     legal_text_path = tmp_path / "legal.txt"
     legal_text_path.write_bytes(legal_text_bytes)
 
-    mirror_policy_bytes = b"opr-test-mirror-policy-v1"
+    mirror_policy_bytes = b"attest-test-mirror-policy-v1"
     mirror_policy_path = tmp_path / "mirror-policy.txt"
     mirror_policy_path.write_bytes(mirror_policy_bytes)
 
@@ -656,7 +656,7 @@ def test_export_then_import_then_verify_roundtrip(tmp_path: Path, capsys: CapSys
         [
             "import",
             "--bundle",
-            export_report["oprx"],
+            export_report["attest"],
             "--out-dir",
             str(import_out_dir),
         ]
@@ -666,7 +666,7 @@ def test_export_then_import_then_verify_roundtrip(tmp_path: Path, capsys: CapSys
     assert import_report["receipts"] == 1
 
     imported_trust_dir = import_out_dir / "trust"
-    imported_receipt = next((import_out_dir / "receipts").glob("*.opr.json"))
+    imported_receipt = next((import_out_dir / "receipts").glob("*.attest.json"))
 
     capsys.readouterr()
     rc = cli.main(["verify", str(imported_receipt), "--trust-dir", str(imported_trust_dir)])
@@ -711,7 +711,7 @@ def test_manifest_rotate_produces_version_2_signed_by_version_1_key(tmp_path: Pa
     )
     assert rc == 0
 
-    from opr import manifests
+    from attest import manifests
 
     trusted = json.loads(manifest_path.read_text(encoding="utf-8"))
     candidate = json.loads(rotated_out.read_text(encoding="utf-8"))
@@ -764,7 +764,7 @@ def test_manifest_artifacts_builds_signed_artifact_manifest(tmp_path: Path) -> N
     )
     assert rc == 0
 
-    from opr import manifests
+    from attest import manifests
 
     key_manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
     artifact_manifest = json.loads(out.read_text(encoding="utf-8"))
@@ -911,7 +911,7 @@ def test_manifest_rotate_compromise_without_new_key(tmp_path: Path) -> None:
     )
     assert rc == 0
 
-    from opr import manifests
+    from attest import manifests
 
     v2 = json.loads(manifest_v2.read_text(encoding="utf-8"))
     v3 = json.loads(manifest_v3.read_text(encoding="utf-8"))
@@ -975,7 +975,7 @@ def test_manifest_rotate_retire_flag(tmp_path: Path) -> None:
     )
     assert rc == 0
 
-    from opr import manifests
+    from attest import manifests
 
     v3 = json.loads(manifest_v3.read_text(encoding="utf-8"))
     assert manifests.find_key(v3, KID)["status"] == "retired"

@@ -1,7 +1,7 @@
-"""Ed25519 signing/verification under the OPR pinned ruleset.
+"""Ed25519 signing/verification under the attest pinned ruleset.
 
 Backend: PyNaCl (libsodium), chosen because libsodium natively enforces
-the ruleset OPR v0.1 pins: rejection of non-canonical S (SUF-CMA) and of
+the ruleset attest v0.1 pins: rejection of non-canonical S (SUF-CMA) and of
 small-order A and R (SBS). The canonical-S check is additionally enforced
 here explicitly so the property is locally testable and documented.
 """

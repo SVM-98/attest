@@ -1,4 +1,4 @@
-"""Receipt verification core — §6 steps 0-7 (the security heart of OPR).
+"""Receipt verification core — §6 steps 0-7 (the security heart of attest).
 
 Decides whether a receipt's signature is valid, from which issuer, whether
 it is schema-conformant, whether it has been effectively revoked, and
@@ -26,10 +26,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
-from opr import canon, commitment, keys, manifests, revocation, validate
+from attest import canon, commitment, keys, manifests, revocation, validate
 
 _ALG = "Ed25519"  # hard-coded — never selected from any field, mirrors issue.py
-_SUPPORTED_OPR_VERSIONS = frozenset({"0.1"})
+_SUPPORTED_ATTEST_VERSIONS = frozenset({"0.1"})
 _KNOWN_EOL_VALUES = frozenset({"artifacts-remain-redownloadable", "escrow", "none"})
 _DATE_FMT = "%Y-%m-%dT%H:%M:%SZ"
 
@@ -491,11 +491,11 @@ def verify(
         if chain and not _chain_continuous(chain):
             trust = _TRUST_UNVERIFIED_ROTATION
 
-    # --- Step 1: envelope well-formed; opr_version supported; signatures
+    # --- Step 1: envelope well-formed; attest_version supported; signatures
     # length == 1; alg == "Ed25519" (read only to reject, never to select).
-    opr_version = payload.get("opr_version")
-    if opr_version not in _SUPPORTED_OPR_VERSIONS:
-        return _invalid(f"unsupported opr_version: {opr_version!r}")
+    attest_version = payload.get("attest_version")
+    if attest_version not in _SUPPORTED_ATTEST_VERSIONS:
+        return _invalid(f"unsupported attest_version: {attest_version!r}")
 
     if len(signatures_obj) != 1:
         return _invalid(f"signatures must contain exactly one entry, got {len(signatures_obj)}")

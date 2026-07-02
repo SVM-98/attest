@@ -2,7 +2,7 @@ import unicodedata
 
 import pytest
 
-from opr import commitment, keys
+from attest import commitment, keys
 
 SALT = bytes(range(16))  # TEST ONLY
 

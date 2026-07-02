@@ -23,7 +23,7 @@ from collections.abc import Iterable
 from datetime import datetime
 from typing import Any
 
-from opr import canon, keys
+from attest import canon, keys
 
 _DATE_FMT = "%Y-%m-%dT%H:%M:%SZ"
 _ACTIVE = "active"
