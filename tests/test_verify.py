@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from opr import canon, issue, keys, manifests, verify
+from opr import canon, commitment, issue, keys, manifests, revocation, verify
 from tests.helpers import make_payload
 
 ISSUER = "store.example.com"
@@ -227,3 +227,298 @@ def test_unknown_end_of_life_value_emits_warning() -> None:
     result = verify.verify(_to_bytes(envelope), _trust_store(_key_manifest()))
     assert result.ok is True
     assert any("end_of_life" in w for w in result.warnings)
+
+
+# --- step 6: revocation-by-class (design §3.1/§6) --------------------------------
+#
+# revocability=="none" -> a matching, signature-valid record is itself invalid
+# (irrevocability guarantee; design vector 16). revocability=="policy" -> a
+# matching valid record is always honored (design vector 15). revocability==
+# "refund_window" -> a matching valid record is honored only if the record's
+# OWN signed revoked_at falls within issued_at + revocation_window_days.
+
+
+def test_revocation_policy_valid_record_is_revoked() -> None:
+    """Design vector 15: revocability:policy + a valid revocation record -> revoked."""
+    payload = make_payload(license={"revocability": "policy"})
+    envelope = issue.issue(payload, KP, KID)
+    record = revocation.build_record(
+        payload["receipt_id"], "revoked", "2026-07-03T00:00:00Z", KP, KID
+    )
+    result = verify.verify(
+        _to_bytes(envelope), _trust_store(_key_manifest()), revocation_view=[record]
+    )
+    assert result.revocation == "revoked"
+    assert result.ok is False
+
+
+def test_revocation_against_none_class_is_ignored() -> None:
+    """Design vector 16: this is the whole irrevocability argument — a valid
+    record against a revocability:none receipt is invalid, and the receipt
+    stays ok."""
+    payload = make_payload()  # revocability: none (base payload default)
+    envelope = issue.issue(payload, KP, KID)
+    record = revocation.build_record(
+        payload["receipt_id"], "revoked", "2026-07-03T00:00:00Z", KP, KID
+    )
+    result = verify.verify(
+        _to_bytes(envelope), _trust_store(_key_manifest()), revocation_view=[record]
+    )
+    assert result.revocation == "invalid_revocation_ignored"
+    assert result.ok is True
+    assert any("revocability" in w and "none" in w for w in result.warnings)
+
+
+def test_revocation_refund_window_inside_window_is_revoked() -> None:
+    payload = make_payload(
+        license={"revocability": "refund_window", "revocation_window_days": 14},
+        issued_at="2026-07-02T14:30:00Z",
+    )
+    envelope = issue.issue(payload, KP, KID)
+    record = revocation.build_record(
+        payload["receipt_id"], "revoked", "2026-07-10T00:00:00Z", KP, KID
+    )
+    result = verify.verify(
+        _to_bytes(envelope), _trust_store(_key_manifest()), revocation_view=[record]
+    )
+    assert result.revocation == "revoked"
+    assert result.ok is False
+
+
+def test_revocation_refund_window_outside_window_is_ignored() -> None:
+    payload = make_payload(
+        license={"revocability": "refund_window", "revocation_window_days": 14},
+        issued_at="2026-07-02T14:30:00Z",
+    )
+    envelope = issue.issue(payload, KP, KID)
+    record = revocation.build_record(
+        payload["receipt_id"], "revoked", "2026-08-01T00:00:00Z", KP, KID
+    )
+    result = verify.verify(
+        _to_bytes(envelope), _trust_store(_key_manifest()), revocation_view=[record]
+    )
+    assert result.revocation == "invalid_revocation_ignored"
+    assert result.ok is True
+    assert any("window" in w for w in result.warnings)
+
+
+def test_revocation_unsigned_record_is_ignored_with_warning() -> None:
+    payload = make_payload(license={"revocability": "policy"})
+    envelope = issue.issue(payload, KP, KID)
+    garbage_record = {
+        "receipt_id": payload["receipt_id"],
+        "status": "revoked",
+        "revoked_at": "2026-07-03T00:00:00Z",
+        # no "signature" member at all
+    }
+    result = verify.verify(
+        _to_bytes(envelope), _trust_store(_key_manifest()), revocation_view=[garbage_record]
+    )
+    assert result.revocation.startswith("not_revoked_as_of:")
+    assert result.ok is True
+    assert any("failed verification" in w for w in result.warnings)
+
+
+def test_revocation_view_supplied_no_match_reports_not_revoked_as_of() -> None:
+    payload = make_payload(license={"revocability": "policy"})
+    envelope = issue.issue(payload, KP, KID)
+    other_record = revocation.build_record(
+        "01J1V5B4M9Z8QWERTY99999999", "revoked", "2026-07-05T00:00:00Z", KP, KID
+    )
+    result = verify.verify(
+        _to_bytes(envelope), _trust_store(_key_manifest()), revocation_view=[other_record]
+    )
+    assert result.revocation == "not_revoked_as_of:2026-07-05T00:00:00Z"
+    assert result.ok is True
+
+
+def test_empty_revocation_view_reports_unknown() -> None:
+    envelope = issue.issue(make_payload(), KP, KID)
+    result = verify.verify(_to_bytes(envelope), _trust_store(_key_manifest()), revocation_view=[])
+    assert result.revocation == "unknown"
+
+
+def test_no_revocation_view_reports_unknown() -> None:
+    envelope = issue.issue(make_payload(), KP, KID)
+    result = verify.verify(_to_bytes(envelope), _trust_store(_key_manifest()))
+    assert result.revocation == "unknown"
+
+
+# --- step 7: buyer binding (design §3.2) ------------------------------------------
+
+
+def test_binding_salt_disclosure_proven() -> None:
+    salt = bytes(range(16))
+    identifier, identifier_type = "buyer@example.com", "email"
+    commitment_bytes = commitment.compute(identifier, identifier_type, salt)
+    payload = make_payload(
+        buyer={"commitment": keys.b64u(commitment_bytes), "identifier_type": identifier_type}
+    )
+    envelope = issue.issue(payload, KP, KID)
+    disclosure = verify.Disclosure(
+        identifier=identifier, identifier_type=identifier_type, salt=salt
+    )
+    result = verify.verify(
+        _to_bytes(envelope), _trust_store(_key_manifest()), disclosure=disclosure
+    )
+    assert result.binding == "proven"
+
+
+def test_binding_salt_disclosure_wrong_salt_is_not_proven() -> None:
+    salt = bytes(range(16))
+    wrong_salt = bytes(range(16, 32))
+    identifier, identifier_type = "buyer@example.com", "email"
+    commitment_bytes = commitment.compute(identifier, identifier_type, salt)
+    payload = make_payload(
+        buyer={"commitment": keys.b64u(commitment_bytes), "identifier_type": identifier_type}
+    )
+    envelope = issue.issue(payload, KP, KID)
+    disclosure = verify.Disclosure(
+        identifier=identifier, identifier_type=identifier_type, salt=wrong_salt
+    )
+    result = verify.verify(
+        _to_bytes(envelope), _trust_store(_key_manifest()), disclosure=disclosure
+    )
+    assert result.binding == "not_proven"
+
+
+def test_binding_salt_disclosure_non_ascii_email_proven() -> None:
+    """Exercises §3.2 normalize(): NFC + ASCII-only lowercasing on a non-ASCII email."""
+    salt = bytes(range(16))
+    identifier, identifier_type = "Büyér+Tag@Example.com", "email"
+    commitment_bytes = commitment.compute(identifier, identifier_type, salt)
+    payload = make_payload(
+        buyer={"commitment": keys.b64u(commitment_bytes), "identifier_type": identifier_type}
+    )
+    envelope = issue.issue(payload, KP, KID)
+    disclosure = verify.Disclosure(
+        identifier=identifier, identifier_type=identifier_type, salt=salt
+    )
+    result = verify.verify(
+        _to_bytes(envelope), _trust_store(_key_manifest()), disclosure=disclosure
+    )
+    assert result.binding == "proven"
+
+
+def test_binding_challenge_disclosure_proven() -> None:
+    buyer_kp = keys.from_seed(bytes([11]) * 32)
+    payload = make_payload(buyer={"pubkey": keys.b64u(buyer_kp.pub)})
+    envelope = issue.issue(payload, KP, KID)
+    nonce = bytes(range(16))
+    sig = commitment.sign_challenge(payload["receipt_id"], nonce, buyer_kp)
+    disclosure = verify.Disclosure(challenge=(nonce, sig))
+    result = verify.verify(
+        _to_bytes(envelope), _trust_store(_key_manifest()), disclosure=disclosure
+    )
+    assert result.binding == "proven"
+
+
+def test_binding_challenge_disclosure_wrong_nonce_is_not_proven() -> None:
+    buyer_kp = keys.from_seed(bytes([11]) * 32)
+    payload = make_payload(buyer={"pubkey": keys.b64u(buyer_kp.pub)})
+    envelope = issue.issue(payload, KP, KID)
+    nonce = bytes(range(16))
+    wrong_nonce = bytes(range(16, 32))
+    sig = commitment.sign_challenge(payload["receipt_id"], nonce, buyer_kp)
+    disclosure = verify.Disclosure(challenge=(wrong_nonce, sig))
+    result = verify.verify(
+        _to_bytes(envelope), _trust_store(_key_manifest()), disclosure=disclosure
+    )
+    assert result.binding == "not_proven"
+
+
+def test_binding_challenge_disclosure_null_pubkey_is_not_proven() -> None:
+    payload = make_payload()  # buyer.pubkey defaults to null
+    envelope = issue.issue(payload, KP, KID)
+    buyer_kp = keys.from_seed(bytes([11]) * 32)
+    nonce = bytes(range(16))
+    sig = commitment.sign_challenge(payload["receipt_id"], nonce, buyer_kp)
+    disclosure = verify.Disclosure(challenge=(nonce, sig))
+    result = verify.verify(
+        _to_bytes(envelope), _trust_store(_key_manifest()), disclosure=disclosure
+    )
+    assert result.binding == "not_proven"
+
+
+def test_no_disclosure_is_not_checked_even_with_revocation_view() -> None:
+    payload = make_payload(license={"revocability": "policy"})
+    envelope = issue.issue(payload, KP, KID)
+    result = verify.verify(_to_bytes(envelope), _trust_store(_key_manifest()), revocation_view=[])
+    assert result.binding == "not_checked"
+
+
+# --- steps 6-7 only run on an already-valid signature+schema ---------------------
+
+
+def test_invalid_signature_receipt_skips_revocation_and_binding() -> None:
+    envelope = issue.issue(make_payload(), KP, KID)
+    raw = bytearray(json.dumps(envelope).encode("utf-8"))
+    idx = raw.index(b"Example Game")
+    raw[idx] = ord("X")
+    disclosure = verify.Disclosure(identifier="x", identifier_type="email", salt=bytes(16))
+    result = verify.verify(
+        bytes(raw), _trust_store(_key_manifest()), revocation_view=[], disclosure=disclosure
+    )
+    assert result.signature == "invalid"
+    assert result.revocation == "unknown"
+    assert result.binding == "not_checked"
+
+
+def test_schema_invalid_receipt_skips_revocation_and_binding() -> None:
+    payload = make_payload()
+    del payload["work"]  # schema-invalid: missing required top-level field
+    sig = keys.sign(canon.canonical_bytes(payload), KP)
+    envelope = {
+        "payload": payload,
+        "signatures": [{"kid": KID, "alg": "Ed25519", "sig": keys.b64u(sig)}],
+    }
+    result = verify.verify(_to_bytes(envelope), _trust_store(_key_manifest()), revocation_view=[])
+    assert result.signature == "valid"
+    assert result.schema == "invalid"
+    assert result.revocation == "unknown"
+    assert result.binding == "not_checked"
+
+
+# --- trust: manifest rotation continuity (design §5) ------------------------------
+
+
+def test_rotation_continuity_happy_path_keeps_normal_trust() -> None:
+    root = _key_manifest()  # v1, sole active key KID/KP
+    entries_v2 = [manifests.key_entry(KID, KP.pub, "2026-01-01T00:00:00Z", None, "active")]
+    v2 = manifests.build_key_manifest(ISSUER, 2, "2026-02-01T00:00:00Z", entries_v2, KP, KID)
+    trust_store = verify.TrustStore(
+        manifests={ISSUER: v2}, provenance={ISSUER: "tls"}, chains={ISSUER: [root, v2]}
+    )
+    envelope = issue.issue(make_payload(), KP, KID)
+    result = verify.verify(_to_bytes(envelope), trust_store)
+    assert result.trust == "verified"
+    assert result.ok is True
+
+
+def test_rotation_discontinuous_chain_yields_unverified_rotation() -> None:
+    root = _key_manifest()  # v1, sole active key KID/KP
+    stranger_kp = keys.from_seed(bytes([12]) * 32)
+    stranger_kid = f"{ISSUER}/keys/test#ed25519-9"
+    entries_v2 = [
+        manifests.key_entry(KID, KP.pub, "2026-01-01T00:00:00Z", None, "active"),
+        manifests.key_entry(stranger_kid, stranger_kp.pub, "2026-02-01T00:00:00Z", None, "active"),
+    ]
+    # v2 signed by a key that was never active in v1 -> discontinuous rotation.
+    v2 = manifests.build_key_manifest(
+        ISSUER, 2, "2026-02-01T00:00:00Z", entries_v2, stranger_kp, stranger_kid
+    )
+    trust_store = verify.TrustStore(
+        manifests={ISSUER: v2}, provenance={ISSUER: "tls"}, chains={ISSUER: [root, v2]}
+    )
+    envelope = issue.issue(make_payload(), KP, KID)  # still resolves fine against v2's KID entry
+    result = verify.verify(_to_bytes(envelope), trust_store)
+    assert result.signature == "valid"
+    assert result.trust == "unverified_rotation"
+
+
+def test_no_chain_recorded_is_backward_compatible() -> None:
+    """Task-8 TrustStore construction (no `chains` kwarg) must keep working."""
+    trust_store = verify.TrustStore(manifests={ISSUER: _key_manifest()}, provenance={ISSUER: "tls"})
+    envelope = issue.issue(make_payload(), KP, KID)
+    result = verify.verify(_to_bytes(envelope), trust_store)
+    assert result.trust == "verified"
