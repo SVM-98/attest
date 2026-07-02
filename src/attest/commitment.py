@@ -5,10 +5,10 @@ from __future__ import annotations
 import hashlib
 import unicodedata
 
-from opr import keys
+from attest import keys
 
-LABEL_COMMITMENT = b"OPR-buyer-commitment-v1"
-LABEL_CHALLENGE = b"OPR-binding-challenge-v1"
+LABEL_COMMITMENT = b"Attest-buyer-commitment-v1"
+LABEL_CHALLENGE = b"Attest-binding-challenge-v1"
 IDENTIFIER_TYPES = ("issuer-account", "email")
 
 _SCRYPT_N = 32768

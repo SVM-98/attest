@@ -1,9 +1,9 @@
-"""Tests for opr.bundle — export/import bundles and the single-receipt disclose unit (design §9).
+"""Tests for attest.bundle — export/import bundles and the single-receipt disclose unit (design §9).
 
 Bundles are the "store dies, receipt survives" mechanism: `export()` produces
-a shareable `.oprx` (no secrets) plus a `.private.oprx` (salts/keys), and
+a shareable `.attest` (no secrets) plus a `.private.attest` (salts/keys), and
 `import_bundle()` reconstructs a working `verify.TrustStore` from what
-travelled inside the `.oprx` alone — offline, no network. `disclose()` is the
+travelled inside the `.attest` alone — offline, no network. `disclose()` is the
 single-receipt sharing unit for the email-attachment integration path.
 """
 
@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from opr import bundle, issue, keys, manifests, verify
+from attest import bundle, issue, keys, manifests, verify
 from tests.helpers import make_payload
 
 ISSUER = "store.example.com"
@@ -27,9 +27,9 @@ KID = f"{ISSUER}/keys/test#ed25519-1"
 # TEST ONLY — fixed seed, never use in production.
 KP = keys.from_seed(bytes([21]) * 32)
 
-_LEGAL_TEXT = b"opr-test-legal-text-v1"
-_MIRROR_POLICY_TEXT = b"opr-test-mirror-policy-v1"
-_EOL_COMMITMENT_TEXT = b"opr-test-eol-commitment-v1"
+_LEGAL_TEXT = b"attest-test-legal-text-v1"
+_MIRROR_POLICY_TEXT = b"attest-test-mirror-policy-v1"
+_EOL_COMMITMENT_TEXT = b"attest-test-eol-commitment-v1"
 _LEGAL_TEXT_SHA256 = hashlib.sha256(_LEGAL_TEXT).hexdigest()
 _MIRROR_POLICY_SHA256 = hashlib.sha256(_MIRROR_POLICY_TEXT).hexdigest()
 _EOL_COMMITMENT_SHA256 = hashlib.sha256(_EOL_COMMITMENT_TEXT).hexdigest()
@@ -59,7 +59,7 @@ def _envelope(
 ) -> dict[str, Any]:
     survivability: dict[str, Any] = {"mirror_policy_sha256": _MIRROR_POLICY_SHA256}
     if with_eol:
-        survivability["eol_commitment_uri"] = "https://store.example.com/opr/eol-commitment-v1"
+        survivability["eol_commitment_uri"] = "https://store.example.com/attest/eol-commitment-v1"
         survivability["eol_commitment_sha256"] = _EOL_COMMITMENT_SHA256
     payload = make_payload(
         receipt_id=receipt_id,
@@ -75,11 +75,11 @@ def _envelope(
 def test_export_import_roundtrip_verifies_green(tmp_path: Path) -> None:
     envelope = _envelope(receipt_id="01J1V5B4M9Z8QWERTY12345678")
 
-    oprx_path, private_path = bundle.export(
+    attest_path, private_path = bundle.export(
         [envelope], [_key_manifest()], [], _legal_texts(), tmp_path, "mylibrary"
     )
 
-    imported = bundle.import_bundle(oprx_path, private_path)
+    imported = bundle.import_bundle(attest_path, private_path)
 
     assert len(imported.receipts) == 1
     receipt = imported.receipts[0]
@@ -94,64 +94,64 @@ def test_export_import_roundtrip_verifies_green(tmp_path: Path) -> None:
 def test_import_without_private_file_has_empty_salts(tmp_path: Path) -> None:
     envelope = _envelope(receipt_id="01J1V5B4M9Z8QWERTY12345679")
 
-    oprx_path, _private_path = bundle.export(
+    attest_path, _private_path = bundle.export(
         [envelope], [_key_manifest()], [], _legal_texts(), tmp_path, "mylibrary"
     )
 
-    imported = bundle.import_bundle(oprx_path)
+    imported = bundle.import_bundle(attest_path)
     assert imported.salts == {}
 
 
 def test_private_file_recovers_the_original_salt(tmp_path: Path) -> None:
     envelope = _envelope(receipt_id="01J1V5B4M9Z8QWERTY12345680", salt=SALT_A)
 
-    oprx_path, private_path = bundle.export(
+    attest_path, private_path = bundle.export(
         [envelope], [_key_manifest()], [], _legal_texts(), tmp_path, "mylibrary"
     )
 
-    imported = bundle.import_bundle(oprx_path, private_path)
+    imported = bundle.import_bundle(attest_path, private_path)
     assert imported.salts["01J1V5B4M9Z8QWERTY12345680"] == SALT_A
 
 
-# --- shareable .oprx carries no secrets -----------------------------------------
+# --- shareable .attest carries no secrets -----------------------------------------
 
 
-def test_oprx_contains_no_salts_json(tmp_path: Path) -> None:
+def test_attest_contains_no_salts_json(tmp_path: Path) -> None:
     envelope = _envelope(receipt_id="01J1V5B4M9Z8QWERTY12345681")
 
-    oprx_path, _private_path = bundle.export(
+    attest_path, _private_path = bundle.export(
         [envelope], [_key_manifest()], [], _legal_texts(), tmp_path, "mylibrary"
     )
 
-    with zipfile.ZipFile(oprx_path) as zf:
+    with zipfile.ZipFile(attest_path) as zf:
         assert "salts.json" not in zf.namelist()
 
 
-def test_oprx_receipt_has_delivery_salt_stripped(tmp_path: Path) -> None:
+def test_attest_receipt_has_delivery_salt_stripped(tmp_path: Path) -> None:
     envelope = _envelope(receipt_id="01J1V5B4M9Z8QWERTY12345682")
 
-    oprx_path, _private_path = bundle.export(
+    attest_path, _private_path = bundle.export(
         [envelope], [_key_manifest()], [], _legal_texts(), tmp_path, "mylibrary"
     )
 
-    with zipfile.ZipFile(oprx_path) as zf:
-        stored = json.loads(zf.read("receipts/01J1V5B4M9Z8QWERTY12345682.opr.json"))
+    with zipfile.ZipFile(attest_path) as zf:
+        stored = json.loads(zf.read("receipts/01J1V5B4M9Z8QWERTY12345682.attest.json"))
     assert "salt" not in stored.get("delivery", {})
 
 
-def test_oprx_receipt_drops_delivery_entirely_when_only_salt_was_present(tmp_path: Path) -> None:
+def test_attest_receipt_drops_delivery_entirely_when_only_salt_was_present(tmp_path: Path) -> None:
     """A receipt whose only `delivery` member was `salt` must lose the whole
     `delivery` object once stripped — an empty `delivery: {}` is not the same
     shape as "no delivery member" and would confuse simpler consumers."""
     envelope = _envelope(receipt_id="01J1V5B4M9Z8QWERTY12345683", salt=SALT_A, snapshot=None)
     assert list(envelope["delivery"].keys()) == ["salt"]  # sanity: nothing else in delivery
 
-    oprx_path, _private_path = bundle.export(
+    attest_path, _private_path = bundle.export(
         [envelope], [_key_manifest()], [], _legal_texts(), tmp_path, "mylibrary"
     )
 
-    with zipfile.ZipFile(oprx_path) as zf:
-        stored = json.loads(zf.read("receipts/01J1V5B4M9Z8QWERTY12345683.opr.json"))
+    with zipfile.ZipFile(attest_path) as zf:
+        stored = json.loads(zf.read("receipts/01J1V5B4M9Z8QWERTY12345683.attest.json"))
     assert "delivery" not in stored
 
 
@@ -223,22 +223,22 @@ def test_export_succeeds_and_writes_eol_commitment_text(tmp_path: Path) -> None:
         _EOL_COMMITMENT_SHA256: _EOL_COMMITMENT_TEXT,
     }
 
-    oprx_path, _private_path = bundle.export(
+    attest_path, _private_path = bundle.export(
         [envelope], [_key_manifest()], [], texts, tmp_path, "mylibrary"
     )
 
-    with zipfile.ZipFile(oprx_path) as zf:
+    with zipfile.ZipFile(attest_path) as zf:
         assert zf.read(f"legal/{_EOL_COMMITMENT_SHA256}.txt") == _EOL_COMMITMENT_TEXT
 
 
 def test_export_succeeds_and_writes_legal_texts_keyed_by_hash(tmp_path: Path) -> None:
     envelope = _envelope(receipt_id="01J1V5B4M9Z8QWERTY12345687")
 
-    oprx_path, _private_path = bundle.export(
+    attest_path, _private_path = bundle.export(
         [envelope], [_key_manifest()], [], _legal_texts(), tmp_path, "mylibrary"
     )
 
-    with zipfile.ZipFile(oprx_path) as zf:
+    with zipfile.ZipFile(attest_path) as zf:
         assert zf.read(f"legal/{_LEGAL_TEXT_SHA256}.txt") == _LEGAL_TEXT
         assert zf.read(f"legal/{_MIRROR_POLICY_SHA256}.txt") == _MIRROR_POLICY_TEXT
 
@@ -249,14 +249,14 @@ def test_export_succeeds_and_writes_legal_texts_keyed_by_hash(tmp_path: Path) ->
 def test_readme_present_and_warns_about_private_file(tmp_path: Path) -> None:
     envelope = _envelope(receipt_id="01J1V5B4M9Z8QWERTY12345688")
 
-    oprx_path, _private_path = bundle.export(
+    attest_path, _private_path = bundle.export(
         [envelope], [_key_manifest()], [], _legal_texts(), tmp_path, "mylibrary"
     )
 
-    with zipfile.ZipFile(oprx_path) as zf:
+    with zipfile.ZipFile(attest_path) as zf:
         readme = zf.read("README.html").decode("utf-8")
 
-    assert "mylibrary.private.oprx" in readme
+    assert "mylibrary.private.attest" in readme
     assert "never" in readme.lower()
 
 
@@ -326,7 +326,7 @@ def test_import_groups_artifact_manifests_by_series_and_picks_latest_key_manifes
         "platform": "windows-x86_64",
         "filename": "example-game-1.1-setup.exe",
         "size_bytes": 1,
-        "sha256": hashlib.sha256(b"opr-test-artifact-manifest-v1").hexdigest(),
+        "sha256": hashlib.sha256(b"attest-test-artifact-manifest-v1").hexdigest(),
     }
     artifact_manifest_v1 = manifests.build_artifact_manifest(
         ISSUER, series, 1, "2026-01-01T00:00:00Z", [artifact], KP, KID
@@ -336,7 +336,7 @@ def test_import_groups_artifact_manifests_by_series_and_picks_latest_key_manifes
     )
     envelope = _envelope(receipt_id="01J1V5B4M9Z8QWERTY1234568E")
 
-    oprx_path, _private_path = bundle.export(
+    attest_path, _private_path = bundle.export(
         [envelope],
         [_key_manifest()],
         [artifact_manifest_v2, artifact_manifest_v1],  # deliberately out of order
@@ -345,7 +345,7 @@ def test_import_groups_artifact_manifests_by_series_and_picks_latest_key_manifes
         "mylibrary",
     )
 
-    imported = bundle.import_bundle(oprx_path)
+    imported = bundle.import_bundle(attest_path)
 
     assert [m["version"] for m in imported.artifact_manifests[series]] == [1, 2]
     # A single key-manifest version: it is both the "current" manifest and,
@@ -381,7 +381,7 @@ def test_disclose_raises_when_no_key_manifest_matches_signing_kid(tmp_path: Path
 
 
 def _make_raw_zip(tmp_path: Path, members: dict[str, bytes], name: str) -> Path:
-    """Build a raw .oprx-shaped zip with arbitrary members, bypassing export()
+    """Build a raw .attest-shaped zip with arbitrary members, bypassing export()
     — used to craft hostile bundles export() would never produce."""
     path = tmp_path / name
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -399,7 +399,7 @@ def test_import_rejects_member_over_per_member_cap(tmp_path: Path) -> None:
     case is out of scope here because stdlib `zipfile`'s writer has no way
     to emit it."""
     bomb = _make_raw_zip(
-        tmp_path, {"receipts/bomb.opr.json": b"\0" * (2 * 1024 * 1024)}, "bomb.oprx"
+        tmp_path, {"receipts/bomb.attest.json": b"\0" * (2 * 1024 * 1024)}, "bomb.attest"
     )
     with pytest.raises(bundle.BundleError):
         bundle.import_bundle(bomb, max_member_bytes=1024, max_total_bytes=10 * 1024 * 1024)
@@ -411,10 +411,10 @@ def test_import_rejects_honestly_declared_oversize_via_early_gate(tmp_path: Path
     z = _make_raw_zip(
         tmp_path,
         {
-            "receipts/a.opr.json": b"\0" * (1024 * 1024),
-            "receipts/b.opr.json": b"\0" * (1024 * 1024),
+            "receipts/a.attest.json": b"\0" * (1024 * 1024),
+            "receipts/b.attest.json": b"\0" * (1024 * 1024),
         },
-        "aggregate.oprx",
+        "aggregate.attest",
     )
     with pytest.raises(bundle.BundleError):
         bundle.import_bundle(z, max_member_bytes=10 * 1024 * 1024, max_total_bytes=1024)
@@ -423,34 +423,34 @@ def test_import_rejects_honestly_declared_oversize_via_early_gate(tmp_path: Path
 def test_import_rejects_too_many_entries(tmp_path: Path) -> None:
     """A central directory with more entries than max_entries is refused
     before anything is read."""
-    many = {f"receipts/{i:04d}.opr.json": b"{}" for i in range(50)}
-    z = _make_raw_zip(tmp_path, many, "manyentries.oprx")
+    many = {f"receipts/{i:04d}.attest.json": b"{}" for i in range(50)}
+    z = _make_raw_zip(tmp_path, many, "manyentries.attest")
     with pytest.raises(bundle.BundleError):
         bundle.import_bundle(z, max_entries=10)
 
 
 def test_import_caps_private_salts_json(tmp_path: Path) -> None:
-    """The .private.oprx salts.json read is capped too — a valid .oprx paired
+    """The .private.attest salts.json read is capped too — a valid .attest paired
     with a bomb private file is refused."""
     envelope = _envelope(receipt_id="01J1V5B4M9Z8QWERTY12345691")
-    oprx_path, _private = bundle.export(
+    attest_path, _private = bundle.export(
         [envelope], [_key_manifest()], [], _legal_texts(), tmp_path, "mylibrary"
     )
     evil_private = _make_raw_zip(
-        tmp_path, {"salts.json": b"\0" * (2 * 1024 * 1024)}, "evil.private.oprx"
+        tmp_path, {"salts.json": b"\0" * (2 * 1024 * 1024)}, "evil.private.attest"
     )
     with pytest.raises(bundle.BundleError):
-        # 256 KiB cap: comfortably above every legit .oprx member, far below the
-        # 2 MiB salts bomb, so the failure is the salts file, not the .oprx.
-        bundle.import_bundle(oprx_path, evil_private, max_member_bytes=256 * 1024)
+        # 256 KiB cap: comfortably above every legit .attest member, far below the
+        # 2 MiB salts bomb, so the failure is the salts file, not the .attest.
+        bundle.import_bundle(attest_path, evil_private, max_member_bytes=256 * 1024)
 
 
 def test_import_happy_path_unaffected_by_default_caps(tmp_path: Path) -> None:
     """Regression: a normal exported bundle imports fine under default caps —
     the caps are invisible to legitimate bundles."""
     envelope = _envelope(receipt_id="01J1V5B4M9Z8QWERTY12345690")
-    oprx_path, private_path = bundle.export(
+    attest_path, private_path = bundle.export(
         [envelope], [_key_manifest()], [], _legal_texts(), tmp_path, "mylibrary"
     )
-    imported = bundle.import_bundle(oprx_path, private_path)
+    imported = bundle.import_bundle(attest_path, private_path)
     assert len(imported.receipts) == 1

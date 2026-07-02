@@ -10,13 +10,13 @@ the signature.
 
 Two files come out of `export()`:
 
-- `<name>.oprx` — shareable-safe. Receipts have `delivery.salt` stripped
+- `<name>.attest` — shareable-safe. Receipts have `delivery.salt` stripped
   (the buyer-binding secret never leaves the buyer's private file), key and
   artifact manifests are grouped per issuer so `import_bundle()` can rebuild
   a working `verify.TrustStore` offline, referenced legal texts travel
   content-addressed by their sha256, and a generated `README.html` explains
   what the bundle is and which sibling file must never be shared.
-- `<name>.private.oprx` — secrets. `salts.json` maps `receipt_id -> salt`
+- `<name>.private.attest` — secrets. `salts.json` maps `receipt_id -> salt`
   (base64url); `keys/` is reserved for per-receipt buyer signing keypairs,
   but `export()`'s signature never receives that private key material (the
   store issuing receipts never holds a buyer's private key), so it stays
@@ -36,7 +36,7 @@ provenance `"bundle"` (design §5: unauthenticated TOFU, never silently
 treated as `"verified"`).
 
 `disclose()` is the single-receipt sharing unit (design §9): it emits one
-`.opr.json` self-contained via `delivery` — that receipt's own salt (never
+`.attest.json` self-contained via `delivery` — that receipt's own salt (never
 the whole salts map) plus a key-manifest snapshot that still lists the kid
 that signed it, so the file verifies standalone even against a bundle-less
 verifier.
@@ -52,12 +52,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from opr import keys, manifests, verify
+from attest import keys, manifests, verify
 
 _PROVENANCE_BUNDLE = "bundle"
 _SECRET_FILE_MODE = 0o600  # disclose output carries delivery.salt (a bearer secret)
 
-# Decompression caps for import_bundle (zip-bomb hardening). A .oprx is
+# Decompression caps for import_bundle (zip-bomb hardening). A .attest is
 # attacker-supplied — it is meant to survive peer-to-peer — so every member is
 # read under a bound. Defaults are generous for real libraries (JSON + legal
 # text) and still stop a bomb by orders of magnitude.
@@ -70,13 +70,13 @@ _README_TEMPLATE = """<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>OPR receipt bundle: __BUNDLE_NAME__</title>
+<title>attest receipt bundle: __BUNDLE_NAME__</title>
 </head>
 <body>
-<h1>OPR receipt bundle: __BUNDLE_NAME__</h1>
+<h1>attest receipt bundle: __BUNDLE_NAME__</h1>
 
 <h2>What this is</h2>
-<p>This is an Open Purchase Receipt (OPR) export bundle. It contains one or
+<p>This is an attest export bundle. It contains one or
 more signed purchase receipts, the issuer key manifests needed to verify
 them, and the full text of every license, mirror policy and end-of-life
 commitment document any receipt in this bundle refers to. Everything a
@@ -84,9 +84,9 @@ verifier needs is inside this one file: no network access, no account with
 the original store, and no cooperation from the issuer is required.</p>
 
 <h2>How to verify, even if the store no longer exists</h2>
-<p>Feed this bundle to any OPR-compatible verifier (for example, the
-reference implementation: <code>opr import __BUNDLE_NAME__.oprx</code> then
-<code>opr verify &lt;receipt_id&gt;</code>). Verification is fully offline:
+<p>Feed this bundle to any attest-compatible verifier (for example, the
+reference implementation: <code>attest import __BUNDLE_NAME__.attest</code> then
+<code>attest verify &lt;receipt_id&gt;</code>). Verification is fully offline:
 each receipt's Ed25519 signature is checked against the issuer's own key
 manifest, and both travel inside this bundle. Because this bundle was built
 without a live TLS connection to the issuer at verification time, a
@@ -94,16 +94,16 @@ compatible verifier reports trust as <code>unauthenticated_tofu</code>
 rather than <code>verified</code> — the signatures are exactly as valid;
 only their provenance could not be freshly confirmed over the network.</p>
 
-<h2 style="color:#b00020">Never share __BUNDLE_NAME__.private.oprx</h2>
-<p><strong>This file, __BUNDLE_NAME__.oprx, is safe to share</strong> — it
+<h2 style="color:#b00020">Never share __BUNDLE_NAME__.private.attest</h2>
+<p><strong>This file, __BUNDLE_NAME__.attest, is safe to share</strong> — it
 was built to contain no secrets. The separate sibling file
-<strong>__BUNDLE_NAME__.private.oprx is not safe to share</strong>: it holds
+<strong>__BUNDLE_NAME__.private.attest is not safe to share</strong>: it holds
 your buyer-binding salts (and, if you use per-receipt signing keys, those
 private keys too), which are what prove these receipts belong to you.
 Handing that file to anyone else hands them that proof for every receipt in
-your library at once. Keep <code>__BUNDLE_NAME__.private.oprx</code> for
+your library at once. Keep <code>__BUNDLE_NAME__.private.attest</code> for
 yourself. If you need to share or prove a single receipt, use
-<code>opr disclose &lt;receipt_id&gt;</code> instead — it discloses only
+<code>attest disclose &lt;receipt_id&gt;</code> instead — it discloses only
 that one receipt's binding secret, never your whole library.</p>
 </body>
 </html>
@@ -116,8 +116,8 @@ class BundleError(Exception):
 
 @dataclass(frozen=True)
 class ImportedBundle:
-    """Everything `import_bundle()` reconstructed from a `.oprx` (and,
-    optionally, its `.private.oprx` sibling) — enough to verify every
+    """Everything `import_bundle()` reconstructed from a `.attest` (and,
+    optionally, its `.private.attest` sibling) — enough to verify every
     receipt offline via `trust_store`."""
 
     receipts: list[dict[str, Any]]
@@ -235,7 +235,7 @@ def export(
     out_dir: Path,
     name: str,
 ) -> tuple[Path, Path]:
-    """Write `<name>.oprx` (shareable) and `<name>.private.oprx` (secrets).
+    """Write `<name>.attest` (shareable) and `<name>.private.attest` (secrets).
 
     Every legal-text hash referenced by any receipt is checked against
     `legal_texts` BEFORE anything is written to disk (§9: preserve the
@@ -250,13 +250,13 @@ def export(
             _check_legal_text(digest, legal_texts)
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    oprx_path = out_dir / f"{name}.oprx"
-    private_path = out_dir / f"{name}.private.oprx"
+    attest_path = out_dir / f"{name}.attest"
+    private_path = out_dir / f"{name}.private.attest"
 
     salts_b64u: dict[str, str] = {}
     referenced_hashes: set[str] = set()
 
-    with zipfile.ZipFile(oprx_path, "w", zipfile.ZIP_DEFLATED) as zf:
+    with zipfile.ZipFile(attest_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for envelope in receipts:
             payload = envelope["payload"]
             receipt_id = payload["receipt_id"]
@@ -266,7 +266,7 @@ def export(
             if isinstance(delivery, dict) and isinstance(delivery.get("salt"), str):
                 salts_b64u[receipt_id] = delivery["salt"]
 
-            zf.writestr(f"receipts/{receipt_id}.opr.json", json.dumps(_strip_salt(envelope)))
+            zf.writestr(f"receipts/{receipt_id}.attest.json", json.dumps(_strip_salt(envelope)))
 
         for issuer, blob in _group_manifests_by_issuer(key_manifests, artifact_manifests).items():
             zf.writestr(f"manifests/{issuer}.json", json.dumps(blob))
@@ -279,7 +279,7 @@ def export(
     with zipfile.ZipFile(private_path, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("salts.json", json.dumps(salts_b64u))
 
-    return oprx_path, private_path
+    return attest_path, private_path
 
 
 class _SizeBudget:
@@ -335,7 +335,7 @@ def _guard_zip(zf: zipfile.ZipFile, max_entries: int, max_total_bytes: int) -> N
 
 
 def import_bundle(
-    oprx_path: Path,
+    attest_path: Path,
     private_path: Path | None = None,
     *,
     max_member_bytes: int = _MAX_MEMBER_BYTES,
@@ -343,8 +343,8 @@ def import_bundle(
     max_entries: int = _MAX_ENTRIES,
 ) -> ImportedBundle:
     """Reconstruct receipts, a working `verify.TrustStore`, artifact
-    manifests and legal texts from a `.oprx` (and, if given, its
-    `.private.oprx` sibling for salts). Every issuer found in the bundle is
+    manifests and legal texts from a `.attest` (and, if given, its
+    `.private.attest` sibling for salts). Every issuer found in the bundle is
     trusted with provenance `"bundle"` — offline-imported manifests are
     unauthenticated TOFU by construction (design §5), never silently
     upgraded to `"verified"`.
@@ -353,7 +353,7 @@ def import_bundle(
     zip-bomb decompression caps (§2.1), each defaulting to its module
     constant: a per-member cap on bytes actually streamed out of one zip
     entry, an aggregate cap on the running total decompressed across every
-    member read during this call (`.oprx` and, when given, `.private.oprx`
+    member read during this call (`.attest` and, when given, `.private.attest`
     share one budget), and a cap on the central directory's entry count.
     Exceeding any of them raises `BundleError` rather than importing a
     possible bomb.
@@ -365,15 +365,15 @@ def import_bundle(
 
     # One shared budget for the whole call (spec §2.1: the aggregate cap is a
     # running total of decompressed bytes across ALL members read during one
-    # import_bundle call, not per-zip) — reused below for the .private.oprx
-    # salts read so a hostile .oprx/.private.oprx pair cannot each spend up
+    # import_bundle call, not per-zip) — reused below for the .private.attest
+    # salts read so a hostile .attest/.private.attest pair cannot each spend up
     # to max_total_bytes and together decompress 2x the aggregate ceiling.
     budget = _SizeBudget(max_member_bytes, max_total_bytes)
 
-    with zipfile.ZipFile(oprx_path, "r") as zf:
+    with zipfile.ZipFile(attest_path, "r") as zf:
         _guard_zip(zf, max_entries, max_total_bytes)
         for filename in sorted(zf.namelist()):
-            if filename.startswith("receipts/") and filename.endswith(".opr.json"):
+            if filename.startswith("receipts/") and filename.endswith(".attest.json"):
                 receipts.append(json.loads(budget.read(zf, filename)))
             elif filename.startswith("manifests/") and filename.endswith(".json"):
                 blob = json.loads(budget.read(zf, filename))
@@ -435,13 +435,13 @@ def disclose(
     receipt_id: str,
     out: Path,
 ) -> Path:
-    """Emit exactly one self-contained `.opr.json` for `receipt_id` (§9): its
+    """Emit exactly one self-contained `.attest.json` for `receipt_id` (§9): its
     own salt (never the whole `salts` map) plus a key-manifest snapshot that
     still lists the kid that signed it, embedded in `delivery` so the file
     verifies standalone.
 
     `out` may be an existing directory (the file is written as
-    `<receipt_id>.opr.json` inside it) or an exact destination path.
+    `<receipt_id>.attest.json` inside it) or an exact destination path.
     """
     envelope = next(
         (e for e in receipts if e.get("payload", {}).get("receipt_id") == receipt_id), None
@@ -477,6 +477,6 @@ def disclose(
     if delivery:
         disclosed["delivery"] = delivery
 
-    target = out / f"{receipt_id}.opr.json" if out.is_dir() else out
+    target = out / f"{receipt_id}.attest.json" if out.is_dir() else out
     _write_secret_json(target, disclosed)
     return target

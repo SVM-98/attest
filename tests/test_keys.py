@@ -1,9 +1,9 @@
 import pytest
 
-from opr import keys
+from attest import keys
 
 SEED = bytes([1]) * 32  # TEST ONLY — NEVER USE IN PRODUCTION
-MSG = b"opr test message"
+MSG = b"attest test message"
 
 
 def test_sign_verify_roundtrip() -> None:

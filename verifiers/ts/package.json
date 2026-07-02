@@ -1,7 +1,7 @@
 {
-  "name": "@opr/verifier",
+  "name": "attest-verifier",
   "version": "0.1.0",
-  "description": "Independent TypeScript verifier for OPR v0.1 receipts (verifier-only).",
+  "description": "Independent TypeScript verifier for attest v0.1 receipts (verifier-only).",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
