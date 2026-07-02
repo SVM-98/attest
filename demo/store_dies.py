@@ -87,27 +87,71 @@ def _narrate(message: str) -> None:
     print(f"\n--- {message} ---")
 
 
-def _run_cli(argv: list[str]) -> tuple[int, str]:
+def _verb_label(argv: list[str]) -> str:
+    """The human-readable verb name for error messages: the leading
+    non-flag tokens, e.g. `['manifest', 'init', '--issuer', ...]` ->
+    `'manifest init'`, `['issue', '--payload', ...]` -> `'issue'`."""
+    parts: list[str] = []
+    for token in argv:
+        if token.startswith("-"):
+            break
+        parts.append(token)
+    return " ".join(parts) if parts else argv[0]
+
+
+def _run_cli(argv: list[str]) -> tuple[int, str, str]:
     """Call `opr.cli.main` exactly as a real operator's shell would invoke
-    the installed `opr` binary. `cli.main` only returns an exit code — its
-    result is the JSON it prints to stdout — so this captures that stdout
-    (to let the demo assert on the outcome) while still forwarding the same
-    text to the real stdout, so the printed JSON remains part of the
-    narration exactly as it would from a real terminal session.
+    the installed `opr` binary, returning `(exit_code, stdout, stderr)`.
+
+    `cli.main` only returns an exit code — its status result is the JSON it
+    prints to stdout, and its errors go to stderr — so both streams are
+    captured (to let the demo assert on outcomes and surface failure causes)
+    while still being forwarded to the real stdout/stderr, so the printed
+    JSON and any error remain part of the narration exactly as they would
+    from a real terminal session.
     """
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
+    out_buf = io.StringIO()
+    err_buf = io.StringIO()
+    with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
         rc = cli.main(argv)
-    text = buf.getvalue()
-    sys.stdout.write(text)
-    return rc, text
+    stdout = out_buf.getvalue()
+    stderr = err_buf.getvalue()
+    sys.stdout.write(stdout)
+    sys.stderr.write(stderr)
+    return rc, stdout, stderr
 
 
-def _run_cli_json(argv: list[str]) -> tuple[int, dict[str, Any]]:
-    rc, text = _run_cli(argv)
-    result = json.loads(text)
+def _run_cli_json(argv: list[str]) -> dict[str, Any]:
+    """Run a setup verb that MUST succeed and return its stdout JSON object.
+
+    The exit code is checked BEFORE parsing stdout: a failed verb writes its
+    cause to stderr and leaves stdout empty, so parsing first would raise a
+    bare `json.JSONDecodeError` one line early and lose the real cause. On
+    any nonzero exit this raises a `RuntimeError` naming the verb and
+    carrying the CLI's own stderr message.
+    """
+    rc, stdout, stderr = _run_cli(argv)
+    verb = _verb_label(argv)
+    if rc != 0:
+        raise RuntimeError(f"demo step failed: `opr {verb}` exited {rc}: {stderr.strip()}")
+    result = json.loads(stdout)
     if not isinstance(result, dict):
-        raise RuntimeError(f"expected a JSON object from `opr {argv[0]}`, got: {text!r}")
+        raise RuntimeError(f"expected a JSON object from `opr {verb}`, got: {stdout!r}")
+    return result
+
+
+def _run_cli_capture(argv: list[str]) -> tuple[int, dict[str, Any]]:
+    """Run a verb whose nonzero exit is a legitimate, designed outcome
+    (`verify` concluding not-ok, `check-artifact` finding no match) rather
+    than an error: these print their JSON result to stdout *even on a
+    nonzero exit*, so the demo captures both the exit code and the parsed
+    result to assert on, instead of raising.
+    """
+    rc, stdout, _stderr = _run_cli(argv)
+    result = json.loads(stdout)
+    if not isinstance(result, dict):
+        verb = _verb_label(argv)
+        raise RuntimeError(f"expected a JSON object from `opr {verb}`, got: {stdout!r}")
     return rc, result
 
 
@@ -129,6 +173,12 @@ def run_demo(workspace: Path) -> dict[str, Any]:
     wrapper are expected to hand in `tmp_path`) and return the outcomes of
     every asserted step as a plain dict.
 
+    `workspace` MUST be a fresh/dedicated directory: the demo `rmtree`s
+    `workspace/store` in step 5. The `is_relative_to` guard below only
+    protects the tree *boundary* (nothing outside `workspace` is ever
+    deleted); it does NOT protect a caller that passes a shared directory
+    with pre-existing content under `store/`, which would be wiped.
+
     Deletes exactly one thing: the store's own subdirectory of `workspace`
     (step 5) — never anything outside `workspace`.
     """
@@ -147,12 +197,10 @@ def run_demo(workspace: Path) -> dict[str, Any]:
     _narrate("Step 1: the store generates its signing key and first key manifest")
     seed_path = store_dir / "issuer.seed"
     pub_path = store_dir / "issuer.pub"
-    rc, _ = _run_cli(["keygen", "--seed-out", str(seed_path), "--pub-out", str(pub_path)])
-    if rc != 0:
-        raise RuntimeError("demo setup failed: `opr keygen` did not exit 0")
+    _run_cli_json(["keygen", "--seed-out", str(seed_path), "--pub-out", str(pub_path)])
 
     manifest_path = store_dir / "manifest.json"
-    rc, _ = _run_cli(
+    _run_cli_json(
         [
             "manifest",
             "init",
@@ -170,8 +218,6 @@ def run_demo(workspace: Path) -> dict[str, Any]:
             str(manifest_path),
         ]
     )
-    if rc != 0:
-        raise RuntimeError("demo setup failed: `opr manifest init` did not exit 0")
 
     # --- Step 2: the product itself -----------------------------------------
     _narrate("Step 2: the store publishes a DRM-free game artifact and its manifest")
@@ -196,7 +242,7 @@ def run_demo(workspace: Path) -> dict[str, Any]:
     artifacts_json_path.write_text(json.dumps([artifact_entry]), encoding="utf-8")
 
     artifact_manifest_path = store_dir / "artifact-manifest.json"
-    rc, _ = _run_cli(
+    _run_cli_json(
         [
             "manifest",
             "artifacts",
@@ -218,8 +264,6 @@ def run_demo(workspace: Path) -> dict[str, Any]:
             str(artifact_manifest_path),
         ]
     )
-    if rc != 0:
-        raise RuntimeError("demo setup failed: `opr manifest artifacts` did not exit 0")
 
     # --- Step 3: issue an irrevocable receipt to Casey -----------------------
     _narrate(f"Step 3: the store issues an irrevocable receipt to {BUYER_IDENTIFIER}")
@@ -256,7 +300,7 @@ def run_demo(workspace: Path) -> dict[str, Any]:
     # `--salt` embeds `delivery.salt` in the `--out` envelope itself, making
     # it a single self-contained `.opr.json` (§9 delivery member).
     receipt_path = buyer_dir / "receipt.opr.json"
-    rc, issue_report = _run_cli_json(
+    issue_report = _run_cli_json(
         [
             "issue",
             "--payload",
@@ -271,14 +315,12 @@ def run_demo(workspace: Path) -> dict[str, Any]:
             str(receipt_path),
         ]
     )
-    if rc != 0:
-        raise RuntimeError("demo setup failed: `opr issue` did not exit 0")
     receipt_id = issue_report["receipt_id"]
     outcomes["receipt_id"] = receipt_id
 
     # --- Step 4: export the bundle -------------------------------------------
     _narrate("Step 4: the store exports a shareable bundle — Casey's copy of the deal")
-    rc, export_report = _run_cli_json(
+    export_report = _run_cli_json(
         [
             "export",
             "--receipt",
@@ -295,8 +337,6 @@ def run_demo(workspace: Path) -> dict[str, Any]:
             "casey-library",
         ]
     )
-    if rc != 0:
-        raise RuntimeError("demo setup failed: `opr export` did not exit 0")
     oprx_path = Path(export_report["oprx"])
     private_path = Path(export_report["private"])
     outcomes["export"] = {"oprx": str(oprx_path), "private": str(private_path)}
@@ -314,7 +354,7 @@ def run_demo(workspace: Path) -> dict[str, Any]:
 
     # --- Step 6: offline import + verify, store-less -------------------------
     _narrate("Step 6: Casey imports the bundle offline and verifies it against the bundle alone")
-    rc, import_report = _run_cli_json(
+    import_report = _run_cli_json(
         [
             "import",
             "--bundle",
@@ -325,8 +365,6 @@ def run_demo(workspace: Path) -> dict[str, Any]:
             str(import_dir),
         ]
     )
-    if rc != 0:
-        raise RuntimeError("demo failed: `opr import` did not exit 0")
     outcomes["import"] = import_report
 
     imported_receipt = next((import_dir / "receipts").glob("*.opr.json"))
@@ -334,7 +372,7 @@ def run_demo(workspace: Path) -> dict[str, Any]:
 
     # Deliberately no --revocations: this is the honest case where the
     # verifier has consulted no revocation feed at all.
-    rc, verify_report = _run_cli_json(
+    rc, verify_report = _run_cli_capture(
         ["verify", str(imported_receipt), "--trust-dir", str(trust_dir)]
     )
     outcomes["verify"] = verify_report
@@ -342,7 +380,7 @@ def run_demo(workspace: Path) -> dict[str, Any]:
 
     # --- Step 7: prove the binding via salt disclosure ------------------------
     _narrate("Step 7: Casey proves the receipt is theirs by disclosing the salt")
-    rc, disclosure_report = _run_cli_json(
+    rc, disclosure_report = _run_cli_capture(
         [
             "verify",
             str(imported_receipt),
@@ -361,7 +399,7 @@ def run_demo(workspace: Path) -> dict[str, Any]:
 
     # --- Step 8: the artifact itself survives, independently -----------------
     _narrate("Step 8: check a mirror copy of the game file against the surviving receipt")
-    rc, check_report = _run_cli_json(
+    rc, check_report = _run_cli_capture(
         ["check-artifact", str(mirror_path), "--receipt", str(imported_receipt)]
     )
     outcomes["check_artifact"] = check_report

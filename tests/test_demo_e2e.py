@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from demo import store_dies
 from demo.store_dies import run_demo
 
 CapSys = pytest.CaptureFixture[str]
@@ -50,6 +51,10 @@ def test_store_dies_receipt_survives(tmp_path: Path, capsys: CapSys) -> None:
     assert verify_result["schema"] == "valid"
     assert verify_result["trust"] == "unauthenticated_tofu"
     assert verify_result["revocation"] == "unknown"
+    # Honesty thesis: with no disclosure supplied, binding is NOT claimed —
+    # it becomes "proven" only after the explicit step-7 salt disclosure,
+    # never before (regression guard against over-claiming in step 6).
+    assert verify_result["binding"] == "not_checked"
 
     # --- Step 7: buyer-binding proof via salt disclosure --------------------
     disclosure_result = outcomes["verify_with_disclosure"]
@@ -73,6 +78,32 @@ def test_store_dies_receipt_survives(tmp_path: Path, capsys: CapSys) -> None:
     salt_path = tmp_path / "buyer" / "receipt.salt"
     assert salt_path.exists()
     assert stat.S_IMODE(salt_path.stat().st_mode) == 0o600
+
+
+def test_setup_verb_failure_raises_runtimeerror_with_cause_not_json_error(tmp_path: Path) -> None:
+    """A setup verb that must succeed but fails (here `issue` with a
+    nonexistent --payload) must surface a RuntimeError that names the verb
+    and carries the CLI's own stderr cause — NOT a bare json.JSONDecodeError
+    from trying to parse the (empty) stdout of a failed command *before*
+    noticing the nonzero exit code. This is what makes the demo's
+    documented setup-failure handling actually reachable."""
+    with pytest.raises(RuntimeError) as exc_info:
+        store_dies._run_cli_json(
+            [
+                "issue",
+                "--payload",
+                str(tmp_path / "does-not-exist.json"),
+                "--seed",
+                str(tmp_path / "missing.seed"),
+                "--kid",
+                "store.example/keys/k#1",
+                "--out",
+                str(tmp_path / "envelope.json"),
+            ]
+        )
+    message = str(exc_info.value)
+    assert "issue" in message  # the verb is named
+    assert "file not found" in message  # the CLI's own stderr cause is surfaced
 
 
 def test_run_demo_touches_nothing_outside_its_own_workspace(tmp_path: Path) -> None:
