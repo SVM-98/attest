@@ -34,6 +34,29 @@ function obj(v: JsonValue | undefined): JsonObject | null {
   return v !== null && v !== undefined && typeof v === 'object' && !Array.isArray(v) ? (v as JsonObject) : null
 }
 
+// Loud boundary guard: a loadsStrict-parsed structure never contains a JS `number`
+// (integers are `bigint`; floats are rejected at parse time). A JS `number` therefore
+// means the consumer built the trust store / revocation view with `JSON.parse` instead
+// of loadsStrict. Left unguarded, `manifest_version` as a `number` makes the self-verify
+// helpers' `serialize` throw CanonError(TYPE_NOT_JSON) → swallowed by their `catch { return
+// false }` → every revocation record is treated as forged → a genuinely REVOKED receipt
+// reports not_revoked (silent fail-open). Fail fast at the public boundary instead. Walks
+// arrays and plain objects only; non-plain values (e.g. Uint8Array) are not walked.
+function assertCanonParsed(value: unknown, label: string): void {
+  if (typeof value === 'number')
+    throw new TypeError(`${label} must be parsed with loadsStrict (bigint integers), not JSON.parse — found a JS number`)
+  if (Array.isArray(value)) {
+    for (const item of value) assertCanonParsed(item, label)
+    return
+  }
+  if (value !== null && typeof value === 'object') {
+    const proto = Object.getPrototypeOf(value)
+    if (proto === Object.prototype || proto === null)
+      for (const k of Object.keys(value)) assertCanonParsed((value as Record<string, unknown>)[k], label)
+    // non-plain objects (Uint8Array, class instances, etc.) are intentionally not walked
+  }
+}
+
 function contentWarnings(payload: JsonObject): string[] {
   const w: string[] = []
   for (const k of Object.keys(payload)) if (!SCHEMA_TOP_LEVEL_KEYS.has(k)) w.push(unknownField(k))
@@ -68,6 +91,13 @@ export function verify(
 ): VerificationResult {
   if (revocationView !== null && !Array.isArray(revocationView))
     throw new TypeError('revocation_view must be a list of records or None')
+
+  // Fail loud if the trust store / revocation view was JSON.parse'd (JS numbers) rather
+  // than loadsStrict-parsed (bigint). Prevents a silent revocation fail-open. Does NOT
+  // walk envelopeBytes (parsed internally) or disclosure (holds raw Uint8Array fields).
+  assertCanonParsed(trustStore.manifests, 'trustStore.manifests')
+  if (trustStore.chains != null) assertCanonParsed(trustStore.chains, 'trustStore.chains')
+  if (revocationView !== null) assertCanonParsed(revocationView, 'revocation_view')
 
   const errors: string[] = []
   const warnings: string[] = []
