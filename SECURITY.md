@@ -13,7 +13,7 @@ security issues with care.
 ## Reporting a vulnerability
 
 **Do not open a public issue for a security vulnerability.** Report it privately
-by email to `svm.overspend656@8shield.net`.
+by email to `SVM-98@proton.me`.
 
 Please include:
 
