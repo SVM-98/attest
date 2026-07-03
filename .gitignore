@@ -25,6 +25,7 @@ htmlcov/
 
 # Agent / test runtime state
 .superpowers/
+docs/superpowers/
 .hypothesis/
 
 # Node (TS verifier)
