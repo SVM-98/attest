@@ -33,6 +33,11 @@ ignore = ["S101"]  # assert in tests
 [tool.mypy]
 strict = true
 python_version = "3.12"
+# Lets standalone `mypy --strict tools/<script>.py` invocations (e.g. gen_site_sample.py)
+# resolve `attest` as first-party typed source instead of an untyped installed package
+# (src/attest has no py.typed marker, and PEP 561 requires one for editable-install
+# consumers outside the src tree to see its types).
+mypy_path = "src"
 
 [[tool.mypy.overrides]]
 module = "jsonschema.*"
