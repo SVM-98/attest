@@ -48,7 +48,7 @@ h2 { margin-top: 2.2rem; }
 .components { margin: 1rem 0 0; }
 .component { border-left: 4px solid var(--tone, var(--neutral)); padding: 0.15rem 0 0.15rem 0.8rem; margin: 0.7rem 0; }
 .component dt { display: flex; gap: 0.6rem; align-items: baseline; }
-.component-name { font-weight: 600; text-transform: capitalize; }
+.component-name { font-weight: 600; }
 .component-value { color: var(--tone, var(--neutral)); }
 .component dd { margin: 0.15rem 0 0; color: var(--muted); }
 .warnings h4, .errors h4 { margin: 0.8rem 0 0.2rem; }

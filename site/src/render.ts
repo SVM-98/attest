@@ -40,7 +40,7 @@ export function renderResult(label: string, run: VerifyRun): HTMLElement {
     const e = explain(component, value)
     const row = el('div', `component tone-${e.tone}`)
     const dt = el('dt')
-    dt.appendChild(el('span', 'component-name', component))
+    dt.appendChild(el('span', 'component-name', e.label))
     dt.appendChild(el('code', 'component-value', value))
     row.appendChild(dt)
     row.appendChild(el('dd', undefined, e.text))

@@ -105,6 +105,12 @@ export function initApp(doc: Document): AppHandle {
     void file.arrayBuffer().then((buf) => sink(file.name, new Uint8Array(buf)))
   }
   dropzone.addEventListener('click', () => fileInput.click())
+  dropzone.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault()
+      fileInput.click()
+    }
+  })
   dropzone.addEventListener('dragover', (e) => e.preventDefault())
   dropzone.addEventListener('drop', (e) => {
     e.preventDefault()
