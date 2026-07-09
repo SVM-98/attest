@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'">
+  <meta name="description" content="attest — cryptographically-signed purchase receipts the buyer holds. Verify one right here, offline, in your browser.">
+  <title>attest — the store dies, the receipt survives</title>
+  <link rel="stylesheet" href="/src/styles.css">
+</head>
+<body>
+<header class="hero">
+  <h1>attest</h1>
+  <p class="tagline">The store dies. The receipt survives.</p>
+  <p>An open standard for cryptographically-signed purchase receipts, for any digital
+     purchase — games, music, film and TV, books. The store signs a receipt once; the buyer
+     holds it forever; anyone can verify it offline. No wallet, no blockchain, no server
+     that has to stay alive for the proof to still work.</p>
+  <nav>
+    <a href="https://github.com/SVM-98/attest">GitHub</a>
+    <a href="https://github.com/SVM-98/attest/blob/main/docs/spec/attest-v0.1.md">Spec v0.1</a>
+    <a href="https://github.com/SVM-98/attest/blob/main/docs/faq.md">FAQ</a>
+  </nav>
+</header>
+
+<main>
+  <section class="verifier">
+    <h2>Verify a receipt — right here, in your browser</h2>
+    <p>Everything runs client-side: this page has a Content-Security-Policy that forbids
+       talking to any other host, so your receipt never leaves this tab — you can even cut
+       the network once the page is loaded and verification still works.</p>
+    <div id="dropzone" role="button" tabindex="0">
+      <strong>Drop a <code>.attest</code> bundle or <code>.attest.json</code> receipt here</strong>
+      <span>or click to pick a file</span>
+    </div>
+    <input id="file-input" type="file" accept=".attest,.json,application/json,application/zip" hidden>
+    <p class="sample-row">No receipt handy?
+      <button id="load-sample" type="button">Try the sample bundle</button>
+      <a href="sample/demo.attest" download>download it</a> — a receipt from a fictional
+      store, <em>Nebula Games</em>, that no longer exists.</p>
+
+    <div id="manifest-zone" hidden>
+      <p>Drop or pick the issuer’s key-manifest JSON:</p>
+      <input id="manifest-input" type="file" accept=".json,application/json">
+    </div>
+
+    <details class="binding">
+      <summary>Prove a receipt is yours (salt disclosure)</summary>
+      <p>A receipt seals a commitment to the buyer’s identifier. Disclosing the salt lets a
+         verifier recompute it — a deliberate, replayable proof: whoever you show it to can
+         replay it, so disclose only to parties you would show the receipt to anyway
+         (spec §8.1). This page stores nothing.</p>
+      <label>Identifier <input id="binding-identifier" autocomplete="off" placeholder="casey@example.com"></label>
+      <label>Type
+        <select id="binding-type">
+          <option value="email">email</option>
+          <option value="issuer-account">issuer-account</option>
+        </select>
+      </label>
+      <label>Salt (base64url) <input id="binding-salt" autocomplete="off" placeholder="from your .private.attest"></label>
+      <button id="binding-apply" type="button">Re-verify with binding proof</button>
+    </details>
+
+    <section id="results" aria-live="polite"></section>
+  </section>
+
+  <section class="explainer">
+    <h2>The problem</h2>
+    <p>A digital “purchase” today is a revocable license living inside one company’s
+       platform. When the platform shuts down, delists a title, or changes terms, the
+       buyer’s library goes with it: Robot Cache bricked already-downloaded games at its
+       2026 shutdown; Funimation wiped customers’ digital libraries in 2024; Kindle removed
+       book export in 2025. Regulators have started requiring stores to <em>disclose</em>
+       that “buy” means “license” — what’s missing is the technical standard for a purchase
+       record the buyer actually holds. That’s attest.</p>
+
+    <h2>How it works</h2>
+    <ol>
+      <li><strong>The store signs.</strong> At checkout, the seller signs a receipt —
+          title, terms, artifact hashes, survivability promises — with its published
+          Ed25519 key.</li>
+      <li><strong>You hold it.</strong> The buyer keeps the <code>.attest</code> bundle
+          anywhere: disk, cloud, USB. No account has to stay alive.</li>
+      <li><strong>Anyone verifies, offline.</strong> Any verifier — this page, the CLI, a
+          marketplace — checks the signature against the issuer’s key material. The store
+          can disappear; the math doesn’t.</li>
+    </ol>
+
+    <h2>What attest is not</h2>
+    <ul>
+      <li><strong>Not the content.</strong> A receipt is evidence of a license grant — it
+          never hosts, indexes, or unlocks the work itself.</li>
+      <li><strong>Not a DRM tool.</strong> It never strips or bypasses DRM, and a receipt
+          for a DRM-bound purchase says so honestly.</li>
+      <li><strong>Not a blockchain.</strong> A signed receipt needs no consensus, token, or
+          wallet. (A strictly optional transparency-anchoring layer is future roadmap — the
+          only place a chain will ever appear.)</li>
+      <li><strong>Not resale.</strong> v0.1 defines no transfer protocol; the
+          <code>transferable</code> field is reserved for a future rights-holder-authorized
+          profile.</li>
+    </ul>
+    <p>Skeptical? Good — read the <a href="https://github.com/SVM-98/attest/blob/main/docs/faq.md">FAQ</a>,
+       it answers the questions a reasonable person asks.</p>
+  </section>
+</main>
+
+<footer>
+  <p>Code Apache-2.0 · Spec CC BY 4.0 · <a href="https://github.com/SVM-98/attest">github.com/SVM-98/attest</a>
+     · <a href="https://github.com/SVM-98/attest/discussions">Discussions</a></p>
+</footer>
+<script type="module" src="/src/main.ts"></script>
+</body>
+</html>

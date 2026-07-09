@@ -8,6 +8,10 @@ The store signs a receipt once; the buyer holds it forever; anyone can verify it
 offline. No wallet, no blockchain, no server that has to stay alive for the proof
 to still work.
 
+**Try it in your browser:** <https://svm-98.github.io/attest/> — drop a `.attest`
+bundle (or the built-in sample) and watch it verify entirely client-side; the
+page's CSP forbids it from talking to any other host.
+
 ## The problem
 
 A digital "purchase" today is a revocable license living inside one company's
