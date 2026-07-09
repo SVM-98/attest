@@ -1,0 +1,5 @@
+{
+  "identifier": "casey@example.com",
+  "identifier_type": "email",
+  "salt_b64u": "WH5JHu10RbB86j_UwK2JHA"
+}
