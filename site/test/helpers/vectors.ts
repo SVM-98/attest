@@ -1,10 +1,12 @@
 import { readdirSync, readFileSync, existsSync, statSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, URL as NodeURL } from 'node:url'
 import { loadsStrict } from 'attest-verifier'
 import type { JsonObject, TrustStore, Disclosure, JsonValue } from 'attest-verifier'
 
-const HERE = fileURLToPath(new URL('.', import.meta.url))
+// Use node:url's URL explicitly — under `@vitest-environment jsdom` the global
+// URL is jsdom's WHATWG implementation, which fileURLToPath doesn't recognize.
+const HERE = fileURLToPath(new NodeURL('.', import.meta.url))
 export const VECTORS_ROOT = join(HERE, '..', '..', '..', 'docs', 'spec', 'vectors')
 
 export function findLeafDirs(root = VECTORS_ROOT): string[] {
