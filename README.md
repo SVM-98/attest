@@ -71,6 +71,23 @@ proves the receipt still verifies.
 
 ## Quickstart
 
+Install the reference implementation from PyPI (the distribution is named
+`attest-receipts`; the import package and the CLI are both `attest`):
+
+```sh
+pip install attest-receipts
+attest --help
+```
+
+The TypeScript verifier is on npm as
+[`attest-verifier`](https://www.npmjs.com/package/attest-verifier):
+
+```sh
+npm install attest-verifier
+```
+
+Or work from a checkout of this repo:
+
 ```sh
 uv venv --python 3.12 .venv && uv pip install --python .venv -e '.[dev]'
 # or: pip install -e .

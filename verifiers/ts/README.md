@@ -12,6 +12,14 @@ This verifier shares no code with the Python reference implementation. It is a f
 
 ## Install / build
 
+From npm:
+
+```sh
+npm install attest-verifier
+```
+
+From a repo checkout:
+
 ```sh
 npm install
 npm run build       # tsc -p tsconfig.json -> dist/
