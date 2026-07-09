@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { loadsStrict, canonicalBytes } from 'attest-verifier'
@@ -50,5 +50,21 @@ describe('initApp wiring', () => {
   it('shows the private-file refusal', () => {
     app.handleBytes('lib.private.attest', new Uint8Array([0x50, 0x4b]))
     expect(document.getElementById('results')!.textContent).toMatch(/never share/i)
+  })
+
+  it('opens the file picker from the dropzone on Enter and Space, but not other keys', () => {
+    const fileInput = document.getElementById('file-input') as HTMLInputElement
+    const spy = vi.fn()
+    fileInput.click = spy
+    const dropzone = document.getElementById('dropzone')!
+
+    dropzone.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    expect(spy).toHaveBeenCalledTimes(1)
+
+    dropzone.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', bubbles: true }))
+    expect(spy).toHaveBeenCalledTimes(2)
+
+    dropzone.dispatchEvent(new KeyboardEvent('keydown', { key: 'a', bubbles: true }))
+    expect(spy).toHaveBeenCalledTimes(2)
   })
 })
