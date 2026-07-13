@@ -1601,6 +1601,82 @@ def gen_24_canonical_roundtrip() -> None:
     )
 
 
+def _sign_manually(payload: dict[str, Any]) -> dict[str, Any]:
+    """Build a signature envelope the way `issue.issue` does internally,
+    bypassing its schema-validity gate. Used only for vector 25, whose
+    payloads are deliberately schema-invalid but still JCS-signable (see
+    `gen_25_schema_parity`)."""
+    payload_bytes = canon.canonical_bytes(payload)
+    sig = keys.sign(payload_bytes, ISSUER_KP)
+    return {
+        "payload": payload,
+        "signatures": [{"kid": ISSUER_KID, "alg": "Ed25519", "sig": keys.b64u(sig)}],
+    }
+
+
+def gen_25_schema_parity() -> None:
+    """Direct regressions for the two schema drifts the 2026-07-13 review
+    caught: work.edition accepting non-strings in schema.ts (must-fix #5)
+    and the ULID regex accepting a first char > '7' (must-fix #7, pattern
+    ^[0-7][0-9A-HJKMNP-TV-Z]{25}$ in both schema implementations). Both
+    payloads are mutated to be schema-invalid AFTER `build_payload` but
+    BEFORE signing (JCS accepts ints and any string) -- `issue.issue`
+    itself would reject them at its schema gate, so the envelope is built
+    manually via `_sign_manually`, isolating the schema check from the
+    signature check."""
+    trust = _issuer_only_trust()
+
+    # (a) work.edition as an int
+    payload_a = issue.build_payload(**_base_payload_kwargs())
+    payload_a["work"]["edition"] = 7
+    violations_a = validate.validate_payload(payload_a)
+    assert any("edition" in v for v in violations_a), violations_a
+    envelope_a = _sign_manually(payload_a)
+    expected_a = {
+        "signature": "valid",
+        "schema": "invalid",
+        "revocation": "unknown",
+        "binding": "not_checked",
+        "trust": "verified",
+        "ok": False,
+        "errors_contains": ["edition"],
+        "warnings": [],
+    }
+    write_vector(
+        "25-schema-parity/a-edition-nonstring",
+        payload=payload_a,
+        envelope=envelope_a,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected_a,
+    )
+
+    # (b) receipt_id first char '8' (> 128-bit ULID timestamp prefix)
+    payload_b = issue.build_payload(**_base_payload_kwargs())
+    payload_b["receipt_id"] = "8" + RECEIPT_ID[1:]
+    violations_b = validate.validate_payload(payload_b)
+    assert any("receipt_id" in v for v in violations_b), violations_b
+    envelope_b = _sign_manually(payload_b)
+    expected_b = {
+        "signature": "valid",
+        "schema": "invalid",
+        "revocation": "unknown",
+        "binding": "not_checked",
+        "trust": "verified",
+        "ok": False,
+        "errors_contains": ["receipt_id"],
+        "warnings": [],
+    }
+    write_vector(
+        "25-schema-parity/b-ulid-first-char",
+        payload=payload_b,
+        envelope=envelope_b,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected_b,
+    )
+
+
 def main() -> None:
     _clear_leaf_dirs(VECTORS_DIR)
     VECTORS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1629,6 +1705,7 @@ def main() -> None:
     gen_22_b64u_decoder_parity()
     gen_23_revocation_refund_window()
     gen_24_canonical_roundtrip()
+    gen_25_schema_parity()
     leaf_count = sum(1 for _ in VECTORS_DIR.rglob("expected.json"))
     print(f"generated {leaf_count} vector cases under {VECTORS_DIR}")
 
