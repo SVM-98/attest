@@ -1225,6 +1225,80 @@ def gen_19_rotation_substituted_key() -> None:
     )
 
 
+# --- vector 20: sig-canonicity (three sub-cases) ------------------------------
+
+
+def gen_20_sig_canonicity() -> None:
+    """Ed25519 pinned-ruleset edges (design §4): S must satisfy S < L
+    (vector 08 already pins S+L; sub-case a pins the exact boundary S == L),
+    and small-order A (signer pubkey) / small-order R (signature prefix) must
+    be rejected — libsodium rejects both natively, @noble does with
+    zip215:false (verifiers/ts/src/ed25519.ts). The identity element is used
+    as the canonical small-order point."""
+    payload = issue.build_payload(**_base_payload_kwargs())
+    _assert_schema_valid(payload)
+    envelope = issue.issue(payload, ISSUER_KP, ISSUER_KID)
+    trust = _issuer_only_trust()
+    original_sig = keys.b64u_decode(envelope["signatures"][0]["sig"])
+    r_bytes, s_bytes = original_sig[:32], original_sig[32:]
+
+    rejected = {
+        "signature": "invalid",
+        "schema": "not_checked",
+        "revocation": "unknown",
+        "binding": "not_checked",
+        "trust": "verified",
+        "ok": False,
+        "errors_contains": ["signature verification failed"],
+        "warnings": [],
+    }
+
+    # (a) S == L exactly: the smallest non-canonical scalar.
+    s_equals_l = copy.deepcopy(envelope)
+    s_equals_l["signatures"][0]["sig"] = keys.b64u(r_bytes + keys.L.to_bytes(32, "little"))
+    write_vector(
+        "20-sig-canonicity/a-s-equals-l",
+        payload=payload,
+        envelope=s_equals_l,
+        envelope_raw=None,
+        trust=trust,
+        expected=rejected,
+    )
+
+    # (b) signer pubkey is small-order: manifest lists SMALL_ORDER_KID with the
+    # identity point as pub (manifest itself is signed by ISSUER_KID, so its
+    # self-verify holds); the envelope claims SMALL_ORDER_KID.
+    so_entries = [
+        manifests.key_entry(ISSUER_KID, ISSUER_KP.pub, KEY_VALID_FROM, None, "active"),
+        manifests.key_entry(SMALL_ORDER_KID, SMALL_ORDER_POINT, KEY_VALID_FROM, None, "active"),
+    ]
+    so_manifest = manifests.build_key_manifest(
+        ISSUER_ID, 1, MANIFEST_ISSUED_AT, so_entries, ISSUER_KP, ISSUER_KID
+    )
+    so_envelope = copy.deepcopy(envelope)
+    so_envelope["signatures"][0]["kid"] = SMALL_ORDER_KID
+    write_vector(
+        "20-sig-canonicity/b-small-order-pubkey",
+        payload=None,
+        envelope=so_envelope,
+        envelope_raw=None,
+        trust=_trust_material((ISSUER_ID, so_manifest, "tls")),
+        expected=rejected,
+    )
+
+    # (c) signature R component is small-order, S kept from the real signature.
+    so_r = copy.deepcopy(envelope)
+    so_r["signatures"][0]["sig"] = keys.b64u(SMALL_ORDER_POINT + s_bytes)
+    write_vector(
+        "20-sig-canonicity/c-small-order-r",
+        payload=None,
+        envelope=so_r,
+        envelope_raw=None,
+        trust=trust,
+        expected=rejected,
+    )
+
+
 def main() -> None:
     _clear_leaf_dirs(VECTORS_DIR)
     VECTORS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1248,6 +1322,7 @@ def main() -> None:
     gen_17_binding_proven()
     gen_18_drm_bound()
     gen_19_rotation_substituted_key()
+    gen_20_sig_canonicity()
     leaf_count = sum(1 for _ in VECTORS_DIR.rglob("expected.json"))
     print(f"generated {leaf_count} vector cases under {VECTORS_DIR}")
 
