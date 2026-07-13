@@ -12,6 +12,7 @@ import json
 from typing import Any
 
 _INT_MAX = 2**53  # exclusive
+_MAX_DEPTH = 256  # matches the TS parser cap; bounds parse/reject-surrogate recursion
 _ESCAPES = {
     0x08: "\\b",
     0x09: "\\t",
@@ -126,11 +127,40 @@ def _reject_surrogates(obj: Any) -> None:
             _reject_surrogates(item)
 
 
+def _check_depth(text: str) -> None:
+    """Reject nesting beyond ``_MAX_DEPTH`` before ``json.loads`` runs, so a
+    pathologically nested payload can never drive JSON parsing or surrogate
+    rejection into an uncaught ``RecursionError`` (2026-07-13 review, finding 3).
+    Mirrors the TS recursive-descent depth cap. Brackets inside strings are
+    ignored so string content never inflates the count."""
+    depth = 0
+    in_string = False
+    escaped = False
+    for ch in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch in "[{":
+            depth += 1
+            if depth > _MAX_DEPTH:
+                raise CanonError("maximum nesting depth exceeded")
+        elif ch in "]}":
+            depth -= 1
+
+
 def loads_strict(data: bytes) -> object:
     try:
         text = data.decode("utf-8", errors="strict")
     except UnicodeDecodeError as exc:
         raise CanonError(f"input is not valid UTF-8: {exc}") from exc
+    _check_depth(text)
     try:
         parsed = json.loads(
             text,
@@ -140,5 +170,7 @@ def loads_strict(data: bytes) -> object:
         )
     except json.JSONDecodeError as exc:
         raise CanonError(f"invalid JSON: {exc}") from exc
+    except RecursionError as exc:  # belt-and-suspenders: the depth cap should prevent this
+        raise CanonError("maximum nesting depth exceeded") from exc
     _reject_surrogates(parsed)
     return parsed
