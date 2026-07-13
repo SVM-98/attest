@@ -83,6 +83,9 @@ export function checkContinuity(trusted: JsonObject, candidate: JsonObject): boo
     if (!sigBlock || typeof sigBlock['kid'] !== 'string') return false
     const signer = findKey(trusted, sigBlock['kid'])
     if (signer === null || signer['status'] !== 'active') return false
+    // The signer key must also cover the candidate's issuance window, consistent
+    // with verifyArtifactManifest (2026-07-13 review, finding 12).
+    if (!withinValidity(candidate['issued_at'], signer)) return false
     // Bind continuity to the key TRUSTED vouches for: verify the candidate's
     // signature under trusted's pub for signer_kid, NOT the candidate's own
     // (attacker-substitutable) entry (2026-07-13 review, finding 1).

@@ -135,14 +135,22 @@ def _load_trust_dir(trust_dir: Path) -> verify.TrustStore:
 
 
 def _safe_name(value: str) -> str:
-    """Sanitize an issuer/series identifier for use as a filename component."""
-    return value.replace("/", "_")
+    """Sanitize a bundle-controlled issuer/series identifier into a single
+    filename component: neutralize path separators (both platforms), the
+    drive-letter colon, and any parent-directory component, so a hostile name
+    can never escape the output directory (2026-07-13 review, finding 14)."""
+    safe = value.replace("/", "_").replace("\\", "_").replace(":", "_").replace("..", "_")
+    return safe or "_"
 
 
 # --- keygen -------------------------------------------------------------------
 
 
 def _cmd_keygen(args: argparse.Namespace) -> int:
+    if args.seed_out.resolve() == args.pub_out.resolve():
+        # Aliased outputs would overwrite the seed with the pubkey (2026-07-13
+        # review, finding 18).
+        raise CliUsageError("--seed-out and --pub-out must be different paths")
     kp = keys.generate()
     _write_secret_text(args.seed_out, keys.b64u(kp.seed))
     args.pub_out.parent.mkdir(parents=True, exist_ok=True)
@@ -246,6 +254,10 @@ def _cmd_manifest_artifacts(args: argparse.Namespace) -> int:
 def _cmd_issue(args: argparse.Namespace) -> int:
     if args.salt_out is not None and args.salt is None:
         raise CliUsageError("--salt-out requires --salt (nothing to write out otherwise)")
+    if args.salt_out is not None and args.out.resolve() == args.salt_out.resolve():
+        # Aliased outputs would overwrite the receipt with the raw salt (2026-07-13
+        # review, finding 18).
+        raise CliUsageError("--out and --salt-out must be different paths")
 
     payload = _read_json(args.payload)
     signing_kp = _load_seed_kp(args.seed)
@@ -287,6 +299,12 @@ def _result_to_dict(result: verify.VerificationResult) -> dict[str, Any]:
 
 def _build_disclosure(args: argparse.Namespace) -> verify.Disclosure | None:
     salt = _read_b64u_file(args.disclose_salt) if args.disclose_salt is not None else None
+    # A half-supplied challenge (only nonce, or only sig) must be rejected, not
+    # silently dropped (2026-07-13 review, finding 17).
+    if (args.disclose_challenge_nonce is None) != (args.disclose_challenge_sig is None):
+        raise CliUsageError(
+            "--disclose-challenge-nonce and --disclose-challenge-sig must be given together"
+        )
     challenge = None
     if args.disclose_challenge_nonce is not None and args.disclose_challenge_sig is not None:
         challenge = (
@@ -391,6 +409,14 @@ def _cmd_export(args: argparse.Namespace) -> int:
 
 
 def _cmd_import(args: argparse.Namespace) -> int:
+    if args.private is not None:
+        # Spec: a conforming CLI MUST warn whenever .private material is accessed
+        # (2026-07-13 review, finding 19).
+        print(
+            "warning: reading .private.attest — it carries buyer-binding secrets; "
+            "handle it with care and never share it.",
+            file=sys.stderr,
+        )
     imported = bundle.import_bundle(args.bundle, args.private)
 
     receipts_dir = args.out_dir / "receipts"
@@ -478,8 +504,22 @@ def _cmd_check_artifact(args: argparse.Namespace) -> int:
         raise CliUsageError(f"file not found: {args.file}") from exc
 
     match = next((a for a in artifacts if isinstance(a, dict) and a.get("sha256") == digest), None)
+    # This verb compares hashes only; it does NOT authenticate the receipt. Say so
+    # loudly and machine-readably so a match is never mistaken for verification
+    # (2026-07-13 review, finding 13).
+    print(
+        "warning: check-artifact compares hashes only and does NOT verify the receipt "
+        "signature — use `attest verify` to authenticate the receipt.",
+        file=sys.stderr,
+    )
     _print_json(
-        {"file": str(args.file), "sha256": digest, "match": match is not None, "artifact": match}
+        {
+            "file": str(args.file),
+            "sha256": digest,
+            "match": match is not None,
+            "artifact": match,
+            "authenticated": False,
+        }
     )
     return EXIT_OK if match is not None else EXIT_VERIFICATION_FAILED
 
@@ -488,9 +528,7 @@ def _cmd_check_artifact(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="attest", description="attest v0.1 operator CLI"
-    )
+    parser = argparse.ArgumentParser(prog="attest", description="attest v0.1 operator CLI")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("keygen", help="Generate an Ed25519 keypair")
