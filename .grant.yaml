@@ -1,0 +1,13 @@
+# .grant.yaml — license policy for attest packages.
+# Deny-by-default: only the permissive SPDX ids below are allowed. Anything
+# outside (notably strong copyleft) fails the gate. Covers every license
+# observed live in both ecosystems' runtime dependency trees, with headroom.
+allow:
+  - Apache-2.0
+  - MIT
+  - MIT-0          # cffi
+  - BSD-2-Clause
+  - BSD-3-Clause
+  - ISC
+  - PSF-2.0        # typing-extensions
+require-license: true
