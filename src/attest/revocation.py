@@ -46,27 +46,23 @@ def build_record(
     return record
 
 
-def verify_record(record: dict[str, Any], key_manifest: dict[str, Any]) -> bool:
-    """Verify against `key_manifest`, mirroring `manifests.verify_artifact_manifest`
-    exactly: the signer key must be **active** in a self-consistent
+def verify_record_signature(record: dict[str, Any], key_manifest: dict[str, Any]) -> bool:
+    """Verify `record`'s own signature against an ALREADY self-verified `key_manifest`.
+
+    Exactly `verify_record` minus the `manifests.verify_key_manifest`
+    self-consistency check: the signer key must be **active** in
     `key_manifest`, with its `[valid_from, valid_to]` window covering the
-    record's own signed `revoked_at`, and the signature must verify.
+    record's own signed `revoked_at`, and the signature must verify against
+    that key's `pub`. Fails closed on every malformed/wrong-typed/unsigned/
+    out-of-window input — never raises.
 
-    A revocation record is a NEW side-document issued at revoke-time, so §5's
-    lifecycle rules bite: a `compromised` key's signatures are ALL invalid,
-    and a `retired` key can no longer sign new documents — both are rejected
-    (only `status == "active"` passes). The window is checked against the
-    record's own signed `revoked_at`, never the local clock, using the same
-    date-parse + fail-closed handling as `verify_artifact_manifest` / §6 step 3.
-
-    Defense-in-depth: `key_manifest` itself must be self-consistent, so a
-    fabricated key manifest paired with a matching fabricated record signature
-    cannot verify. Fails closed on every malformed/wrong-typed/unsigned/
-    out-of-window input — never raises (Task 6's fix, extended by the Task 9
-    hardening review).
+    PRECONDITION: the caller has already established
+    `manifests.verify_key_manifest(key_manifest)` is True. Callers checking
+    many records against ONE manifest hoist that call out of their loop —
+    one manifest self-verify per classification, not per record (review
+    improvement #17). To verify a single record, use `verify_record`,
+    which composes both halves.
     """
-    if not manifests.verify_key_manifest(key_manifest):
-        return False
     sig_block = record.get("signature")
     if not isinstance(sig_block, dict):
         return False
@@ -88,3 +84,28 @@ def verify_record(record: dict[str, Any], key_manifest: dict[str, Any]) -> bool:
         )
     except (KeyError, ValueError, TypeError):
         return False
+
+
+def verify_record(record: dict[str, Any], key_manifest: dict[str, Any]) -> bool:
+    """Verify against `key_manifest`, mirroring `manifests.verify_artifact_manifest`
+    exactly: the signer key must be **active** in a self-consistent
+    `key_manifest`, with its `[valid_from, valid_to]` window covering the
+    record's own signed `revoked_at`, and the signature must verify.
+
+    A revocation record is a NEW side-document issued at revoke-time, so §5's
+    lifecycle rules bite: a `compromised` key's signatures are ALL invalid,
+    and a `retired` key can no longer sign new documents — both are rejected
+    (only `status == "active"` passes). The window is checked against the
+    record's own signed `revoked_at`, never the local clock, using the same
+    date-parse + fail-closed handling as `verify_artifact_manifest` / §6 step 3.
+
+    Defense-in-depth: `key_manifest` itself must be self-consistent, so a
+    fabricated key manifest paired with a matching fabricated record signature
+    cannot verify. Fails closed on every malformed/wrong-typed/unsigned/
+    out-of-window input — never raises (Task 6's fix, extended by the Task 9
+    hardening review). Composes `manifests.verify_key_manifest` +
+    `verify_record_signature`; loop-over-records callers hoist the former.
+    """
+    return manifests.verify_key_manifest(key_manifest) and verify_record_signature(
+        record, key_manifest
+    )

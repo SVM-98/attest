@@ -157,11 +157,13 @@ describe('revocation', () => {
   describe('classifyRevocation', () => {
     it('policy receipt + authenticated matching revoked record -> revoked, no warnings (vector 15 shape)', () => {
       const warnings: string[] = []
+      const errors: string[] = []
       const result = classifyRevocation(
         receiptPayload({ revocability: 'policy' }),
         [parse(revokedRecord)],
         parse(keyManifest),
         warnings,
+        errors,
       )
       expect(result).toBe('revoked')
       expect(warnings).toEqual([])
@@ -169,11 +171,13 @@ describe('revocation', () => {
 
     it("none receipt + same record -> invalid_revocation_ignored + a warning containing \"revocability is 'none'\" (vector 16 shape)", () => {
       const warnings: string[] = []
+      const errors: string[] = []
       const result = classifyRevocation(
         receiptPayload({ revocability: 'none' }),
         [parse(revokedRecord)],
         parse(keyManifest),
         warnings,
+        errors,
       )
       expect(result).toBe('invalid_revocation_ignored')
       expect(warnings.some((w) => w.includes("revocability is 'none'"))).toBe(true)
@@ -186,11 +190,13 @@ describe('revocation', () => {
         seedWrong,
       )
       const warnings: string[] = []
+      const errors: string[] = []
       const result = classifyRevocation(
         receiptPayload({ revocability: 'policy' }),
         [parse(badRecord)],
         parse(keyManifest),
         warnings,
+        errors,
       )
       // Dropped -> no valid record, and no authenticated record to anchor T -> unknown.
       expect(result).toBe('unknown')
@@ -199,18 +205,21 @@ describe('revocation', () => {
 
     it('returns unknown for an empty view', () => {
       const warnings: string[] = []
-      const result = classifyRevocation(receiptPayload({ revocability: 'policy' }), [], parse(keyManifest), warnings)
+      const errors: string[] = []
+      const result = classifyRevocation(receiptPayload({ revocability: 'policy' }), [], parse(keyManifest), warnings, errors)
       expect(result).toBe('unknown')
       expect(warnings).toEqual([])
     })
 
     it('returns unknown for a null view', () => {
       const warnings: string[] = []
+      const errors: string[] = []
       const result = classifyRevocation(
         receiptPayload({ revocability: 'policy' }),
         null,
         parse(keyManifest),
         warnings,
+        errors,
       )
       expect(result).toBe('unknown')
       expect(warnings).toEqual([])
@@ -232,11 +241,13 @@ describe('revocation', () => {
         seedWrong,
       )
       const warnings: string[] = []
+      const errors: string[] = []
       const result = classifyRevocation(
         receiptPayload({ revocability: 'policy' }),
         [parse(authRecordEarlier), parse(unauthRecordLater)],
         parse(keyManifest),
         warnings,
+        errors,
       )
       // If the unauthenticated 2099 record had moved T, this would read
       // 'not_revoked_as_of:2099-01-01T00:00:00Z' instead.
@@ -263,7 +274,8 @@ describe('revocation', () => {
           seed1,
         )
         const warnings: string[] = []
-        expect(classifyRevocation(payload, [parse(record)], parse(keyManifest), warnings)).toBe('revoked')
+        const errors: string[] = []
+        expect(classifyRevocation(payload, [parse(record)], parse(keyManifest), warnings, errors)).toBe('revoked')
         expect(warnings).toEqual([])
       })
 
@@ -275,7 +287,8 @@ describe('revocation', () => {
           seed1,
         )
         const warnings: string[] = []
-        const result = classifyRevocation(payload, [parse(record)], parse(keyManifest), warnings)
+        const errors: string[] = []
+        const result = classifyRevocation(payload, [parse(record)], parse(keyManifest), warnings, errors)
         expect(result).toBe('invalid_revocation_ignored')
         expect(warnings.some((w) => w.includes('outside refund window, ignored'))).toBe(true)
       })
@@ -286,7 +299,8 @@ describe('revocation', () => {
         // "valid" here -> falls through to the anchor-based not_revoked_as_of result.
         const noMatchPayload = refundPayload(30, '2025-07-01T00:00:00Z', 'no-such-receipt')
         const warnings: string[] = []
-        const result = classifyRevocation(noMatchPayload, [parse(revokedRecord)], parse(keyManifest), warnings)
+        const errors: string[] = []
+        const result = classifyRevocation(noMatchPayload, [parse(revokedRecord)], parse(keyManifest), warnings, errors)
         expect(result).toBe('not_revoked_as_of:2025-08-01T00:00:00Z')
         expect(warnings).toEqual([])
       })
@@ -304,7 +318,8 @@ describe('revocation', () => {
           seed1,
         )
         const warnings: string[] = []
-        const result = classifyRevocation(payload, [parse(record)], parse(keyManifest), warnings)
+        const errors: string[] = []
+        const result = classifyRevocation(payload, [parse(record)], parse(keyManifest), warnings, errors)
         // window_end is null -> record can never be "effective" -> falls through to the
         // "valid but no effective window" branch -> invalid_revocation_ignored.
         expect(result).toBe('invalid_revocation_ignored')

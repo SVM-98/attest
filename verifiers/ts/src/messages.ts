@@ -50,3 +50,7 @@ export const unknownField = (k: string) => `unknown payload field: ${pyRepr(k)}`
 export const unknownEol = (v: unknown) => `unknown survivability.end_of_life value: ${pyRepr(v)}`
 export const revocationFailedVerify = (rid: unknown) => `revocation record for ${pyRepr(rid)} failed verification, ignored`
 export const outsideRefundWindow = (rid: unknown) => `revocation record for ${pyRepr(rid)} outside refund window, ignored`
+export const revocationViewOversize = (n: number, max: number) =>
+  `revocation view exceeds ${max} records (${n} supplied), not evaluated`
+export const revocationViewOversizeRevocable = (n: number, max: number) =>
+  `revocation view exceeds ${max} records (${n} supplied), cannot certify a revocable receipt`
