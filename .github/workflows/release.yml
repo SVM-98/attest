@@ -1,0 +1,119 @@
+# .github/workflows/release.yml
+name: release
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v8
+        with:
+          version: "0.11.21"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: verifiers/ts/package-lock.json
+      - name: Install syft, grype, grant (pinned)
+        env:
+          SYFT_VERSION: v1.46.0
+          GRYPE_VERSION: v0.115.0
+          GRANT_VERSION: v0.6.8
+        run: |
+          curl -sSfL "https://raw.githubusercontent.com/anchore/syft/${SYFT_VERSION}/install.sh"  | sh -s -- -b "$HOME/.local/bin" "${SYFT_VERSION}"
+          curl -sSfL "https://raw.githubusercontent.com/anchore/grype/${GRYPE_VERSION}/install.sh" | sh -s -- -b "$HOME/.local/bin" "${GRYPE_VERSION}"
+          curl -sSfL "https://raw.githubusercontent.com/anchore/grant/${GRANT_VERSION}/install.sh" | sh -s -- -b "$HOME/.local/bin" "${GRANT_VERSION}"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - run: uv build
+      - name: Assert + scan Python
+        run: |
+          uv run python tools/assert_artifacts.py --wheel dist/*.whl --sdist dist/*.tar.gz
+          uv sync --frozen
+          syft dir:.venv -o cyclonedx-json=sbom-python.cdx.json
+          grype sbom:sbom-python.cdx.json --fail-on high
+          grant check -c .grant.yaml sbom-python.cdx.json
+      - name: Assert + scan npm
+        run: |
+          npm ci --prefix verifiers/ts
+          npm run build --prefix verifiers/ts
+          (cd verifiers/ts && npm pack --json > /tmp/pack.json)
+          uv run python tools/assert_artifacts.py --npm-pack-json /tmp/pack.json
+          (cd verifiers/ts && npm ci --omit=dev)
+          syft dir:verifiers/ts -o cyclonedx-json=sbom-npm.cdx.json
+          grype sbom:sbom-npm.cdx.json --fail-on high
+          grant check -c .grant.yaml sbom-npm.cdx.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-and-sboms
+          path: |
+            dist/*
+            sbom-python.cdx.json
+            sbom-npm.cdx.json
+
+  pypi:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-and-sboms
+          path: .
+      - name: Move distributions into dist/
+        run: |
+          mkdir -p dist
+          mv attest_receipts-*.whl attest_receipts-*.tar.gz dist/ 2>/dev/null || true
+          ls dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        # Trusted Publishing (OIDC) + PEP 740 attestations are on by default.
+
+  npm:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: "https://registry.npmjs.org"
+      - name: Upgrade npm to a Trusted-Publishing-capable version (>=11.5.1)
+        run: |
+          npm install -g npm@latest
+          npm --version
+      - run: npm ci --prefix verifiers/ts
+      - run: npm run build --prefix verifiers/ts
+      - name: Publish with provenance (OIDC Trusted Publishing)
+        run: npm publish --provenance
+        working-directory: verifiers/ts
+
+  github-release:
+    needs: [pypi, npm]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-and-sboms
+          path: artifacts
+      - name: Create GitHub Release with SBOMs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "attest ${GITHUB_REF_NAME}" \
+            --notes "attest-receipts and attest-verifier ${GITHUB_REF_NAME}. See CHANGELOG.md and verifiers/ts/CHANGELOG.md. CycloneDX SBOMs attached." \
+            artifacts/sbom-python.cdx.json \
+            artifacts/sbom-npm.cdx.json
