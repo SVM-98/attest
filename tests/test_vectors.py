@@ -44,7 +44,7 @@ from typing import Any
 
 import pytest
 
-from attest import keys, manifests, verify
+from attest import canon, keys, manifests, verify
 
 VECTORS_DIR = Path(__file__).resolve().parent.parent / "docs" / "spec" / "vectors"
 
@@ -153,5 +153,24 @@ def test_manifest_tamper_breaks_self_consistency(vector_dir: Path) -> None:
 def test_vectors_directory_is_nonempty() -> None:
     """Guard against a silently-empty parametrize list (e.g. a wrong
     `VECTORS_DIR` path) making the whole suite above vacuously pass."""
-    # 14 Fase 1 leaves (07/09 multi-part) + 9 Fase 2 leaves (14/14b + 15-16 + 17 a/b + 18).
-    assert len(_VECTOR_DIRS) >= 23
+    # 23 Fase 1/2 leaves (01-18) + 20 regression-corpus leaves (19-25, 2026-07-13):
+    # 19 a/b, 20 a-c, 21 a-g, 22 a-c, 23 a/b, 24, 25 a/b.
+    assert len(_VECTOR_DIRS) >= 43
+
+
+_CANONICAL_DIRS = [p for p in _VECTOR_DIRS if (p / "canonical.json").exists()]
+_CANONICAL_IDS = [str(p.relative_to(VECTORS_DIR)) for p in _CANONICAL_DIRS]
+
+
+@pytest.mark.parametrize("vector_dir", _CANONICAL_DIRS, ids=_CANONICAL_IDS)
+def test_payload_reserializes_to_committed_canonical_bytes(vector_dir: Path) -> None:
+    """Cross-language round-trip identity, statically: the leaf ships the
+    exact canonical serialization of its payload; this runner (and the TS
+    conformance runner) re-serialize the parsed payload through their own
+    canonical serializer and must reproduce those bytes exactly. Python
+    bytes == TS bytes == committed bytes ⟹ Py→TS→Py round-trip identity
+    with zero cross-runtime orchestration."""
+    envelope = canon.loads_strict(_envelope_bytes(vector_dir))
+    assert isinstance(envelope, dict)
+    expected_bytes = (vector_dir / "canonical.json").read_bytes()
+    assert canon.canonical_bytes(envelope["payload"]) == expected_bytes

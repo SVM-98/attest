@@ -149,7 +149,7 @@ function rejectSurrogates(v: JsonValue): void {
 export function loadsStrict(bytes: Uint8Array): JsonValue {
   let text: string
   try {
-    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+    text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes)
   } catch (e) {
     throw new CanonError(notUtf8(e instanceof Error ? e.message : String(e)))
   }
