@@ -122,6 +122,17 @@ describe('revocation view bound (improvement #17, fail-closed)', () => {
     expect(warnings).toEqual([])
   })
 
+  it('oversized view on the refund_window revocable class also fails closed', () => {
+    const refundPayload = parse({ receipt_id: RECEIPT_ID, issued_at: '2026-07-01T00:00:00Z', license: { revocability: 'refund_window', revocation_window_days: 14 } })
+    const view = [1, 2, 3, 4].map((d) => record(`2026-07-0${d}T00:00:00Z`))
+    const warnings: string[] = []
+    const errors: string[] = []
+    const result = classifyRevocation(refundPayload, view, keyManifest, warnings, errors, 3)
+    expect(result).toBe('unknown')
+    expect(errors).toContain('revocation view exceeds 3 records (4 supplied), cannot certify a revocable receipt')
+    expect(warnings).toEqual([])
+  })
+
   it('oversized view on an irrevocable receipt warns and stays ok-eligible', () => {
     const nonePayload = parse({ receipt_id: RECEIPT_ID, issued_at: '2026-07-01T00:00:00Z', license: { revocability: 'none' } })
     const view = [1, 2, 3, 4].map((d) => record(`2026-07-0${d}T00:00:00Z`))

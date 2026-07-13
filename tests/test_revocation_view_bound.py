@@ -7,8 +7,11 @@ the view had no size bound. This file pins the two hardenings:
 
 - the manifest self-verify runs exactly once per classification
   (`verify_record_signature` + hoisted `verify_key_manifest`);
-- (Task 2) an oversized view is not evaluated at all: `revocation:
-  "unknown"` plus an explicit warning — never truncation, never a raise.
+- an oversized view is not evaluated (`revocation: "unknown"`), and it fails
+  CLOSED for revocable receipts (`policy`/`refund_window` → an error, so
+  `ok` is false) while only warning for irrevocable `none` receipts — never
+  truncation, never a raise. Fail-closed is the fix for the append-only
+  feed-poisoning suppression attack Codex flagged in the final review.
 
 Mirrored on the TS side by `verifiers/ts/test/revocation-bound.test.ts`.
 """
@@ -172,13 +175,37 @@ def test_padding_a_genuine_revocation_past_the_cap_cannot_suppress_it() -> None:
     payload = make_payload(license={"revocability": "policy"})
     envelope = issue.issue(payload, KP, KID)
     genuine = _record("2026-07-03T00:00:00Z")
-    junk = [{"receipt_id": "x", "status": "revoked", "revoked_at": "2026-07-03T00:00:00Z"}] * 3
+    junk = [
+        {"receipt_id": "x", "status": "revoked", "revoked_at": "2026-07-03T00:00:00Z"}
+        for _ in range(3)
+    ]
     view = [genuine, *junk]  # 4 entries > cap 3
     result = verify.verify(
         _to_bytes(envelope),
         _trust_store(_key_manifest()),
         revocation_view=view,
         max_revocation_records=3,
+    )
+    assert result.revocation == "unknown"
+    assert result.ok is False
+
+
+def test_oversized_view_on_refund_window_receipt_fails_closed() -> None:
+    """The second revocable class (`refund_window`) fails closed on overflow
+    exactly like `policy` — pins that both revocable classes are covered."""
+    payload = make_payload(license={"revocability": "refund_window", "revocation_window_days": 14})
+    envelope = issue.issue(payload, KP, KID)
+    view = [_record(f"2026-07-0{i}T00:00:00Z") for i in range(1, 5)]  # 4 records
+    result = verify.verify(
+        _to_bytes(envelope),
+        _trust_store(_key_manifest()),
+        revocation_view=view,
+        max_revocation_records=3,
+    )
+    assert result.revocation == "unknown"
+    assert (
+        "revocation view exceeds 3 records (4 supplied), cannot certify a revocable receipt"
+        in result.errors
     )
     assert result.ok is False
 

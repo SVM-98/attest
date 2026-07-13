@@ -478,7 +478,9 @@ def verify(
     max_revocation_records: int = _MAX_REVOCATION_RECORDS,
 ) -> VerificationResult:
     """§6 steps 0-7. `max_revocation_records` bounds the untrusted revocation
-    view: a larger view is not evaluated (revocation `"unknown"` + warning)."""
+    view: a larger view is not evaluated (revocation `"unknown"`). It fails
+    closed for revocable receipts (`policy`/`refund_window`: an error, so
+    `ok` is false) and warns for irrevocable `none` receipts."""
     # Caller-contract enforcement (security): a non-list `revocation_view`
     # must fail loud. If a lone record OBJECT slipped through here,
     # `_classify_revocation` would iterate its string keys, authenticate
