@@ -1,0 +1,103 @@
+// Review improvement #17: cached manifest self-verify + revocation-view bound.
+// Mirrors tests/test_revocation_view_bound.py on the Python side. Fixture
+// pattern (sign JCS of body minus the signature member) follows
+// revocation.test.ts / manifests.test.ts.
+import { describe, it, expect, vi } from 'vitest'
+import { ed25519 } from '@noble/curves/ed25519'
+import { loadsStrict, canonicalBytes, JsonObject } from '../src/canon.js'
+import { b64uEncode } from '../src/b64u.js'
+
+// Wrap verifyKeyManifest in a call-counting spy that delegates to the real
+// implementation, so the once-per-classification contract is testable.
+vi.mock('../src/manifests.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/manifests.js')>()
+  return { ...actual, verifyKeyManifest: vi.fn(actual.verifyKeyManifest) }
+})
+
+import { verifyKeyManifest } from '../src/manifests.js'
+import { classifyRevocation, verifyRecord, verifyRecordSignature } from '../src/revocation.js'
+
+const enc = (s: string) => new TextEncoder().encode(s)
+// Every fixture MUST go through loadsStrict so integers arrive as bigint.
+const parse = (m: unknown): JsonObject => loadsStrict(enc(JSON.stringify(m))) as JsonObject
+
+function signManifest(body: Record<string, unknown>, kid: string, seed: Uint8Array) {
+  const b = loadsStrict(enc(JSON.stringify(body))) as JsonObject
+  const sig = ed25519.sign(canonicalBytes(b), seed)
+  return { ...body, manifest_signature: { kid, sig: b64uEncode(sig) } }
+}
+
+function signRecord(body: Record<string, unknown>, kid: string, seed: Uint8Array) {
+  const b = loadsStrict(enc(JSON.stringify(body))) as JsonObject
+  const sig = ed25519.sign(canonicalBytes(b), seed)
+  return { ...body, signature: { kid, sig: b64uEncode(sig) } }
+}
+
+const ISSUER = 'store.example.com'
+const seed1 = Uint8Array.from({ length: 32 }, () => 21)
+const pub1 = b64uEncode(ed25519.getPublicKey(seed1))
+const kid1 = `${ISSUER}/keys/2026-01#ed25519-1`
+const kidGhost = `${ISSUER}/keys/2026-01#ed25519-ghost` // never listed in the manifest
+const RECEIPT_ID = '01JZ5PDHT0000G40R40M30E209'
+
+const keyManifest = parse(
+  signManifest(
+    {
+      issuer: ISSUER,
+      manifest_version: 1,
+      issued_at: '2026-01-01T00:00:00Z',
+      keys: [
+        { kid: kid1, pub: pub1, valid_from: '2026-01-01T00:00:00Z', valid_to: null, status: 'active' },
+      ],
+    },
+    kid1,
+    seed1,
+  ),
+)
+
+const record = (revokedAt = '2026-07-03T00:00:00Z') =>
+  parse(signRecord({ receipt_id: RECEIPT_ID, status: 'revoked', revoked_at: revokedAt }, kid1, seed1))
+
+// classifyRevocation only reads receipt_id and license.* (issued_at only for refund_window).
+const policyPayload = parse({
+  receipt_id: RECEIPT_ID,
+  issued_at: '2026-07-01T00:00:00Z',
+  license: { revocability: 'policy' },
+})
+
+describe('cached manifest self-verify (improvement #17)', () => {
+  it('runs verifyKeyManifest exactly once per classification', () => {
+    const view = [1, 2, 3, 4, 5].map((d) => record(`2026-07-0${d}T00:00:00Z`))
+    const warnings: string[] = []
+    vi.mocked(verifyKeyManifest).mockClear()
+    const result = classifyRevocation(policyPayload, view, keyManifest, warnings)
+    expect(result).toBe('revoked')
+    expect(vi.mocked(verifyKeyManifest)).toHaveBeenCalledTimes(1)
+  })
+
+  it('verifyRecordSignature accepts a valid record against a pre-verified manifest', () => {
+    expect(verifyKeyManifest(keyManifest)).toBe(true) // documented precondition
+    expect(verifyRecordSignature(record(), keyManifest)).toBe(true)
+  })
+
+  it('verifyRecordSignature rejects an unlisted signer kid', () => {
+    const ghost = parse(
+      signRecord(
+        { receipt_id: RECEIPT_ID, status: 'revoked', revoked_at: '2026-07-03T00:00:00Z' },
+        kidGhost,
+        seed1,
+      ),
+    )
+    expect(verifyRecordSignature(ghost, keyManifest)).toBe(false)
+  })
+
+  it('verifyRecordSignature rejects revoked_at before valid_from', () => {
+    expect(verifyRecordSignature(record('2025-12-31T23:59:59Z'), keyManifest)).toBe(false)
+  })
+
+  it('verifyRecord still requires manifest self-consistency (delegation)', () => {
+    expect(verifyRecord(record(), keyManifest)).toBe(true)
+    const tampered = { ...keyManifest, issued_at: '2027-01-01T00:00:00Z' } as JsonObject
+    expect(verifyRecord(record(), tampered)).toBe(false)
+  })
+})
