@@ -3,7 +3,7 @@ import { verifyKeyManifest, findKey } from './manifests.js'
 import { verifyStrict } from './ed25519.js'
 import { b64uDecode } from './b64u.js'
 import { parseStrictUtc, parseIsoLenient } from './dates.js'
-import { revocationFailedVerify, outsideRefundWindow, WARN } from './messages.js'
+import { revocationFailedVerify, outsideRefundWindow, revocationViewOversize, revocationViewOversizeRevocable, WARN } from './messages.js'
 
 function asObject(v: JsonValue | undefined): JsonObject | null {
   return v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as JsonObject) : null
@@ -15,9 +15,12 @@ function signableRecordBytes(record: JsonObject): Uint8Array {
   return canonicalBytes(body)
 }
 
-export function verifyRecord(record: JsonObject, keyManifest: JsonObject): boolean {
+// PRECONDITION: caller already established verifyKeyManifest(keyManifest) is
+// true. Loop-over-records callers hoist that call — one manifest self-verify
+// per classification, not per record (review improvement #17). To verify a
+// single record, use verifyRecord, which composes both halves.
+export function verifyRecordSignature(record: JsonObject, keyManifest: JsonObject): boolean {
   try {
-    if (!verifyKeyManifest(keyManifest)) return false
     const sig = asObject(record['signature'])
     if (!sig || typeof sig['kid'] !== 'string' || typeof sig['sig'] !== 'string') return false
     const entry = findKey(keyManifest, sig['kid'])
@@ -33,6 +36,10 @@ export function verifyRecord(record: JsonObject, keyManifest: JsonObject): boole
   } catch { return false }
 }
 
+export function verifyRecord(record: JsonObject, keyManifest: JsonObject): boolean {
+  try { return verifyKeyManifest(keyManifest) && verifyRecordSignature(record, keyManifest) } catch { return false }
+}
+
 function refundWindowEnd(payload: JsonObject): number | null {
   const license = asObject(payload['license'])
   if (!license) return null
@@ -43,12 +50,39 @@ function refundWindowEnd(payload: JsonObject): number | null {
   return issued + Number(days) * 86_400_000
 }
 
+// Preflight bound on the untrusted revocation view (review improvement #17):
+// a legitimate view for one verify() call is an issuer's records for one
+// receipt — realistically single digits; 10k is far above any legitimate case
+// and keeps hostile worst-case work bounded. Mirrors Python's
+// _MAX_REVOCATION_RECORDS.
+export const MAX_REVOCATION_RECORDS = 10_000
+
 export function classifyRevocation(
   payload: JsonObject, view: JsonValue[] | null, issuerManifest: JsonObject, warnings: string[],
+  errors: string[], maxRecords: number = MAX_REVOCATION_RECORDS,
 ): string {
   if (!view || view.length === 0) return 'unknown'
 
-  const auth: boolean[] = view.map((r) => { const o = asObject(r); return o !== null && verifyRecord(o, issuerManifest) })
+  const license = asObject(payload['license'])
+  const revocability = license ? license['revocability'] : undefined
+
+  // Oversized view: not evaluated — never truncate, never throw. Fail CLOSED
+  // for revocable receipts (error → ok=false): an untrusted view too large to
+  // evaluate cannot rule out a revocation, and "unknown"+ok would let an
+  // append-only feed-poisoning attacker suppress a genuine revocation by
+  // padding past the cap. Irrevocable ("none") receipts: non-fatal warning.
+  if (view.length > maxRecords) {
+    if (revocability === 'policy' || revocability === 'refund_window') {
+      errors.push(revocationViewOversizeRevocable(view.length, maxRecords))
+    } else {
+      warnings.push(revocationViewOversize(view.length, maxRecords))
+    }
+    return 'unknown'
+  }
+
+  // One manifest self-verify per classification, not per record (improvement #17).
+  const manifestOk = verifyKeyManifest(issuerManifest)
+  const auth: boolean[] = view.map((r) => { const o = asObject(r); return manifestOk && o !== null && verifyRecordSignature(o, issuerManifest) })
 
   // freshness anchor T = max revoked_at over AUTHENTICATED records of ANY receipt_id
   let anchorMs = -Infinity, anchorRaw: string | null = null
@@ -69,8 +103,6 @@ export function classifyRevocation(
     if (o['status'] === 'revoked') valid.push(o)
   })
 
-  const license = asObject(payload['license'])
-  const revocability = license ? license['revocability'] : undefined
   if (revocability === 'none') {
     if (valid.length > 0) { warnings.push(WARN.REVOCABILITY_NONE_IGNORED); return 'invalid_revocation_ignored' }
     return notRevoked

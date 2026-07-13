@@ -54,6 +54,14 @@ _REVOCATION_REVOKED = "revoked"
 _REVOCATION_INVALID_IGNORED = "invalid_revocation_ignored"
 _REVOCATION_NOT_REVOKED_PREFIX = "not_revoked_as_of:"
 
+# Preflight bound on the untrusted revocation view (review improvement #17):
+# a legitimate view for one verify() call is an issuer's records for one
+# receipt — realistically single digits; 10k is far above any legitimate
+# case and keeps hostile worst-case work bounded. Injectable per call via
+# `verify(..., max_revocation_records=...)`. Mirrored by the TS verifier's
+# MAX_REVOCATION_RECORDS.
+_MAX_REVOCATION_RECORDS = 10_000
+
 _REVOCABILITY_NONE = "none"
 _REVOCABILITY_REFUND_WINDOW = "refund_window"
 _REVOCABILITY_POLICY = "policy"
@@ -289,6 +297,8 @@ def _classify_revocation(
     revocation_view: list[dict[str, Any]] | None,
     issuer_manifest: dict[str, Any],
     warnings: list[str],
+    errors: list[str],
+    max_records: int = _MAX_REVOCATION_RECORDS,
 ) -> str:
     """§6 step 6 / §3.1: revocation-by-class.
 
@@ -313,22 +323,60 @@ def _classify_revocation(
     authenticated records in the view (any receipt_id), not the raw view —
     so unsigned junk can neither revoke nor inflate T. With no authenticated
     records at all, T has no trustworthy value and the result is `unknown`.
+
+    An oversized view (more than `max_records` entries) is not evaluated —
+    never truncated (a subset could misreport), never raised. It fails CLOSED
+    for revocable receipts: for `policy`/`refund_window` an error is recorded
+    (so `ok` is false), because an untrusted view too large to evaluate cannot
+    rule out a revocation and must not certify the receipt — otherwise an
+    append-only feed-poisoning attacker could suppress a genuine revocation by
+    padding past the cap. For `none` (irrevocable) a revocation can never
+    affect `ok`, so it is a non-fatal warning. In both cases revocation is
+    `"unknown"`.
     """
     if not revocation_view:  # None or empty: no data, no freshness anchor either way
         return _REVOCATION_UNKNOWN
 
-    receipt_id = payload.get("receipt_id")
     license_block = payload.get("license")
     revocability = license_block.get("revocability") if isinstance(license_block, dict) else None
 
+    if len(revocation_view) > max_records:
+        supplied = len(revocation_view)
+        if revocability in (_REVOCABILITY_POLICY, _REVOCABILITY_REFUND_WINDOW):
+            # Revocable receipt + an untrusted view too large to evaluate: fail
+            # closed. "unknown" here would keep ok=true, letting an append-only
+            # feed-poisoning attacker suppress a genuine revocation by padding
+            # past the cap. We cannot rule out a revocation, so we cannot certify.
+            errors.append(
+                f"revocation view exceeds {max_records} records "
+                f"({supplied} supplied), cannot certify a revocable receipt"
+            )
+        else:
+            # Irrevocable ("none") or unknown-class (rejected at schema): a
+            # revocation can never affect ok, so an oversized view is non-fatal.
+            warnings.append(
+                f"revocation view exceeds {max_records} records "
+                f"({supplied} supplied), not evaluated"
+            )
+        return _REVOCATION_UNKNOWN
+
+    receipt_id = payload.get("receipt_id")
+
     # Authenticated records (any receipt_id) drive the freshness anchor; only
-    # signature-verified records may set T (§5 hardening).
+    # signature-verified records may set T (§5 hardening). The manifest's own
+    # self-verify is hoisted out of the loop — one `verify_key_manifest` per
+    # classification, not per record, so a hostile many-record feed cannot
+    # multiply manifest-verification work (review improvement #17).
+    manifest_ok = manifests.verify_key_manifest(issuer_manifest)
     authenticated_ids: set[int] = set()
     authenticated: list[dict[str, Any]] = []
-    for record in revocation_view:
-        if isinstance(record, dict) and revocation.verify_record(record, issuer_manifest):
-            authenticated.append(record)
-            authenticated_ids.add(id(record))
+    if manifest_ok:
+        for record in revocation_view:
+            if isinstance(record, dict) and revocation.verify_record_signature(
+                record, issuer_manifest
+            ):
+                authenticated.append(record)
+                authenticated_ids.add(id(record))
     not_revoked = _not_revoked_or_unknown(authenticated)
 
     # Effective revocations for THIS receipt: matching receipt_id, authenticated,
@@ -427,8 +475,12 @@ def verify(
     trust_store: TrustStore,
     revocation_view: list[dict[str, Any]] | None = None,
     disclosure: Disclosure | None = None,
+    max_revocation_records: int = _MAX_REVOCATION_RECORDS,
 ) -> VerificationResult:
-    """§6 steps 0-7."""
+    """§6 steps 0-7. `max_revocation_records` bounds the untrusted revocation
+    view: a larger view is not evaluated (revocation `"unknown"`). It fails
+    closed for revocable receipts (`policy`/`refund_window`: an error, so
+    `ok` is false) and warns for irrevocable `none` receipts."""
     # Caller-contract enforcement (security): a non-list `revocation_view`
     # must fail loud. If a lone record OBJECT slipped through here,
     # `_classify_revocation` would iterate its string keys, authenticate
@@ -582,7 +634,9 @@ def verify(
     # once signature (guaranteed above) AND schema are both valid — see
     # module docstring.
     if schema_result == _SCHEMA_VALID:
-        revocation_result = _classify_revocation(payload, revocation_view, manifest, warnings)
+        revocation_result = _classify_revocation(
+            payload, revocation_view, manifest, warnings, errors, max_records=max_revocation_records
+        )
         binding_result = (
             _classify_binding(payload, disclosure)
             if disclosure is not None
