@@ -238,9 +238,7 @@ def _trust_material(
 
 def _issuer_only_trust() -> dict[str, Any]:
     """The common case: a single trusted issuer manifest, TLS provenance."""
-    return _trust_material(
-        (ISSUER_ID, _manifest_material(ISSUER_ID, ISSUER_KID, ISSUER_KP), "tls")
-    )
+    return _trust_material((ISSUER_ID, _manifest_material(ISSUER_ID, ISSUER_KID, ISSUER_KP), "tls"))
 
 
 def _base_payload_kwargs(**overrides: Any) -> dict[str, Any]:
@@ -269,12 +267,19 @@ def _assert_schema_valid(payload: dict[str, Any]) -> None:
         raise AssertionError(f"generator built a schema-invalid payload: {violations}")
 
 
-def write_vector(name: str, *, payload: dict[str, Any] | None, envelope: dict[str, Any] | None,
-                  envelope_raw: bytes | None, trust: dict[str, Any], expected: dict[str, Any],
-                  disclosure: dict[str, Any] | None = None,
-                  manifest_pristine: dict[str, Any] | None = None,
-                  revocation_record: dict[str, Any] | None = None,
-                  canonical: bytes | None = None) -> None:
+def write_vector(
+    name: str,
+    *,
+    payload: dict[str, Any] | None,
+    envelope: dict[str, Any] | None,
+    envelope_raw: bytes | None,
+    trust: dict[str, Any],
+    expected: dict[str, Any],
+    disclosure: dict[str, Any] | None = None,
+    manifest_pristine: dict[str, Any] | None = None,
+    revocation_record: dict[str, Any] | None = None,
+    canonical: bytes | None = None,
+) -> None:
     vector_dir = VECTORS_DIR / name
     if payload is not None:
         _write_json(vector_dir / "payload.json", payload)
@@ -312,8 +317,14 @@ def gen_01_valid_minimal() -> None:
         "errors": [],
         "warnings": [],
     }
-    write_vector("01-valid-minimal", payload=payload, envelope=envelope, envelope_raw=None,
-                 trust=trust, expected=expected)
+    write_vector(
+        "01-valid-minimal",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected,
+    )
 
 
 # --- vector 02: valid-full ----------------------------------------------------
@@ -361,8 +372,14 @@ def gen_02_valid_full() -> None:
         "errors": [],
         "warnings_contains": ["drm-bound"],
     }
-    write_vector("02-valid-full", payload=payload, envelope=envelope, envelope_raw=None,
-                 trust=trust, expected=expected)
+    write_vector(
+        "02-valid-full",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected,
+    )
 
 
 # --- vector 03: tampered-payload ----------------------------------------------
@@ -387,8 +404,14 @@ def gen_03_tampered_payload() -> None:
         "errors_contains": ["signature verification failed"],
         "warnings": [],
     }
-    write_vector("03-tampered-payload", payload=payload, envelope=tampered, envelope_raw=None,
-                 trust=trust, expected=expected)
+    write_vector(
+        "03-tampered-payload",
+        payload=payload,
+        envelope=tampered,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected,
+    )
 
 
 # --- vector 04: wrong-key -----------------------------------------------------
@@ -411,8 +434,14 @@ def gen_04_wrong_key() -> None:
         "errors_contains": ["no key", "in issuer manifest"],
         "warnings": [],
     }
-    write_vector("04-wrong-key", payload=payload, envelope=envelope, envelope_raw=None,
-                 trust=trust, expected=expected)
+    write_vector(
+        "04-wrong-key",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected,
+    )
 
 
 # --- vector 05: issuer-mismatch -----------------------------------------------
@@ -445,8 +474,14 @@ def gen_05_issuer_mismatch() -> None:
         "errors_contains": ["issuer_mismatch"],
         "warnings": [],
     }
-    write_vector("05-issuer-mismatch", payload=payload, envelope=envelope, envelope_raw=None,
-                 trust=trust, expected=expected)
+    write_vector(
+        "05-issuer-mismatch",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected,
+    )
 
 
 # --- vector 06: duplicate-key-reject ------------------------------------------
@@ -477,8 +512,14 @@ def gen_06_duplicate_key_reject() -> None:
         "errors_contains": ["duplicate object key"],
         "warnings": [],
     }
-    write_vector("06-duplicate-key-reject", payload=payload, envelope=None,
-                 envelope_raw=duplicated.encode("utf-8"), trust=trust, expected=expected)
+    write_vector(
+        "06-duplicate-key-reject",
+        payload=payload,
+        envelope=None,
+        envelope_raw=duplicated.encode("utf-8"),
+        trust=trust,
+        expected=expected,
+    )
 
 
 # --- vector 07: unicode-canon (two sub-cases) ---------------------------------
@@ -521,8 +562,14 @@ def gen_07_unicode_canon() -> None:
         "errors": [],
         "warnings": [],
     }
-    write_vector("07-unicode-canon/a-nfd-and-int-boundary-accepted", payload=payload,
-                 envelope=envelope, envelope_raw=None, trust=trust, expected=expected_a)
+    write_vector(
+        "07-unicode-canon/a-nfd-and-int-boundary-accepted",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected_a,
+    )
 
     # Sub-case b: bump the same field one past the I-JSON safe boundary. This
     # payload can never be produced by issue() (canon.canonical_bytes() -
@@ -547,8 +594,14 @@ def gen_07_unicode_canon() -> None:
         "errors_contains": ["integer out of I-JSON safe range"],
         "warnings": [],
     }
-    write_vector("07-unicode-canon/b-int-boundary-rejected", payload=None,
-                 envelope=rejected_envelope, envelope_raw=None, trust=trust, expected=expected_b)
+    write_vector(
+        "07-unicode-canon/b-int-boundary-rejected",
+        payload=None,
+        envelope=rejected_envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected_b,
+    )
 
 
 # --- vector 08: sig-malleability ----------------------------------------------
@@ -582,8 +635,14 @@ def gen_08_sig_malleability() -> None:
         "errors_contains": ["signature verification failed"],
         "warnings": [],
     }
-    write_vector("08-sig-malleability", payload=payload, envelope=malleated, envelope_raw=None,
-                 trust=trust, expected=expected)
+    write_vector(
+        "08-sig-malleability",
+        payload=payload,
+        envelope=malleated,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected,
+    )
 
 
 # --- vector 09: commitment (three sub-cases) ----------------------------------
@@ -615,8 +674,15 @@ def _commitment_subvector(subname: str, identifier: str, identifier_type: str) -
         "commitment_b64u": commitment_b64u,
         "normalized_identifier": commitment.normalize(identifier, identifier_type),
     }
-    write_vector(f"09-commitment/{subname}", payload=payload, envelope=envelope,
-                 envelope_raw=None, trust=trust, expected=expected, disclosure=disclosure)
+    write_vector(
+        f"09-commitment/{subname}",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected,
+        disclosure=disclosure,
+    )
 
 
 def gen_09_commitment() -> None:
@@ -647,8 +713,14 @@ def gen_10_unknown_field() -> None:
         "errors": [],
         "warnings_contains": ["unknown payload field", "promo_code"],
     }
-    write_vector("10-unknown-field", payload=payload, envelope=envelope, envelope_raw=None,
-                 trust=trust, expected=expected)
+    write_vector(
+        "10-unknown-field",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected,
+    )
 
 
 # --- vector 11: manifest-tamper -----------------------------------------------
@@ -691,8 +763,15 @@ def gen_11_manifest_tamper() -> None:
             "manifest_pristine.json is the untampered, self-consistent original."
         ),
     }
-    write_vector("11-manifest-tamper", payload=payload, envelope=envelope, envelope_raw=None,
-                 trust=trust, expected=expected, manifest_pristine=pristine_manifest)
+    write_vector(
+        "11-manifest-tamper",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected,
+        manifest_pristine=pristine_manifest,
+    )
 
 
 # --- vector 12: retired-key-ok ------------------------------------------------
@@ -721,8 +800,14 @@ def gen_12_retired_key_ok() -> None:
         "errors": [],
         "warnings_contains": ["retired"],
     }
-    write_vector("12-retired-key-ok", payload=payload, envelope=envelope, envelope_raw=None,
-                 trust=trust, expected=expected)
+    write_vector(
+        "12-retired-key-ok",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected,
+    )
 
 
 # --- vector 13: compromised-key -------------------------------------------------
@@ -755,8 +840,14 @@ def gen_13_compromised_key() -> None:
         "errors_contains": ["compromised"],
         "warnings": [],
     }
-    write_vector("13-compromised-key", payload=payload, envelope=envelope, envelope_raw=None,
-                 trust=trust, expected=expected)
+    write_vector(
+        "13-compromised-key",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected,
+    )
 
 
 # --- vector 14 / 14b: rotation continuity / discontinuity -----------------------
@@ -799,8 +890,14 @@ def gen_14_rotation_continuity() -> None:
         "errors": [],
         "warnings": [],
     }
-    write_vector("14-rotation-continuity", payload=payload, envelope=envelope, envelope_raw=None,
-                 trust=trust, expected=expected)
+    write_vector(
+        "14-rotation-continuity",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected,
+    )
 
 
 def gen_14b_rotation_discontinuous() -> None:
@@ -843,8 +940,14 @@ def gen_14b_rotation_discontinuous() -> None:
         "errors": [],
         "warnings": [],
     }
-    write_vector("14b-rotation-discontinuous", payload=payload, envelope=envelope,
-                 envelope_raw=None, trust=trust, expected=expected)
+    write_vector(
+        "14b-rotation-discontinuous",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected,
+    )
 
 
 # --- vector 15: revoked-policy ---------------------------------------------------
@@ -877,8 +980,15 @@ def gen_15_revoked_policy() -> None:
         "errors": [],
         "warnings": [],
     }
-    write_vector("15-revoked-policy", payload=payload, envelope=envelope, envelope_raw=None,
-                 trust=trust, expected=expected, revocation_record=record)
+    write_vector(
+        "15-revoked-policy",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected,
+        revocation_record=record,
+    )
 
 
 # --- vector 16: revocation-against-none-ignored ----------------------------------
@@ -909,8 +1019,15 @@ def gen_16_revocation_against_none_ignored() -> None:
         "errors": [],
         "warnings_contains": ["revocability is 'none'"],
     }
-    write_vector("16-revocation-against-none-ignored", payload=payload, envelope=envelope,
-                 envelope_raw=None, trust=trust, expected=expected, revocation_record=record)
+    write_vector(
+        "16-revocation-against-none-ignored",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected,
+        revocation_record=record,
+    )
 
 
 # --- vector 17: binding-proven (two sub-cases) -----------------------------------
@@ -950,8 +1067,15 @@ def gen_17_binding_proven() -> None:
         "errors": [],
         "warnings": [],
     }
-    write_vector("17-binding-proven/a-salt-disclosure", payload=payload_a, envelope=envelope_a,
-                 envelope_raw=None, trust=trust, expected=expected_a, disclosure=disclosure_a)
+    write_vector(
+        "17-binding-proven/a-salt-disclosure",
+        payload=payload_a,
+        envelope=envelope_a,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected_a,
+        disclosure=disclosure_a,
+    )
 
     # (b) pubkey challenge-response transcript
     payload_b = issue.build_payload(**_base_payload_kwargs(buyer_pubkey=BUYER_KP.pub))
@@ -974,8 +1098,15 @@ def gen_17_binding_proven() -> None:
         "errors": [],
         "warnings": [],
     }
-    write_vector("17-binding-proven/b-pubkey-challenge", payload=payload_b, envelope=envelope_b,
-                 envelope_raw=None, trust=trust, expected=expected_b, disclosure=disclosure_b)
+    write_vector(
+        "17-binding-proven/b-pubkey-challenge",
+        payload=payload_b,
+        envelope=envelope_b,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected_b,
+        disclosure=disclosure_b,
+    )
 
 
 # --- vector 18: drm-bound ---------------------------------------------------------
@@ -1003,8 +1134,14 @@ def gen_18_drm_bound() -> None:
         "errors": [],
         "warnings_contains": ["drm-bound"],
     }
-    write_vector("18-drm-bound", payload=payload, envelope=envelope, envelope_raw=None,
-                 trust=trust, expected=expected)
+    write_vector(
+        "18-drm-bound",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected,
+    )
 
 
 def main() -> None:
