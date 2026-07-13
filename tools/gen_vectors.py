@@ -1299,6 +1299,131 @@ def gen_20_sig_canonicity() -> None:
     )
 
 
+def _nested_list(levels: int) -> Any:
+    value: Any = 1
+    for _ in range(levels):
+        value = [value]
+    return value
+
+
+def gen_21_canon_strict() -> None:
+    """Strict-parser parity set: BOM, depth boundary triple, lone surrogate,
+    and supplementary-plane raw-vs-escaped equivalence. Parse-level rejects
+    reuse vector 06's expected shape (issuer unextractable -> TOFU trust)."""
+    parse_reject_base = {
+        "signature": "invalid",
+        "schema": "not_checked",
+        "revocation": "unknown",
+        "binding": "not_checked",
+        "trust": "unauthenticated_tofu",
+        "ok": False,
+        "warnings": [],
+    }
+    accepted_with_unknown_field = {
+        "signature": "valid",
+        "schema": "valid",
+        "revocation": "unknown",
+        "binding": "not_checked",
+        "trust": "verified",
+        "ok": True,
+        "errors": [],
+        "warnings_contains": ["unknown payload field"],
+    }
+    trust = _issuer_only_trust()
+
+    # (a) BOM: both parsers reject, with language-specific messages -> no errors* field.
+    payload = issue.build_payload(**_base_payload_kwargs())
+    _assert_schema_valid(payload)
+    envelope = issue.issue(payload, ISSUER_KP, ISSUER_KID)
+    bom_raw = b"\xef\xbb\xbf" + json.dumps(envelope).encode("utf-8")
+    write_vector(
+        "21-canon-strict/a-bom",
+        payload=None,
+        envelope=None,
+        envelope_raw=bom_raw,
+        trust=trust,
+        expected=dict(parse_reject_base),
+    )
+
+    # (b)(c)(d) depth boundary triple: whole-text nesting 255 / 256 / 257.
+    # The deep structure lives in an unknown top-level payload field "x"
+    # (vector 10 pins unknown-field tolerance: schema stays valid + warning).
+    for depth_target, subname in ((255, "b-depth-255"), (256, "c-depth-256"), (257, "d-depth-257")):
+        deep_payload = issue.build_payload(**_base_payload_kwargs())
+        # envelope text depth at "x" = {envelope {payload [x nesting...]}} = 2 + levels
+        deep_payload["x"] = _nested_list(depth_target - 2)
+        deep_envelope = issue.issue(deep_payload, ISSUER_KP, ISSUER_KID)
+        deep_raw = json.dumps(deep_envelope).encode("utf-8")
+        assert _text_max_depth(deep_raw.decode("utf-8")) == depth_target
+        if depth_target <= 256:
+            expected: dict[str, Any] = dict(accepted_with_unknown_field)
+        else:
+            expected = dict(parse_reject_base)
+            expected["errors_contains"] = ["maximum nesting depth exceeded"]
+        write_vector(
+            f"21-canon-strict/{subname}",
+            payload=None,
+            envelope=None,
+            envelope_raw=deep_raw,
+            trust=trust,
+            expected=expected,
+        )
+
+    # (e) lone surrogate via \uXXXX escape, injected textually (a payload
+    # carrying it can never be signed: canonical_bytes rejects it).
+    surr_payload = issue.build_payload(**_base_payload_kwargs())
+    surr_payload["x"] = "PLACEHOLDER_SURR"
+    surr_envelope = issue.issue(surr_payload, ISSUER_KP, ISSUER_KID)
+    surr_raw_text = json.dumps(surr_envelope).replace('"PLACEHOLDER_SURR"', '"\\ud800"')
+    assert "\\ud800" in surr_raw_text
+    surr_expected = dict(parse_reject_base)
+    surr_expected["errors_contains"] = ["lone surrogate"]
+    write_vector(
+        "21-canon-strict/e-lone-surrogate",
+        payload=None,
+        envelope=None,
+        envelope_raw=surr_raw_text.encode("utf-8"),
+        trust=trust,
+        expected=surr_expected,
+    )
+
+    # (f)(g) supplementary-plane raw vs escaped: same signed payload, two
+    # byte-level encodings of the same envelope -> both must verify (JCS
+    # canonical form is what got signed, independent of transport escaping).
+    supp_payload = issue.build_payload(**_base_payload_kwargs(title=SUPPLEMENTARY_TITLE))
+    _assert_schema_valid(supp_payload)
+    supp_envelope = issue.issue(supp_payload, ISSUER_KP, ISSUER_KID)
+    raw_text = json.dumps(supp_envelope, ensure_ascii=False)
+    escaped_text = json.dumps(supp_envelope, ensure_ascii=True)
+    assert "\U0001d11e" in raw_text and "\\ud834\\udd1e" in escaped_text
+    accepted_clean = {
+        "signature": "valid",
+        "schema": "valid",
+        "revocation": "unknown",
+        "binding": "not_checked",
+        "trust": "verified",
+        "ok": True,
+        "errors": [],
+        "warnings": [],
+    }
+    write_vector(
+        "21-canon-strict/f-supplementary-raw",
+        payload=supp_payload,
+        envelope=None,
+        envelope_raw=raw_text.encode("utf-8"),
+        trust=trust,
+        expected=dict(accepted_clean),
+    )
+    write_vector(
+        "21-canon-strict/g-supplementary-escaped",
+        payload=None,
+        envelope=None,
+        envelope_raw=escaped_text.encode("utf-8"),
+        trust=trust,
+        expected=dict(accepted_clean),
+    )
+
+
 def main() -> None:
     _clear_leaf_dirs(VECTORS_DIR)
     VECTORS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1323,6 +1448,7 @@ def main() -> None:
     gen_18_drm_bound()
     gen_19_rotation_substituted_key()
     gen_20_sig_canonicity()
+    gen_21_canon_strict()
     leaf_count = sum(1 for _ in VECTORS_DIR.rglob("expected.json"))
     print(f"generated {leaf_count} vector cases under {VECTORS_DIR}")
 
