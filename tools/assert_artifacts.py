@@ -43,15 +43,12 @@ _SDIST_REQUIRED_EXACT = (
 )
 # hatchling places the license at "<sdist-root>/LICENSE" in the sdist.
 
-# Members whose *first path component* must equal the needle (i.e. needle is
-# the name of a top-level directory in the tarball, not merely a filename
-# prefix -- "notdist/index.js" must NOT satisfy "dist").
-_NPM_REQUIRED_DIR = ("dist",)
-# Exact-path needles, same semantics as _is_exact_or_suffix() below: a member
-# must equal the needle, or end with "/" + needle. "dist/index.js" and
-# "dist/index.d.ts" are the real entrypoints declared as "main"/"types" in
-# verifiers/ts/package.json -- requiring them is a stronger guarantee than the
-# generic "dist" top-level directory check they replace.
+# Exact-path needles: npm pack paths are package-root-relative with no
+# variable prefix, so an exact match (not suffix match) is required --
+# "nested/dist/index.js" must NOT satisfy "dist/index.js" when the real
+# top-level "dist/index.js" is absent. "dist/index.js" and "dist/index.d.ts"
+# are the real entrypoints declared as "main"/"types" in
+# verifiers/ts/package.json.
 _NPM_REQUIRED_EXACT = (
     "README.md",
     "CHANGELOG.md",
@@ -81,10 +78,26 @@ def _require_member(
 
 def _is_exact_or_suffix(needle: str) -> Callable[[str], bool]:
     """Member equals `needle`, or ends with `/needle` (i.e. needle is the
-    member's full path under some archive root)."""
+    member's full path under some archive root).
+
+    Only appropriate for archives with a variable root prefix (the sdist's
+    "<name-version>/" directory). For archives whose real paths are
+    deterministic and root-relative (wheel, npm pack), use `_is_exact`
+    instead -- suffix matching would let a nested lookalike (e.g.
+    "nested/dist/index.js") satisfy a requirement even when the real
+    top-level path is absent."""
 
     def predicate(member: str) -> bool:
         return member == needle or member.endswith("/" + needle)
+
+    return predicate
+
+
+def _is_exact(needle: str) -> Callable[[str], bool]:
+    """Member equals `needle` exactly."""
+
+    def predicate(member: str) -> bool:
+        return member == needle
 
     return predicate
 
@@ -96,21 +109,11 @@ def _basename_equals(name: str) -> Callable[[str], bool]:
     return predicate
 
 
-def _is_top_level_dir(name: str) -> Callable[[str], bool]:
-    """Member's first path component equals `name` (i.e. `name` is a
-    top-level directory of the archive, not merely a filename prefix)."""
-
-    def predicate(member: str) -> bool:
-        return member == name or member.startswith(name + "/")
-
-    return predicate
-
-
 def assert_wheel(path: Path) -> None:
     with zipfile.ZipFile(path) as z:
         members = z.namelist()
     for needle in _WHEEL_REQUIRED_EXACT:
-        _require_member(members, _is_exact_or_suffix(needle), needle, "wheel")
+        _require_member(members, _is_exact(needle), needle, "wheel")
     _require_member(members, _basename_equals(_LICENSE_BASENAME), _LICENSE_BASENAME, "wheel")
 
 
@@ -126,10 +129,8 @@ def assert_npm_tarball(pack_json: list[dict[str, Any]]) -> None:
     if not pack_json:
         raise ArtifactError("npm: empty `npm pack --json` output")
     files = [f["path"] for f in pack_json[0].get("files", [])]
-    for name in _NPM_REQUIRED_DIR:
-        _require_member(files, _is_top_level_dir(name), name, "npm")
     for needle in _NPM_REQUIRED_EXACT:
-        _require_member(files, _is_exact_or_suffix(needle), needle, "npm")
+        _require_member(files, _is_exact(needle), needle, "npm")
     for f in files:
         for pat in _NPM_FORBIDDEN:
             if pat.search(f):

@@ -51,6 +51,7 @@ jobs:
           npm run build --prefix verifiers/ts
           (cd verifiers/ts && npm pack --json > /tmp/pack.json)
           uv run --frozen python tools/assert_artifacts.py --npm-pack-json /tmp/pack.json
+          cp verifiers/ts/attest-verifier-*.tgz .
           (cd verifiers/ts && npm ci --omit=dev)
           syft dir:verifiers/ts -o cyclonedx-json=sbom-npm.cdx.json
           grype sbom:sbom-npm.cdx.json --fail-on high
@@ -62,7 +63,7 @@ jobs:
             dist/*
             sbom-python.cdx.json
             sbom-npm.cdx.json
-            verifiers/ts/*.tgz
+            attest-verifier-*.tgz
 
   pypi:
     needs: build
@@ -106,7 +107,11 @@ jobs:
           path: dist-and-sboms
       - name: Publish with provenance (OIDC Trusted Publishing)
         # Publish the exact tarball asserted + scanned in the build job, not a fresh pack.
-        run: npm publish dist-and-sboms/attest-verifier-*.tgz --provenance
+        run: |
+          shopt -s nullglob
+          tarballs=(dist-and-sboms/attest-verifier-*.tgz)
+          test "${#tarballs[@]}" -eq 1 || { echo "expected exactly 1 gated tarball, found ${#tarballs[@]}: ${tarballs[*]}"; exit 1; }
+          npm publish "${tarballs[0]}" --provenance
 
   github-release:
     needs: [pypi, npm]

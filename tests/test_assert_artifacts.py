@@ -169,6 +169,20 @@ def test_wheel_schema_bak_lookalike_does_not_satisfy_requirement(tmp_path: Path)
         assert_wheel(_make_wheel(tmp_path, members))
 
 
+def test_wheel_nested_schema_lookalike_does_not_satisfy_requirement(tmp_path: Path) -> None:
+    members = [m for m in WHEEL_OK if "schema" not in m] + [
+        "nested/attest/schema/attest-receipt.schema.json"
+    ]
+    with pytest.raises(ArtifactError, match="schema"):
+        assert_wheel(_make_wheel(tmp_path, members))
+
+
+def test_npm_nested_index_js_lookalike_does_not_satisfy_requirement() -> None:
+    members = [f for f in NPM_OK if f != "dist/index.js"] + ["nested/dist/index.js"]
+    with pytest.raises(ArtifactError, match=r"dist/index\.js"):
+        assert_npm_tarball(_pack(members))
+
+
 def test_npm_notdist_lookalike_does_not_satisfy_dist_requirement() -> None:
     members = [f for f in NPM_OK if not f.startswith("dist/")] + ["notdist/index.js"]
     with pytest.raises(ArtifactError, match="dist"):
