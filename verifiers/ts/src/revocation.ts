@@ -3,7 +3,7 @@ import { verifyKeyManifest, findKey } from './manifests.js'
 import { verifyStrict } from './ed25519.js'
 import { b64uDecode } from './b64u.js'
 import { parseStrictUtc, parseIsoLenient } from './dates.js'
-import { revocationFailedVerify, outsideRefundWindow, revocationViewOversize, WARN } from './messages.js'
+import { revocationFailedVerify, outsideRefundWindow, revocationViewOversize, revocationViewOversizeRevocable, WARN } from './messages.js'
 
 function asObject(v: JsonValue | undefined): JsonObject | null {
   return v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as JsonObject) : null
@@ -59,13 +59,24 @@ export const MAX_REVOCATION_RECORDS = 10_000
 
 export function classifyRevocation(
   payload: JsonObject, view: JsonValue[] | null, issuerManifest: JsonObject, warnings: string[],
-  maxRecords: number = MAX_REVOCATION_RECORDS,
+  errors: string[], maxRecords: number = MAX_REVOCATION_RECORDS,
 ): string {
   if (!view || view.length === 0) return 'unknown'
-  // Oversized view: not evaluated at all — never truncate (a subset could
-  // misreport), never throw. "unknown" is the honest verdict.
+
+  const license = asObject(payload['license'])
+  const revocability = license ? license['revocability'] : undefined
+
+  // Oversized view: not evaluated — never truncate, never throw. Fail CLOSED
+  // for revocable receipts (error → ok=false): an untrusted view too large to
+  // evaluate cannot rule out a revocation, and "unknown"+ok would let an
+  // append-only feed-poisoning attacker suppress a genuine revocation by
+  // padding past the cap. Irrevocable ("none") receipts: non-fatal warning.
   if (view.length > maxRecords) {
-    warnings.push(revocationViewOversize(view.length, maxRecords))
+    if (revocability === 'policy' || revocability === 'refund_window') {
+      errors.push(revocationViewOversizeRevocable(view.length, maxRecords))
+    } else {
+      warnings.push(revocationViewOversize(view.length, maxRecords))
+    }
     return 'unknown'
   }
 
@@ -92,8 +103,6 @@ export function classifyRevocation(
     if (o['status'] === 'revoked') valid.push(o)
   })
 
-  const license = asObject(payload['license'])
-  const revocability = license ? license['revocability'] : undefined
   if (revocability === 'none') {
     if (valid.length > 0) { warnings.push(WARN.REVOCABILITY_NONE_IGNORED); return 'invalid_revocation_ignored' }
     return notRevoked

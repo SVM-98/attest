@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import { loadsStrict, canonicalBytes, JsonObject, JsonValue } from '../src/canon.js'
 import { b64uEncode } from '../src/b64u.js'
 import { VECTORS_ROOT, envelopeBytes, trustStore, revocationView } from './helpers/vectors.js'
-import { verify } from '../src/verify.js'
+import { verify, isOk } from '../src/verify.js'
 import { MAX_REVOCATION_RECORDS } from '../src/revocation.js'
 
 // Wrap verifyKeyManifest in a call-counting spy that delegates to the real
@@ -73,8 +73,9 @@ describe('cached manifest self-verify (improvement #17)', () => {
   it('runs verifyKeyManifest exactly once per classification', () => {
     const view = [1, 2, 3, 4, 5].map((d) => record(`2026-07-0${d}T00:00:00Z`))
     const warnings: string[] = []
+    const errors: string[] = []
     vi.mocked(verifyKeyManifest).mockClear()
-    const result = classifyRevocation(policyPayload, view, keyManifest, warnings)
+    const result = classifyRevocation(policyPayload, view, keyManifest, warnings, errors)
     expect(result).toBe('revoked')
     expect(vi.mocked(verifyKeyManifest)).toHaveBeenCalledTimes(1)
   })
@@ -106,34 +107,61 @@ describe('cached manifest self-verify (improvement #17)', () => {
   })
 })
 
-describe('revocation view bound (improvement #17)', () => {
+describe('revocation view bound (improvement #17, fail-closed)', () => {
   it('exports the default cap', () => {
     expect(MAX_REVOCATION_RECORDS).toBe(10_000)
   })
 
-  it('oversized view -> unknown + verbatim warning, never evaluated', () => {
+  it('oversized view on a revocable receipt fails closed (error, not warning)', () => {
     const view = [1, 2, 3, 4].map((d) => record(`2026-07-0${d}T00:00:00Z`))
     const warnings: string[] = []
-    const result = classifyRevocation(policyPayload, view, keyManifest, warnings, 3)
+    const errors: string[] = []
+    const result = classifyRevocation(policyPayload, view, keyManifest, warnings, errors, 3)
+    expect(result).toBe('unknown')
+    expect(errors).toContain('revocation view exceeds 3 records (4 supplied), cannot certify a revocable receipt')
+    expect(warnings).toEqual([])
+  })
+
+  it('oversized view on an irrevocable receipt warns and stays ok-eligible', () => {
+    const nonePayload = parse({ receipt_id: RECEIPT_ID, issued_at: '2026-07-01T00:00:00Z', license: { revocability: 'none' } })
+    const view = [1, 2, 3, 4].map((d) => record(`2026-07-0${d}T00:00:00Z`))
+    const warnings: string[] = []
+    const errors: string[] = []
+    const result = classifyRevocation(nonePayload, view, keyManifest, warnings, errors, 3)
     expect(result).toBe('unknown')
     expect(warnings).toContain('revocation view exceeds 3 records (4 supplied), not evaluated')
+    expect(errors).toEqual([])
   })
 
   it('view exactly at cap evaluates normally (boundary is strict >)', () => {
     const view = [1, 2, 3].map((d) => record(`2026-07-0${d}T00:00:00Z`))
     const warnings: string[] = []
-    expect(classifyRevocation(policyPayload, view, keyManifest, warnings, 3)).toBe('revoked')
+    const errors: string[] = []
+    expect(classifyRevocation(policyPayload, view, keyManifest, warnings, errors, 3)).toBe('revoked')
     expect(warnings).toEqual([])
+    expect(errors).toEqual([])
   })
 
-  it('verify() threads the cap (vector 15 record replicated past an injected cap)', () => {
-    const dir = join(VECTORS_ROOT, '15-revoked-policy')
+  it('verify() fails closed on a revocable receipt when a genuine revocation is padded past the cap', () => {
+    const dir = join(VECTORS_ROOT, '15-revoked-policy') // policy (revocable) receipt + its genuine revoked record
     const single = revocationView(dir)! // loader returns unknown[]; entries are loadsStrict-parsed
-    const big = [0, 1, 2, 3].map(() => single[0]!) as JsonValue[]
+    const big = [0, 1, 2, 3].map(() => single[0]!) as JsonValue[] // 4 copies > cap 3
     const capped = verify(envelopeBytes(dir), trustStore(dir), big, null, 3)
     expect(capped.revocation).toBe('unknown')
-    expect(capped.warnings).toContain('revocation view exceeds 3 records (4 supplied), not evaluated')
+    expect(capped.errors).toContain('revocation view exceeds 3 records (4 supplied), cannot certify a revocable receipt')
+    expect(isOk(capped)).toBe(false)
     const uncapped = verify(envelopeBytes(dir), trustStore(dir), big)
     expect(uncapped.revocation).toBe('revoked')
+  })
+
+  it('does not deep-walk (assertCanonParsed) an oversized JSON.parse-d view — bounds work and matches Python', () => {
+    // A JSON.parse-d view has JS-number fields that assertCanonParsed rejects with
+    // TypeError. Oversized, it must skip that walk (length-guarded) and fail closed
+    // like Python, which never inspects elements before the len() cap.
+    const dir = join(VECTORS_ROOT, '15-revoked-policy')
+    const jsonParsedJunk = Array.from({ length: 4 }, () => ({ receipt_id: 'x', status: 'revoked', revoked_at: '2026-07-03T00:00:00Z', manifest_version: 2 }))
+    const capped = verify(envelopeBytes(dir), trustStore(dir), jsonParsedJunk as unknown as JsonValue[], null, 3)
+    expect(capped.revocation).toBe('unknown')
+    expect(isOk(capped)).toBe(false)
   })
 })

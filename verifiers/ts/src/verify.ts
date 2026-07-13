@@ -98,7 +98,13 @@ export function verify(
   // walk envelopeBytes (parsed internally) or disclosure (holds raw Uint8Array fields).
   assertCanonParsed(trustStore.manifests, 'trustStore.manifests')
   if (trustStore.chains != null) assertCanonParsed(trustStore.chains, 'trustStore.chains')
-  if (revocationView !== null) assertCanonParsed(revocationView, 'revocation_view')
+  // Skip the deep JSON-number guard on an oversized view: it would be an O(N)
+  // walk of attacker-controlled data (and would throw TypeError on a JSON.parse-d
+  // oversized view instead of failing closed). classifyRevocation handles the
+  // oversized case from length alone — matching Python, which never inspects
+  // view elements before the len() cap.
+  if (revocationView !== null && revocationView.length <= maxRevocationRecords)
+    assertCanonParsed(revocationView, 'revocation_view')
 
   const errors: string[] = []
   const warnings: string[] = []
@@ -185,7 +191,7 @@ export function verify(
   let revocation = 'unknown'
   let binding: Binding = 'not_checked'
   if (schema === 'valid') {
-    revocation = classifyRevocation(payload, revocationView, manifest, warnings, maxRevocationRecords)
+    revocation = classifyRevocation(payload, revocationView, manifest, warnings, errors, maxRevocationRecords)
     binding = disclosure != null ? classifyBinding(payload, disclosure) : 'not_checked'
   }
 
