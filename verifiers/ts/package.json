@@ -1,6 +1,6 @@
 {
   "name": "attest-verifier",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Independent TypeScript verifier for attest v0.1 receipts (verifier-only).",
   "license": "Apache-2.0",
   "author": "Samuele Martinalli",
