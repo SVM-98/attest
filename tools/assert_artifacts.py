@@ -40,7 +40,13 @@ _SDIST_REQUIRED_EXACT = (
 )
 # hatchling places the license at "<sdist-root>/LICENSE" in the sdist.
 
-_NPM_REQUIRED = ("dist/", "README.md", "CHANGELOG.md", "package.json")
+# Members whose *first path component* must equal the needle (i.e. needle is
+# the name of a top-level directory in the tarball, not merely a filename
+# prefix -- "notdist/index.js" must NOT satisfy "dist").
+_NPM_REQUIRED_DIR = ("dist",)
+# Exact-path needles, same semantics as _is_exact_or_suffix() below: a member
+# must equal the needle, or end with "/" + needle.
+_NPM_REQUIRED_EXACT = ("README.md", "CHANGELOG.md", "package.json")
 # Regexes for members that must NEVER ship in the npm tarball. Anchored on
 # path-component / filename boundaries (not raw substrings) and
 # case-insensitive, so lookalikes (e.g. "api.privateer.md",
@@ -52,11 +58,6 @@ _NPM_FORBIDDEN = (
     re.compile(r"(^|/)(src|tests?)/", re.IGNORECASE),
     re.compile(r"(^|/)tsconfig(\.[^/]*)?$", re.IGNORECASE),
 )
-
-
-def _require_contains(members: list[str], needle: str, kind: str) -> None:
-    if not any(needle in m for m in members):
-        raise ArtifactError(f"{kind}: required member matching {needle!r} not found")
 
 
 def _require_member(
@@ -90,6 +91,16 @@ def _basename_equals(name: str) -> Callable[[str], bool]:
     return predicate
 
 
+def _is_top_level_dir(name: str) -> Callable[[str], bool]:
+    """Member's first path component equals `name` (i.e. `name` is a
+    top-level directory of the archive, not merely a filename prefix)."""
+
+    def predicate(member: str) -> bool:
+        return member == name or member.startswith(name + "/")
+
+    return predicate
+
+
 def assert_wheel(path: Path) -> None:
     with zipfile.ZipFile(path) as z:
         members = z.namelist()
@@ -112,8 +123,10 @@ def assert_npm_tarball(pack_json: list[dict[str, Any]]) -> None:
     if not pack_json:
         raise ArtifactError("npm: empty `npm pack --json` output")
     files = [f["path"] for f in pack_json[0].get("files", [])]
-    for needle in _NPM_REQUIRED:
-        _require_contains(files, needle, "npm")
+    for name in _NPM_REQUIRED_DIR:
+        _require_member(files, _is_top_level_dir(name), name, "npm")
+    for needle in _NPM_REQUIRED_EXACT:
+        _require_member(files, _is_exact_or_suffix(needle), needle, "npm")
     for f in files:
         for pat in _NPM_FORBIDDEN:
             if pat.search(f):
