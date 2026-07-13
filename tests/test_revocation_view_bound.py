@@ -15,11 +15,12 @@ Mirrored on the TS side by `verifiers/ts/test/revocation-bound.test.ts`.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
 
-from attest import keys, manifests, revocation, verify
+from attest import issue, keys, manifests, revocation, verify
 from tests.helpers import make_payload
 
 ISSUER = "store.example.com"
@@ -105,3 +106,56 @@ def test_verify_record_delegates_and_still_requires_manifest_self_consistency() 
     tampered = dict(manifest)
     tampered["issued_at"] = "2027-01-01T00:00:00Z"  # breaks the manifest's own signature
     assert revocation.verify_record(_record(), tampered) is False
+
+
+# --- revocation-view size cap (Task 2) -----------------------------------------
+
+
+def _trust_store(manifest: dict[str, Any]) -> verify.TrustStore:
+    return verify.TrustStore(manifests={ISSUER: manifest}, provenance={ISSUER: "tls"})
+
+
+def _to_bytes(envelope: dict[str, Any]) -> bytes:
+    """Simulate bytes received over the wire — need not be canonical, only valid JSON."""
+    return json.dumps(envelope).encode("utf-8")
+
+
+def test_default_cap_is_10_000() -> None:
+    assert verify._MAX_REVOCATION_RECORDS == 10_000
+
+
+def test_oversized_view_reports_unknown_with_warning_and_ok_unaffected() -> None:
+    """Overflow = warn + unknown: the feed is not evaluated at all (no
+    truncation), and `unknown` never flips `ok` — even though the same view
+    under the default cap would revoke this receipt (next test)."""
+    payload = make_payload(license={"revocability": "policy"})
+    envelope = issue.issue(payload, KP, KID)
+    view = [_record(f"2026-07-0{i}T00:00:00Z") for i in range(1, 5)]  # 4 records
+    result = verify.verify(
+        _to_bytes(envelope),
+        _trust_store(_key_manifest()),
+        revocation_view=view,
+        max_revocation_records=3,
+    )
+    assert result.revocation == "unknown"
+    assert "revocation view exceeds 3 records (4 supplied), not evaluated" in result.warnings
+    assert result.ok is True
+
+
+def test_same_view_under_default_cap_is_still_revoked() -> None:
+    payload = make_payload(license={"revocability": "policy"})
+    envelope = issue.issue(payload, KP, KID)
+    view = [_record(f"2026-07-0{i}T00:00:00Z") for i in range(1, 5)]  # 4 records
+    result = verify.verify(_to_bytes(envelope), _trust_store(_key_manifest()), revocation_view=view)
+    assert result.revocation == "revoked"
+    assert result.ok is False
+
+
+def test_view_exactly_at_cap_evaluates_normally() -> None:
+    """The boundary is strict `>`: n == cap is evaluated, n == cap + 1 is not."""
+    payload = make_payload(license={"revocability": "policy"})
+    view = [_record(f"2026-07-0{i}T00:00:00Z") for i in range(1, 4)]  # 3 records
+    warnings: list[str] = []
+    result = verify._classify_revocation(payload, view, _key_manifest(), warnings, max_records=3)
+    assert result == "revoked"
+    assert warnings == []
