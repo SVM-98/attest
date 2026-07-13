@@ -122,7 +122,21 @@ def check_continuity(trusted: dict[str, Any], candidate: dict[str, Any]) -> bool
     except (KeyError, TypeError):
         return False
     signer_entry = find_key(trusted, signer_kid)
-    return signer_entry is not None and signer_entry.get("status") == _ACTIVE
+    if signer_entry is None or signer_entry.get("status") != _ACTIVE:
+        return False
+    # Bind continuity to the key TRUSTED vouches for: the candidate's signature
+    # must verify under the pub `trusted` holds for signer_kid, NOT the pub the
+    # candidate lists for it. Otherwise an attacker reuses a trusted kid, swaps in
+    # its own pub, self-signs, and passes — continuity becomes cryptographically
+    # hollow (2026-07-13 review, finding 1).
+    try:
+        return keys.verify_strict(
+            _signable(candidate),
+            keys.b64u_decode(candidate["manifest_signature"]["sig"]),
+            keys.b64u_decode(signer_entry["pub"]),
+        )
+    except (KeyError, ValueError, TypeError):
+        return False
 
 
 def rotate_key_manifest(

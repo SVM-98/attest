@@ -7,9 +7,9 @@
   "required": ["attest_version", "receipt_id", "issued_at", "issuer", "buyer", "work", "license", "survivability"],
   "properties": {
     "attest_version": { "const": "0.1" },
-    "receipt_id": { "type": "string", "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$" },
+    "receipt_id": { "type": "string", "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$" },
     "issued_at": { "type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$" },
-    "supersedes": { "type": ["string", "null"], "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$" },
+    "supersedes": { "type": ["string", "null"], "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$" },
     "issuer": {
       "type": "object",
       "required": ["id", "display_name"],

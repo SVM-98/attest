@@ -276,8 +276,14 @@ def export(
 
         zf.writestr("README.html", _render_readme(name))
 
-    with zipfile.ZipFile(private_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("salts.json", json.dumps(salts_b64u))
+    # The private archive carries buyer-binding salts (bearer secrets); create it
+    # owner-only (0600) race-free, mirroring _write_secret_json, so it never has a
+    # world-readable window under the default umask (2026-07-13 review, finding 2).
+    fd = os.open(private_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _SECRET_FILE_MODE)
+    with os.fdopen(fd, "wb") as fh:
+        os.fchmod(fh.fileno(), _SECRET_FILE_MODE)
+        with zipfile.ZipFile(fh, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("salts.json", json.dumps(salts_b64u))
 
     return attest_path, private_path
 

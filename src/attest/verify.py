@@ -33,6 +33,7 @@ _SUPPORTED_ATTEST_VERSIONS = frozenset({"0.1"})
 _KNOWN_EOL_VALUES = frozenset({"artifacts-remain-redownloadable", "escrow", "none"})
 _DATE_FMT = "%Y-%m-%dT%H:%M:%SZ"
 
+_STATUS_ACTIVE = "active"
 _STATUS_COMPROMISED = "compromised"
 _STATUS_RETIRED = "retired"
 
@@ -537,6 +538,10 @@ def verify(
     status = entry.get("status")
     if status == _STATUS_COMPROMISED:
         return _invalid(f"key {kid} is compromised")
+    if status not in (_STATUS_ACTIVE, _STATUS_RETIRED):
+        # Fail closed on missing/unknown status instead of validating like an
+        # active key (2026-07-13 review, finding 4).
+        return _invalid(f"key {kid} has unusable status {status!r}")
 
     issued_at = payload.get("issued_at")
     if not isinstance(issued_at, str) or not _within_validity(issued_at, entry):
