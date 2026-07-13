@@ -15,8 +15,8 @@ const leaves = V.findLeafDirs()
 const canonicalLeaves = leaves.filter((d) => existsSync(join(d, 'canonical.json')))
 
 describe('attest v0.1 conformance vectors', () => {
-  it('discovers the full vector suite (>= 23 leaves)', () => {
-    expect(leaves.length).toBeGreaterThanOrEqual(23)
+  it('discovers the full vector suite (>= 43 leaves)', () => {
+    expect(leaves.length).toBeGreaterThanOrEqual(43)
   })
 
   it.each(leaves.map((d) => [V.vectorId(d), d] as const))('%s', (_id, dir) => {
