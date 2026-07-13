@@ -15,9 +15,12 @@ function signableRecordBytes(record: JsonObject): Uint8Array {
   return canonicalBytes(body)
 }
 
-export function verifyRecord(record: JsonObject, keyManifest: JsonObject): boolean {
+// PRECONDITION: caller already established verifyKeyManifest(keyManifest) is
+// true. Loop-over-records callers hoist that call — one manifest self-verify
+// per classification, not per record (review improvement #17). To verify a
+// single record, use verifyRecord, which composes both halves.
+export function verifyRecordSignature(record: JsonObject, keyManifest: JsonObject): boolean {
   try {
-    if (!verifyKeyManifest(keyManifest)) return false
     const sig = asObject(record['signature'])
     if (!sig || typeof sig['kid'] !== 'string' || typeof sig['sig'] !== 'string') return false
     const entry = findKey(keyManifest, sig['kid'])
@@ -31,6 +34,10 @@ export function verifyRecord(record: JsonObject, keyManifest: JsonObject): boole
     if (typeof pub !== 'string') return false
     return verifyStrict(signableRecordBytes(record), b64uDecode(sig['sig']), b64uDecode(pub))
   } catch { return false }
+}
+
+export function verifyRecord(record: JsonObject, keyManifest: JsonObject): boolean {
+  try { return verifyKeyManifest(keyManifest) && verifyRecordSignature(record, keyManifest) } catch { return false }
 }
 
 function refundWindowEnd(payload: JsonObject): number | null {
@@ -48,7 +55,9 @@ export function classifyRevocation(
 ): string {
   if (!view || view.length === 0) return 'unknown'
 
-  const auth: boolean[] = view.map((r) => { const o = asObject(r); return o !== null && verifyRecord(o, issuerManifest) })
+  // One manifest self-verify per classification, not per record (improvement #17).
+  const manifestOk = verifyKeyManifest(issuerManifest)
+  const auth: boolean[] = view.map((r) => { const o = asObject(r); return manifestOk && o !== null && verifyRecordSignature(o, issuerManifest) })
 
   // freshness anchor T = max revoked_at over AUTHENTICATED records of ANY receipt_id
   let anchorMs = -Infinity, anchorRaw: string | null = null
