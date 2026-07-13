@@ -37,7 +37,7 @@ def _make_sdist(tmp: Path, members: list[str]) -> Path:
 WHEEL_OK = [
     "attest/__init__.py",
     "attest/py.typed",
-    "attest/schema/attest-v0.1.schema.json",
+    "attest/schema/attest-receipt.schema.json",
     "attest_receipts-0.1.2.dist-info/METADATA",
     "attest_receipts-0.1.2.dist-info/licenses/LICENSE",
 ]
@@ -61,6 +61,12 @@ def test_wheel_missing_py_typed_raises(tmp_path: Path) -> None:
 
 def test_wheel_missing_schema_raises(tmp_path: Path) -> None:
     members = [m for m in WHEEL_OK if "schema" not in m]
+    with pytest.raises(ArtifactError, match="schema"):
+        assert_wheel(_make_wheel(tmp_path, members))
+
+
+def test_wheel_wrong_schema_name_raises(tmp_path: Path) -> None:
+    members = [m for m in WHEEL_OK if "schema" not in m] + ["attest/schema/attest-v0.1.schema.json"]
     with pytest.raises(ArtifactError, match="schema"):
         assert_wheel(_make_wheel(tmp_path, members))
 
@@ -89,6 +95,18 @@ def test_npm_ok() -> None:
 def test_npm_missing_changelog_raises() -> None:
     with pytest.raises(ArtifactError, match=r"CHANGELOG\.md"):
         assert_npm_tarball(_pack([f for f in NPM_OK if f != "CHANGELOG.md"]))
+
+
+def test_npm_missing_index_js_raises() -> None:
+    members = [f for f in NPM_OK if not f.startswith("dist/")] + ["dist/README"]
+    with pytest.raises(ArtifactError, match=r"dist/index\.js"):
+        assert_npm_tarball(_pack(members))
+
+
+def test_npm_missing_index_d_ts_raises() -> None:
+    members = [f for f in NPM_OK if f != "dist/index.d.ts"]
+    with pytest.raises(ArtifactError, match=r"dist/index\.d\.ts"):
+        assert_npm_tarball(_pack(members))
 
 
 def test_npm_forbidden_private_raises() -> None:

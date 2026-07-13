@@ -27,9 +27,12 @@ class ArtifactError(Exception):
 _WHEEL_REQUIRED_EXACT = (
     "attest/__init__.py",
     "attest/py.typed",
+    # The exact bundled JSON schema resource loaded at runtime via
+    # importlib.resources.files("attest.schema").joinpath(...) in
+    # src/attest/validate.py -- a generic "*.schema.json" match would let an
+    # unrelated/renamed schema satisfy this requirement.
+    "attest/schema/attest-receipt.schema.json",
 )
-# Suffix needles: a member's basename must end with the needle.
-_WHEEL_REQUIRED_BASENAME_SUFFIX = (".schema.json",)  # bundled JSON schema resource
 # hatchling places the license at "<dist-info>/licenses/LICENSE" in the wheel.
 _LICENSE_BASENAME = "LICENSE"
 
@@ -45,8 +48,17 @@ _SDIST_REQUIRED_EXACT = (
 # prefix -- "notdist/index.js" must NOT satisfy "dist").
 _NPM_REQUIRED_DIR = ("dist",)
 # Exact-path needles, same semantics as _is_exact_or_suffix() below: a member
-# must equal the needle, or end with "/" + needle.
-_NPM_REQUIRED_EXACT = ("README.md", "CHANGELOG.md", "package.json")
+# must equal the needle, or end with "/" + needle. "dist/index.js" and
+# "dist/index.d.ts" are the real entrypoints declared as "main"/"types" in
+# verifiers/ts/package.json -- requiring them is a stronger guarantee than the
+# generic "dist" top-level directory check they replace.
+_NPM_REQUIRED_EXACT = (
+    "README.md",
+    "CHANGELOG.md",
+    "package.json",
+    "dist/index.js",
+    "dist/index.d.ts",
+)
 # Regexes for members that must NEVER ship in the npm tarball. Anchored on
 # path-component / filename boundaries (not raw substrings) and
 # case-insensitive, so lookalikes (e.g. "api.privateer.md",
@@ -77,13 +89,6 @@ def _is_exact_or_suffix(needle: str) -> Callable[[str], bool]:
     return predicate
 
 
-def _basename_endswith(suffix: str) -> Callable[[str], bool]:
-    def predicate(member: str) -> bool:
-        return PurePosixPath(member).name.endswith(suffix)
-
-    return predicate
-
-
 def _basename_equals(name: str) -> Callable[[str], bool]:
     def predicate(member: str) -> bool:
         return PurePosixPath(member).name == name
@@ -106,8 +111,6 @@ def assert_wheel(path: Path) -> None:
         members = z.namelist()
     for needle in _WHEEL_REQUIRED_EXACT:
         _require_member(members, _is_exact_or_suffix(needle), needle, "wheel")
-    for suffix in _WHEEL_REQUIRED_BASENAME_SUFFIX:
-        _require_member(members, _basename_endswith(suffix), suffix, "wheel")
     _require_member(members, _basename_equals(_LICENSE_BASENAME), _LICENSE_BASENAME, "wheel")
 
 
