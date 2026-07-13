@@ -853,6 +853,23 @@ def gen_13_compromised_key() -> None:
 # --- vector 14 / 14b: rotation continuity / discontinuity -----------------------
 
 
+def _genuine_rotation_pair() -> tuple[dict[str, Any], dict[str, Any]]:
+    """A legitimate v1 -> v2 rotation: v2 retires the old key, introduces
+    ROTATED_KID, and is signed by ISSUER_KID (active in v1) -> continuity holds."""
+    v1 = _manifest_material(ISSUER_ID, ISSUER_KID, ISSUER_KP)
+    v2_entries = [
+        manifests.key_entry(
+            ISSUER_KID, ISSUER_KP.pub, KEY_VALID_FROM, ROTATION_ISSUED_AT, "retired"
+        ),
+        manifests.key_entry(ROTATED_KID, ROTATED_KP.pub, ROTATION_ISSUED_AT, None, "active"),
+    ]
+    v2 = manifests.build_key_manifest(
+        ISSUER_ID, 2, ROTATION_ISSUED_AT, v2_entries, ISSUER_KP, ISSUER_KID
+    )
+    assert manifests.check_continuity(v1, v2) is True
+    return v1, v2
+
+
 def gen_14_rotation_continuity() -> None:
     """A two-manifest chain: v1 (`ISSUER_KID` sole active key) -> v2, where v2
     introduces a genuinely NEW active key (`ROTATED_KID`) and retires the old
@@ -863,17 +880,7 @@ def gen_14_rotation_continuity() -> None:
     value (`verified`, since provenance is `tls`) rather than being forced
     to `unverified_rotation`. The receipt itself is issued by the NEW key,
     proving verification correctly resolves against the CURRENT (v2) manifest."""
-    v1 = _manifest_material(ISSUER_ID, ISSUER_KID, ISSUER_KP)  # version 1, sole active key
-    entries_v2 = [
-        manifests.key_entry(
-            ISSUER_KID, ISSUER_KP.pub, KEY_VALID_FROM, ROTATION_ISSUED_AT, "retired"
-        ),
-        manifests.key_entry(ROTATED_KID, ROTATED_KP.pub, ROTATION_ISSUED_AT, None, "active"),
-    ]
-    v2 = manifests.build_key_manifest(
-        ISSUER_ID, 2, ROTATION_ISSUED_AT, entries_v2, ISSUER_KP, ISSUER_KID
-    )
-    assert manifests.check_continuity(v1, v2) is True
+    v1, v2 = _genuine_rotation_pair()
 
     payload = issue.build_payload(**_base_payload_kwargs(issued_at=RECEIPT_ISSUED_AFTER_ROTATION))
     _assert_schema_valid(payload)
@@ -1144,6 +1151,80 @@ def gen_18_drm_bound() -> None:
     )
 
 
+# --- vector 19: rotation-substituted-key (2 sub-cases) ---------------------------
+
+
+def gen_19_rotation_substituted_key() -> None:
+    """Regression pair for the 2026-07-13 must-fix #1 (key substitution in
+    check_continuity) and the PR #4 chain-tail binding fix.
+
+    (a) The candidate v2 re-declares ISSUER_KID but with SUBSTITUTED_KP's
+    public key, and is signed by SUBSTITUTED_KP under that kid. The manifest
+    is SELF-consistent (its own declared pub verifies its own signature) —
+    exactly the attack the pre-fix code fell for by validating the candidate
+    signature against the candidate's self-declared pub. The fixed
+    check_continuity resolves the signer pub from the TRUSTED manifest, where
+    ISSUER_KID maps to the real key -> signature mismatch -> discontinuous ->
+    trust: "unverified_rotation" (a trust downgrade, not a rejection: ok stays
+    True per §11.1, same reasoning as vector 14b).
+
+    (b) The chain [v1, v2] is genuinely continuous, but the manifest under
+    `manifests` (the one used to resolve the receipt's kid) is v1, NOT the
+    chain tail v2. Post-PR#4, a chain only vouches for the manifest it ends
+    with -> unverified_rotation."""
+    # (a) substituted candidate key
+    v1 = _manifest_material(ISSUER_ID, ISSUER_KID, ISSUER_KP)
+    evil_entries = [
+        manifests.key_entry(ISSUER_KID, SUBSTITUTED_KP.pub, KEY_VALID_FROM, None, "active"),
+        manifests.key_entry(ROTATED_KID, ROTATED_KP.pub, ROTATION_ISSUED_AT, None, "active"),
+    ]
+    v2_evil = manifests.build_key_manifest(
+        ISSUER_ID, 2, ROTATION_ISSUED_AT, evil_entries, SUBSTITUTED_KP, ISSUER_KID
+    )
+    assert manifests.verify_key_manifest(v2_evil) is True  # self-consistent: that's the point
+    assert manifests.check_continuity(v1, v2_evil) is False  # but the trusted root unmasks it
+
+    payload = issue.build_payload(**_base_payload_kwargs(issued_at=RECEIPT_ISSUED_AFTER_ROTATION))
+    _assert_schema_valid(payload)
+    envelope = issue.issue(payload, ROTATED_KP, ROTATED_KID)
+    trust_a = _trust_material((ISSUER_ID, v2_evil, "tls"), chains={ISSUER_ID: [v1, v2_evil]})
+    expected_downgrade = {
+        "signature": "valid",
+        "schema": "valid",
+        "revocation": "unknown",
+        "binding": "not_checked",
+        "trust": "unverified_rotation",
+        "ok": True,
+        "errors": [],
+        "warnings": [],
+    }
+    write_vector(
+        "19-rotation-substituted-key/a-substituted-candidate-key",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust_a,
+        expected=expected_downgrade,
+    )
+
+    # (b) valid chain whose tail is not the manifest in use
+    v1b, v2b = _genuine_rotation_pair()
+    payload_b = issue.build_payload(**_base_payload_kwargs())
+    _assert_schema_valid(payload_b)
+    envelope_b = issue.issue(
+        payload_b, ISSUER_KP, ISSUER_KID
+    )  # resolvable in v1 (the manifest used)
+    trust_b = _trust_material((ISSUER_ID, v1b, "tls"), chains={ISSUER_ID: [v1b, v2b]})
+    write_vector(
+        "19-rotation-substituted-key/b-chain-tail-not-manifest-used",
+        payload=payload_b,
+        envelope=envelope_b,
+        envelope_raw=None,
+        trust=trust_b,
+        expected=expected_downgrade,
+    )
+
+
 def main() -> None:
     _clear_leaf_dirs(VECTORS_DIR)
     VECTORS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1166,6 +1247,7 @@ def main() -> None:
     gen_16_revocation_against_none_ignored()
     gen_17_binding_proven()
     gen_18_drm_bound()
+    gen_19_rotation_substituted_key()
     leaf_count = sum(1 for _ in VECTORS_DIR.rglob("expected.json"))
     print(f"generated {leaf_count} vector cases under {VECTORS_DIR}")
 
