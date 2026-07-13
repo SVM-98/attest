@@ -489,7 +489,12 @@ def verify(
         provenance = trust_store.provenance.get(issuer_id)
         trust = _TRUST_VERIFIED if provenance == _PROVENANCE_TLS else _TRUST_TOFU
         chain = trust_store.chains.get(issuer_id)
-        if chain and not _chain_continuous(chain):
+        if chain and (
+            not _chain_continuous(chain) or chain[-1] != trust_store.manifests.get(issuer_id)
+        ):
+            # A chain that does not actually end at the manifest being used proves
+            # nothing about it — treat it as a discontinuous rotation (2026-07-13
+            # review, finding 8).
             trust = _TRUST_UNVERIFIED_ROTATION
 
     # --- Step 1: envelope well-formed; attest_version supported; signatures

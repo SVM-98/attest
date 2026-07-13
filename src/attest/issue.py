@@ -9,12 +9,15 @@ hash used for bundles/dedup.
 from __future__ import annotations
 
 import hashlib
+import re
 from datetime import UTC, datetime
 from typing import Any
 
 from attest import canon, commitment, keys, ulid, validate
 
 _ALG = "Ed25519"  # hard-coded — never selected from any field, see §3
+# kid structure per spec: <issuer-domain>/keys/<label>#<name>
+_KID_RE = re.compile(r"^[^/]+/keys/[^/#]+#[^/#]+$")
 
 
 class IssueError(ValueError):
@@ -52,6 +55,14 @@ def issue(
         raise IssueError(
             f"kid domain {kid_domain!r} does not match payload issuer.id {issuer_id!r}"
         )
+    if not _KID_RE.match(kid):
+        # Reject a structurally malformed kid at issuance (2026-07-13 review,
+        # finding 16).
+        raise IssueError(f"malformed kid {kid!r}: expected '<issuer-domain>/keys/<label>#<name>'")
+    if salt is not None and len(salt) != 16:
+        # The buyer commitment is over a 16-byte salt; a wrong length would make
+        # binding permanently unprovable (2026-07-13 review, finding 15).
+        raise IssueError("buyer-binding salt must be exactly 16 bytes")
 
     payload_bytes = canon.canonical_bytes(payload)
     sig = keys.sign(payload_bytes, signing_kp)
