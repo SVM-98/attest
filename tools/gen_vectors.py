@@ -136,6 +136,28 @@ REVOKED_AT = "2025-08-01T00:00:00Z"
 CHALLENGE_NONCE = bytes(range(32, 48))
 
 
+# --- 2026-07-13 regression-corpus constants (vectors 19-25) -------------------
+
+SUBSTITUTED_KEY_SEED = (
+    bytes([6]) * 32
+)  # vector 19a: key the attacker swaps into the candidate manifest
+SUBSTITUTED_KP = keys.from_seed(SUBSTITUTED_KEY_SEED)
+
+SMALL_ORDER_POINT = bytes([1]) + bytes(31)  # canonical encoding of the identity element (order 1)
+SMALL_ORDER_KID = (
+    f"{ISSUER_ID}/keys/2025-01#ed25519-5"  # vector 20b: listed key whose pub is small-order
+)
+
+REFUND_WINDOW_DAYS = 14  # vector 23: ISSUED_AT 2025-07-02 -> window end 2025-07-16
+REVOKED_INSIDE_WINDOW_AT = (
+    "2025-07-10T00:00:00Z"  # vector 23a: inside the window (REVOKED_AT 2025-08-01 is outside)
+)
+
+SUPPLEMENTARY_TITLE = (
+    "Music \U0001d11e Theme"  # vector 21f/g: U+1D11E, needs a surrogate pair when escaped
+)
+
+
 # --- generic helpers --------------------------------------------------------
 
 
@@ -147,6 +169,44 @@ def _write_json(path: Path, obj: object) -> None:
 def _write_bytes(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
+
+
+def _clear_leaf_dirs(root: Path) -> None:
+    """Remove only the leaf *directories* under `root`, preserving files —
+    regeneration must not delete the hand-authored README.md (pre-2026-07-13
+    the whole tree was rmtree'd and the README lost on every regen)."""
+    if not root.exists():
+        return
+    for child in root.iterdir():
+        if child.is_dir():
+            shutil.rmtree(child)
+
+
+def _text_max_depth(text: str) -> int:
+    """Max bracket nesting depth of a JSON text, ignoring brackets inside
+    strings — the measuring twin of `canon._check_depth`'s walk, used to
+    assert the depth-boundary vectors (21b/c/d) sit exactly on 255/256/257."""
+    depth = 0
+    max_depth = 0
+    in_string = False
+    escaped = False
+    for ch in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch in "[{":
+            depth += 1
+            max_depth = max(max_depth, depth)
+        elif ch in "]}":
+            depth -= 1
+    return max_depth
 
 
 def _manifest_material(
@@ -213,7 +273,8 @@ def write_vector(name: str, *, payload: dict[str, Any] | None, envelope: dict[st
                   envelope_raw: bytes | None, trust: dict[str, Any], expected: dict[str, Any],
                   disclosure: dict[str, Any] | None = None,
                   manifest_pristine: dict[str, Any] | None = None,
-                  revocation_record: dict[str, Any] | None = None) -> None:
+                  revocation_record: dict[str, Any] | None = None,
+                  canonical: bytes | None = None) -> None:
     vector_dir = VECTORS_DIR / name
     if payload is not None:
         _write_json(vector_dir / "payload.json", payload)
@@ -229,6 +290,8 @@ def write_vector(name: str, *, payload: dict[str, Any] | None, envelope: dict[st
         _write_json(vector_dir / "manifest_pristine.json", manifest_pristine)
     if revocation_record is not None:
         _write_json(vector_dir / "revocation.json", revocation_record)
+    if canonical is not None:
+        _write_bytes(vector_dir / "canonical.json", canonical)
 
 
 # --- vector 01: valid-minimal ------------------------------------------------
@@ -945,7 +1008,7 @@ def gen_18_drm_bound() -> None:
 
 
 def main() -> None:
-    shutil.rmtree(VECTORS_DIR, ignore_errors=True)
+    _clear_leaf_dirs(VECTORS_DIR)
     VECTORS_DIR.mkdir(parents=True, exist_ok=True)
     gen_01_valid_minimal()
     gen_02_valid_full()
