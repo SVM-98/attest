@@ -20,8 +20,26 @@ export function normalizeIdentifier(identifier: string, identifierType: string):
   } else {
     norm = identifier.normalize('NFC') // issuer-account: NFC only, case preserved
   }
+  if (hasLoneSurrogate(norm))
+    // JS TextEncoder would map a lone surrogate to U+FFFD, so distinct identifiers
+    // could derive the same commitment; fail closed for parity with Python
+    // (2026-07-13 review, finding 6).
+    throw new Error('normalized identifier must not contain lone surrogate code points')
   if (norm.includes('\x00')) throw new Error('normalized identifier must not contain 0x00')
   return norm
+}
+
+function hasLoneSurrogate(s: string): boolean {
+  for (let i = 0; i < s.length; i++) {
+    const cp = s.charCodeAt(i)
+    if (cp >= 0xd800 && cp <= 0xdbff) {
+      const lo = s.charCodeAt(i + 1)
+      if (lo >= 0xdc00 && lo <= 0xdfff) { i++; continue }
+      return true
+    }
+    if (cp >= 0xdc00 && cp <= 0xdfff) return true
+  }
+  return false
 }
 
 function concatBytes(...parts: Uint8Array[]): Uint8Array {

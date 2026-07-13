@@ -18,7 +18,7 @@ export const SCHEMA_TOP_LEVEL_KEYS: ReadonlySet<string> = new Set([
   'survivability',
 ])
 
-const RECEIPT_ID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/
+const RECEIPT_ID_RE = /^[0-7][0-9A-HJKMNP-TV-Z]{25}$/
 const ISSUED_AT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/
 const ISSUER_ID_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/
 const COMMITMENT_RE = /^[A-Za-z0-9_-]{43}$/
@@ -107,6 +107,9 @@ function validateWork(v: JsonValue | undefined, errors: string[]): void {
   }
   if ('artifact_series' in work) {
     check(errors, isNonEmptyString(work['artifact_series']), 'work.artifact_series: must be a non-empty string')
+  }
+  if ('edition' in work) {
+    check(errors, typeof work['edition'] === 'string', 'work.edition: must be a string')
   }
   if ('artifacts' in work) {
     const artifacts = work['artifacts']
