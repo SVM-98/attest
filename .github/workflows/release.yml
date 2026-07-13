@@ -83,6 +83,10 @@ jobs:
           ls dist/
       - uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
         # Trusted Publishing (OIDC) + PEP 740 attestations are on by default.
+        with:
+          # Idempotent: a re-run (e.g. after fixing the npm job) must not fail
+          # because 0.1.2 is already on PyPI from the first run.
+          skip-existing: true
 
   npm:
     needs: build
@@ -111,7 +115,10 @@ jobs:
           shopt -s nullglob
           tarballs=(dist-and-sboms/attest-verifier-*.tgz)
           test "${#tarballs[@]}" -eq 1 || { echo "expected exactly 1 gated tarball, found ${#tarballs[@]}: ${tarballs[*]}"; exit 1; }
-          npm publish "${tarballs[0]}" --provenance
+          # Prefix "./" so npm treats the arg as a local tarball file, not a
+          # package spec: a bare "dist-and-sboms/..." path is parsed as a git
+          # <owner>/<repo> shorthand and npm tries to `git ls-remote` it.
+          npm publish "./${tarballs[0]}" --provenance
 
   github-release:
     needs: [pypi, npm]
