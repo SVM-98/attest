@@ -81,11 +81,14 @@ jobs:
     environment: npm
     permissions:
       id-token: write
+      contents: read   # job-level permissions REPLACE top-level; checkout needs read
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # npm trusted publishing (OIDC) requires Node >= 22.14.0 AND npm >= 11.5.1
+          # (docs.npmjs.com/trusted-publishers); Node 20 fails even with npm upgraded.
+          node-version: 22
           registry-url: "https://registry.npmjs.org"
       - name: Upgrade npm to a Trusted-Publishing-capable version (>=11.5.1)
         run: |
