@@ -1,4 +1,4 @@
-// The 18-vector merge gate: this suite discovers every leaf under
+// The conformance merge gate (25 vectors / 43 leaves): this suite discovers every leaf under
 // `docs/spec/vectors/` and asserts the produced VerificationResult matches
 // its `expected.json`, using the exact same match rules as the Python
 // reference's `tests/test_vectors.py`. Passing this suite in full IS the
