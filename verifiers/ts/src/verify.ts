@@ -1,4 +1,4 @@
-import { JsonObject, JsonValue, canonicalBytes, CanonError, loadsStrict } from './canon.js'
+import { JsonObject, JsonValue, canonicalBytes, dumps, CanonError, loadsStrict } from './canon.js'
 import { TrustStore, findKey, withinValidity, chainContinuous } from './manifests.js'
 import { verifyStrict, Ed25519LengthError } from './ed25519.js'
 import { b64uDecode } from './b64u.js'
@@ -124,7 +124,14 @@ export function verify(
   if (typeof issuerId === 'string') {
     trust = trustStore.provenance[issuerId] === 'tls' ? 'verified' : 'unauthenticated_tofu'
     const chain = trustStore.chains?.[issuerId]
-    if (chain && chain.length > 0 && !chainContinuous(chain)) trust = 'unverified_rotation'
+    if (chain && chain.length > 0) {
+      // A chain that doesn't end at the manifest being used proves nothing about
+      // it — value-compare the tail via its canonical form (2026-07-13 review,
+      // finding 8).
+      const used = trustStore.manifests[issuerId]
+      const tailMatchesUsed = used != null && dumps(chain[chain.length - 1]!) === dumps(used)
+      if (!chainContinuous(chain) || !tailMatchesUsed) trust = 'unverified_rotation'
+    }
   }
 
   // Step 1 — envelope shape
