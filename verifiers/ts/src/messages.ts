@@ -52,3 +52,5 @@ export const revocationFailedVerify = (rid: unknown) => `revocation record for $
 export const outsideRefundWindow = (rid: unknown) => `revocation record for ${pyRepr(rid)} outside refund window, ignored`
 export const revocationViewOversize = (n: number, max: number) =>
   `revocation view exceeds ${max} records (${n} supplied), not evaluated`
+export const revocationViewOversizeRevocable = (n: number, max: number) =>
+  `revocation view exceeds ${max} records (${n} supplied), cannot certify a revocable receipt`
