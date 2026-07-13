@@ -28,6 +28,11 @@ def normalize(identifier: str, identifier_type: str) -> str:
         identifier = "".join(chr(ord(c) + 32) if "A" <= c <= "Z" else c for c in identifier)
     else:  # issuer-account: NFC only, exact string otherwise
         identifier = unicodedata.normalize("NFC", identifier)
+    if any(0xD800 <= ord(c) <= 0xDFFF for c in identifier):
+        # Reject lone surrogates explicitly: JS TextEncoder would silently map
+        # them to U+FFFD (distinct identifiers → same commitment), so both sides
+        # must fail closed for parity (2026-07-13 review, finding 6).
+        raise ValueError("normalized identifier must not contain lone surrogate code points")
     if "\x00" in identifier:
         raise ValueError("normalized identifier must not contain 0x00")
     return identifier

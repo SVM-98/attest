@@ -148,6 +148,9 @@ export function verify(
   if (entry == null) return invalid(noKeyInManifest(kid))
   const status = entry['status']
   if (status === 'compromised') return invalid(keyCompromised(kid))
+  // Fail closed on a missing/unknown status instead of validating like an active
+  // key (2026-07-13 review, finding 4).
+  if (status !== 'active' && status !== 'retired') return invalid(`key ${kid} has unusable status`)
   const issuedAt = payload['issued_at']
   if (typeof issuedAt !== 'string' || !withinValidity(issuedAt, entry)) return invalid(issuedAtOutsideWindow(issuedAt))
   if (status === 'retired') warnings.push(keyRetired(kid))

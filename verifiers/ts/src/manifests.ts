@@ -82,7 +82,13 @@ export function checkContinuity(trusted: JsonObject, candidate: JsonObject): boo
     const sigBlock = asObject(candidate['manifest_signature'])
     if (!sigBlock || typeof sigBlock['kid'] !== 'string') return false
     const signer = findKey(trusted, sigBlock['kid'])
-    return signer !== null && signer['status'] === 'active'
+    if (signer === null || signer['status'] !== 'active') return false
+    // Bind continuity to the key TRUSTED vouches for: verify the candidate's
+    // signature under trusted's pub for signer_kid, NOT the candidate's own
+    // (attacker-substitutable) entry (2026-07-13 review, finding 1).
+    const sig = sigBlock['sig'], pub = signer['pub']
+    if (typeof sig !== 'string' || typeof pub !== 'string') return false
+    return verifyStrict(signableManifestBytes(candidate), b64uDecode(sig), b64uDecode(pub))
   } catch { return false }
 }
 
