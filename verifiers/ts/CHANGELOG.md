@@ -4,6 +4,20 @@ All notable changes to `attest-verifier` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2] — 2026-07-13
+
+First npm release from the hardened OIDC pipeline (Trusted Publishing +
+provenance). Rolls up the 0.1.1 BOM-rejection fix (never published to npm) and
+the revocation-view bound.
+
+### Security / correctness
+
+- Bound the revocation view (`MAX_REVOCATION_RECORDS`, default 10,000, 5th
+  `verify` parameter); verify the issuer manifest once per classification;
+  fail closed on an oversized revocation view for revocable receipts.
+- (from 0.1.1, first time on npm) Reject a leading UTF-8 BOM in the strict
+  envelope parser, matching the Python reference.
+
 ## [0.1.1] — 2026-07-13
 
 ### Fixed
@@ -35,5 +49,6 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   logic, revocation classification, and buyer-binding checks. Verifier-only:
   it reads and validates receipts, never issues, signs, or mutates them.
 
+[0.1.2]: https://github.com/SVM-98/attest/releases/tag/v0.1.2
 [0.1.1]: https://github.com/SVM-98/attest/releases/tag/attest-verifier-v0.1.1
 [0.1.0]: https://github.com/SVM-98/attest/releases/tag/attest-verifier-v0.1.0
