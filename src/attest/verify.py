@@ -54,6 +54,14 @@ _REVOCATION_REVOKED = "revoked"
 _REVOCATION_INVALID_IGNORED = "invalid_revocation_ignored"
 _REVOCATION_NOT_REVOKED_PREFIX = "not_revoked_as_of:"
 
+# Preflight bound on the untrusted revocation view (review improvement #17):
+# a legitimate view for one verify() call is an issuer's records for one
+# receipt — realistically single digits; 10k is far above any legitimate
+# case and keeps hostile worst-case work bounded. Injectable per call via
+# `verify(..., max_revocation_records=...)`. Mirrored by the TS verifier's
+# MAX_REVOCATION_RECORDS.
+_MAX_REVOCATION_RECORDS = 10_000
+
 _REVOCABILITY_NONE = "none"
 _REVOCABILITY_REFUND_WINDOW = "refund_window"
 _REVOCABILITY_POLICY = "policy"
@@ -289,6 +297,7 @@ def _classify_revocation(
     revocation_view: list[dict[str, Any]] | None,
     issuer_manifest: dict[str, Any],
     warnings: list[str],
+    max_records: int = _MAX_REVOCATION_RECORDS,
 ) -> str:
     """§6 step 6 / §3.1: revocation-by-class.
 
@@ -313,8 +322,20 @@ def _classify_revocation(
     authenticated records in the view (any receipt_id), not the raw view —
     so unsigned junk can neither revoke nor inflate T. With no authenticated
     records at all, T has no trustworthy value and the result is `unknown`.
+
+    An oversized view (more than `max_records` entries) is not evaluated at
+    all: `"unknown"` plus an explicit warning — never a silent truncation
+    (evaluating a subset could misreport), never an exception (`verify()`'s
+    contract is to return a verdict). Whoever controls the view can already
+    lie by omission, so the cap adds no new suppression power.
     """
     if not revocation_view:  # None or empty: no data, no freshness anchor either way
+        return _REVOCATION_UNKNOWN
+    if len(revocation_view) > max_records:
+        warnings.append(
+            f"revocation view exceeds {max_records} records "
+            f"({len(revocation_view)} supplied), not evaluated"
+        )
         return _REVOCATION_UNKNOWN
 
     receipt_id = payload.get("receipt_id")
@@ -434,8 +455,10 @@ def verify(
     trust_store: TrustStore,
     revocation_view: list[dict[str, Any]] | None = None,
     disclosure: Disclosure | None = None,
+    max_revocation_records: int = _MAX_REVOCATION_RECORDS,
 ) -> VerificationResult:
-    """§6 steps 0-7."""
+    """§6 steps 0-7. `max_revocation_records` bounds the untrusted revocation
+    view: a larger view is not evaluated (revocation `"unknown"` + warning)."""
     # Caller-contract enforcement (security): a non-list `revocation_view`
     # must fail loud. If a lone record OBJECT slipped through here,
     # `_classify_revocation` would iterate its string keys, authenticate
@@ -589,7 +612,9 @@ def verify(
     # once signature (guaranteed above) AND schema are both valid — see
     # module docstring.
     if schema_result == _SCHEMA_VALID:
-        revocation_result = _classify_revocation(payload, revocation_view, manifest, warnings)
+        revocation_result = _classify_revocation(
+            payload, revocation_view, manifest, warnings, max_records=max_revocation_records
+        )
         binding_result = (
             _classify_binding(payload, disclosure)
             if disclosure is not None
