@@ -42,4 +42,8 @@ describe('loadsStrict', () => {
     const nested = '['.repeat(100) + ']'.repeat(100)
     expect(() => loadsStrict(enc(nested))).not.toThrow()
   })
+  it('rejects a UTF-8 BOM-prefixed envelope (parity with Python loads_strict)', () => {
+    const bom = new Uint8Array([0xef, 0xbb, 0xbf, ...enc('{"a":1}')])
+    expect(() => loadsStrict(bom)).toThrow()
+  })
 })
