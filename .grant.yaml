@@ -1,0 +1,21 @@
+# .grant.yaml — license policy for attest packages.
+# Deny-by-default: only the permissive SPDX ids below are allowed. Anything
+# outside (notably strong copyleft) fails the gate. Covers every license
+# observed live in both ecosystems' runtime dependency trees, with headroom.
+allow:
+  - Apache-2.0
+  - MIT
+  - MIT-0          # cffi
+  - BSD-2-Clause
+  - BSD-3-Clause
+  - ISC
+  - PSF-2.0        # typing-extensions
+require-license: true
+# A license gate evaluates third-party dependencies, not our own packages.
+# syft catalogs the workspace root package (attest-verifier / attest-receipts)
+# with no SPDX license (npm lockfiles carry no root license field), which would
+# otherwise trip require-license. Both are Apache-2.0 (declared in package.json
+# / pyproject.toml + the repo LICENSE); exclude them from the dependency gate.
+ignore-packages:
+  - attest-verifier
+  - attest-receipts

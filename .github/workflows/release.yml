@@ -1,0 +1,135 @@
+# .github/workflows/release.yml
+name: release
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Assert tag matches package versions
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PY="$(grep -m1 '^version = ' pyproject.toml | sed -E 's/.*"(.*)".*/\1/')"
+          NPM="$(grep -m1 '"version"' verifiers/ts/package.json | sed -E 's/.*"version": *"([^"]+)".*/\1/')"
+          echo "tag=$TAG py=$PY npm=$NPM"
+          test "$TAG" = "$PY" && test "$TAG" = "$NPM"
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.21"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: verifiers/ts/package-lock.json
+      - name: Install syft, grype, grant (pinned)
+        env:
+          SYFT_VERSION: v1.46.0
+          GRYPE_VERSION: v0.115.0
+          GRANT_VERSION: v0.6.8
+        run: |
+          curl -sSfL "https://raw.githubusercontent.com/anchore/syft/${SYFT_VERSION}/install.sh"  | sh -s -- -b "$HOME/.local/bin" "${SYFT_VERSION}"
+          curl -sSfL "https://raw.githubusercontent.com/anchore/grype/${GRYPE_VERSION}/install.sh" | sh -s -- -b "$HOME/.local/bin" "${GRYPE_VERSION}"
+          curl -sSfL "https://raw.githubusercontent.com/anchore/grant/${GRANT_VERSION}/install.sh" | sh -s -- -b "$HOME/.local/bin" "${GRANT_VERSION}"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - run: uv build
+      - name: Assert + scan Python
+        run: |
+          uv run --frozen python tools/assert_artifacts.py --wheel dist/*.whl --sdist dist/*.tar.gz
+          uv sync --locked
+          syft dir:.venv -o cyclonedx-json=sbom-python.cdx.json
+          grype sbom:sbom-python.cdx.json --fail-on high
+          grant check -c .grant.yaml sbom-python.cdx.json
+      - name: Assert + scan npm
+        run: |
+          npm ci --prefix verifiers/ts
+          npm run build --prefix verifiers/ts
+          (cd verifiers/ts && npm pack --json > /tmp/pack.json)
+          uv run --frozen python tools/assert_artifacts.py --npm-pack-json /tmp/pack.json
+          cp verifiers/ts/attest-verifier-*.tgz .
+          (cd verifiers/ts && npm ci --omit=dev)
+          syft dir:verifiers/ts -o cyclonedx-json=sbom-npm.cdx.json
+          grype sbom:sbom-npm.cdx.json --fail-on high
+          grant check -c .grant.yaml sbom-npm.cdx.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dist-and-sboms
+          path: |
+            dist/*
+            sbom-python.cdx.json
+            sbom-npm.cdx.json
+            attest-verifier-*.tgz
+
+  pypi:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: dist-and-sboms
+          path: .
+      - name: Move distributions into dist/
+        run: |
+          mkdir -p dist
+          mv attest_receipts-*.whl attest_receipts-*.tar.gz dist/ 2>/dev/null || true
+          ls dist/
+      - uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
+        # Trusted Publishing (OIDC) + PEP 740 attestations are on by default.
+
+  npm:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          # npm trusted publishing (OIDC) requires Node >= 22.14.0 AND npm >= 11.5.1
+          # (docs.npmjs.com/trusted-publishers); Node 20 fails even with npm upgraded.
+          node-version: 22.14.0
+          registry-url: "https://registry.npmjs.org"
+      - name: Upgrade npm to a Trusted-Publishing-capable version (>=11.5.1)
+        run: |
+          npm install -g npm@11.18.0
+          npm --version
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: dist-and-sboms
+          path: dist-and-sboms
+      - name: Publish with provenance (OIDC Trusted Publishing)
+        # Publish the exact tarball asserted + scanned in the build job, not a fresh pack.
+        run: |
+          shopt -s nullglob
+          tarballs=(dist-and-sboms/attest-verifier-*.tgz)
+          test "${#tarballs[@]}" -eq 1 || { echo "expected exactly 1 gated tarball, found ${#tarballs[@]}: ${tarballs[*]}"; exit 1; }
+          npm publish "${tarballs[0]}" --provenance
+
+  github-release:
+    needs: [pypi, npm]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: dist-and-sboms
+          path: artifacts
+      - name: Create GitHub Release with SBOMs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "attest ${GITHUB_REF_NAME}" \
+            --notes "attest-receipts and attest-verifier ${GITHUB_REF_NAME}. See CHANGELOG.md and verifiers/ts/CHANGELOG.md. CycloneDX SBOMs attached." \
+            artifacts/sbom-python.cdx.json \
+            artifacts/sbom-npm.cdx.json
