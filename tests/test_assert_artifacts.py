@@ -151,6 +151,36 @@ def test_wheel_schema_bak_lookalike_does_not_satisfy_requirement(tmp_path: Path)
         assert_wheel(_make_wheel(tmp_path, members))
 
 
+def test_npm_notdist_lookalike_does_not_satisfy_dist_requirement() -> None:
+    members = [f for f in NPM_OK if not f.startswith("dist/")] + ["notdist/index.js"]
+    with pytest.raises(ArtifactError, match="dist"):
+        assert_npm_tarball(_pack(members))
+
+
+def test_npm_changelog_lookalike_does_not_satisfy_changelog_requirement() -> None:
+    members = [f for f in NPM_OK if f != "CHANGELOG.md"] + ["myCHANGELOG.md"]
+    with pytest.raises(ArtifactError, match=r"CHANGELOG\.md"):
+        assert_npm_tarball(_pack(members))
+
+
+def test_sdist_pyproject_lookalike_does_not_satisfy_requirement(tmp_path: Path) -> None:
+    members = [m for m in SDIST_OK if not m.endswith("pyproject.toml")] + [
+        "attest_receipts-0.1.2/pyproject.toml.bak"
+    ]
+    with pytest.raises(ArtifactError, match=r"pyproject\.toml"):
+        assert_sdist(_make_sdist(tmp_path, members))
+
+
+def test_sdist_license_txt_lookalike_does_not_satisfy_license_requirement(
+    tmp_path: Path,
+) -> None:
+    members = [m for m in SDIST_OK if not m.endswith("LICENSE")] + [
+        "attest_receipts-0.1.2/LICENSE.txt"
+    ]
+    with pytest.raises(ArtifactError, match="LICENSE"):
+        assert_sdist(_make_sdist(tmp_path, members))
+
+
 def test_main_no_targets_returns_nonzero() -> None:
     assert main([]) != 0
 
