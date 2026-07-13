@@ -38,11 +38,15 @@ jobs:
           cache-dependency-path: verifiers/ts/package-lock.json
 
       # --- Install Anchore CLIs (pinned) ---
-      - name: Install syft, grype, grant
+      - name: Install syft, grype, grant (pinned)
+        env:
+          SYFT_VERSION: v1.46.0
+          GRYPE_VERSION: v0.115.0
+          GRANT_VERSION: v0.6.8
         run: |
-          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh  | sh -s -- -b "$HOME/.local/bin"
-          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b "$HOME/.local/bin"
-          curl -sSfL https://raw.githubusercontent.com/anchore/grant/main/install.sh | sh -s -- -b "$HOME/.local/bin" v0.6.8
+          curl -sSfL "https://raw.githubusercontent.com/anchore/syft/${SYFT_VERSION}/install.sh"  | sh -s -- -b "$HOME/.local/bin" "${SYFT_VERSION}"
+          curl -sSfL "https://raw.githubusercontent.com/anchore/grype/${GRYPE_VERSION}/install.sh" | sh -s -- -b "$HOME/.local/bin" "${GRYPE_VERSION}"
+          curl -sSfL "https://raw.githubusercontent.com/anchore/grant/${GRANT_VERSION}/install.sh" | sh -s -- -b "$HOME/.local/bin" "${GRANT_VERSION}"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       # --- Build + assert Python artifacts ---
