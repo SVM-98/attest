@@ -1424,6 +1424,77 @@ def gen_21_canon_strict() -> None:
     )
 
 
+_B64U_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+
+
+def gen_22_b64u_decoder_parity() -> None:
+    """Both languages deliberately accept non-strict base64url on the sig
+    field (padding, standard alphabet, dirty trailing bits) -- triaged
+    LOW/by-design-symmetric in the 2026-07-13 review. The parity risk is one
+    decoder tightening without the other; pin the shared behavior."""
+    payload = issue.build_payload(**_base_payload_kwargs())
+    _assert_schema_valid(payload)
+    envelope = issue.issue(payload, ISSUER_KP, ISSUER_KID)
+    trust = _issuer_only_trust()
+    sig_text: str = envelope["signatures"][0]["sig"]
+    sig_bytes = keys.b64u_decode(sig_text)
+    accepted = {
+        "signature": "valid",
+        "schema": "valid",
+        "revocation": "unknown",
+        "binding": "not_checked",
+        "trust": "verified",
+        "ok": True,
+        "errors": [],
+        "warnings": [],
+    }
+
+    # (a) explicit padding
+    padded = copy.deepcopy(envelope)
+    padded["signatures"][0]["sig"] = sig_text + "=" * (-len(sig_text) % 4)
+    assert padded["signatures"][0]["sig"].endswith("==")  # 86 chars -> two pad chars
+    assert keys.b64u_decode(padded["signatures"][0]["sig"]) == sig_bytes
+    write_vector(
+        "22-b64u-decoder-parity/a-padding-accepted",
+        payload=payload,
+        envelope=padded,
+        envelope_raw=None,
+        trust=trust,
+        expected=dict(accepted),
+    )
+
+    # (b) standard +/ alphabet
+    assert "-" in sig_text or "_" in sig_text, "fixed sig must exercise the urlsafe alphabet"
+    std = copy.deepcopy(envelope)
+    std["signatures"][0]["sig"] = sig_text.replace("-", "+").replace("_", "/")
+    assert std["signatures"][0]["sig"] != sig_text
+    assert keys.b64u_decode(std["signatures"][0]["sig"]) == sig_bytes
+    write_vector(
+        "22-b64u-decoder-parity/b-standard-alphabet-accepted",
+        payload=None,
+        envelope=std,
+        envelope_raw=None,
+        trust=trust,
+        expected=dict(accepted),
+    )
+
+    # (c) non-zero discarded trailing bits in the final char (4 bits unused)
+    last_idx = _B64U_ALPHABET.index(sig_text[-1])
+    dirty_char = _B64U_ALPHABET[last_idx ^ 0x0F]
+    dirty = copy.deepcopy(envelope)
+    dirty["signatures"][0]["sig"] = sig_text[:-1] + dirty_char
+    assert dirty["signatures"][0]["sig"] != sig_text
+    assert keys.b64u_decode(dirty["signatures"][0]["sig"]) == sig_bytes
+    write_vector(
+        "22-b64u-decoder-parity/c-trailing-bits-accepted",
+        payload=None,
+        envelope=dirty,
+        envelope_raw=None,
+        trust=trust,
+        expected=dict(accepted),
+    )
+
+
 def main() -> None:
     _clear_leaf_dirs(VECTORS_DIR)
     VECTORS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1449,6 +1520,7 @@ def main() -> None:
     gen_19_rotation_substituted_key()
     gen_20_sig_canonicity()
     gen_21_canon_strict()
+    gen_22_b64u_decoder_parity()
     leaf_count = sum(1 for _ in VECTORS_DIR.rglob("expected.json"))
     print(f"generated {leaf_count} vector cases under {VECTORS_DIR}")
 
