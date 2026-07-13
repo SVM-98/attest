@@ -322,13 +322,20 @@ def _classify_revocation(
     revocability = license_block.get("revocability") if isinstance(license_block, dict) else None
 
     # Authenticated records (any receipt_id) drive the freshness anchor; only
-    # signature-verified records may set T (§5 hardening).
+    # signature-verified records may set T (§5 hardening). The manifest's own
+    # self-verify is hoisted out of the loop — one `verify_key_manifest` per
+    # classification, not per record, so a hostile many-record feed cannot
+    # multiply manifest-verification work (review improvement #17).
+    manifest_ok = manifests.verify_key_manifest(issuer_manifest)
     authenticated_ids: set[int] = set()
     authenticated: list[dict[str, Any]] = []
-    for record in revocation_view:
-        if isinstance(record, dict) and revocation.verify_record(record, issuer_manifest):
-            authenticated.append(record)
-            authenticated_ids.add(id(record))
+    if manifest_ok:
+        for record in revocation_view:
+            if isinstance(record, dict) and revocation.verify_record_signature(
+                record, issuer_manifest
+            ):
+                authenticated.append(record)
+                authenticated_ids.add(id(record))
     not_revoked = _not_revoked_or_unknown(authenticated)
 
     # Effective revocations for THIS receipt: matching receipt_id, authenticated,
