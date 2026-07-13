@@ -1495,6 +1495,81 @@ def gen_22_b64u_decoder_parity() -> None:
     )
 
 
+# --- vector 23: revocation-refund-window ------------------------------------
+
+
+def gen_23_revocation_refund_window() -> None:
+    """A `revocability: "refund_window"` receipt with `revocation_window_days
+    = REFUND_WINDOW_DAYS` (14): per verify.py:359-367 a revocation record is
+    effective iff `revoked_at <= issued_at + revocation_window_days`, i.e.
+    ISSUED_AT 2025-07-02 -> window end 2025-07-16. (a) REVOKED_INSIDE_WINDOW_AT
+    (2025-07-10) is inside the window -> effective, `revocation: "revoked"`,
+    `ok: False`. (b) REVOKED_AT (2025-08-01) is outside -> the record is
+    ignored, `revocation: "invalid_revocation_ignored"`, a warning is
+    emitted, and `ok` is UNAFFECTED (`True`). Both records are otherwise
+    authenticated and well-formed (`verify_record` asserted True at
+    generation time) so the boundary is exercised purely on the refund-window
+    comparison, mirroring the `revoked_policy` / `revocation_against_none`
+    generation-time discipline (vectors 15/16)."""
+    payload = issue.build_payload(
+        **_base_payload_kwargs(
+            revocability="refund_window", revocation_window_days=REFUND_WINDOW_DAYS
+        )
+    )
+    _assert_schema_valid(payload)
+    envelope = issue.issue(payload, ISSUER_KP, ISSUER_KID)
+    issuer_manifest = _manifest_material(ISSUER_ID, ISSUER_KID, ISSUER_KP)
+    trust = _trust_material((ISSUER_ID, issuer_manifest, "tls"))
+
+    record_inside = revocation.build_record(
+        RECEIPT_ID, "revoked", REVOKED_INSIDE_WINDOW_AT, ISSUER_KP, ISSUER_KID
+    )
+    assert revocation.verify_record(record_inside, issuer_manifest) is True
+    expected_a = {
+        "signature": "valid",
+        "schema": "valid",
+        "revocation": "revoked",
+        "binding": "not_checked",
+        "trust": "verified",
+        "ok": False,
+        "errors": [],
+        "warnings": [],
+    }
+    write_vector(
+        "23-revocation-refund-window/a-inside-window",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected_a,
+        revocation_record=record_inside,
+    )
+
+    record_after = revocation.build_record(RECEIPT_ID, "revoked", REVOKED_AT, ISSUER_KP, ISSUER_KID)
+    assert (
+        revocation.verify_record(record_after, issuer_manifest) is True
+    )  # authenticated, but ignored
+    expected_b = {
+        "signature": "valid",
+        "schema": "valid",
+        "revocation": "invalid_revocation_ignored",
+        "binding": "not_checked",
+        "trust": "verified",
+        "ok": True,
+        "errors": [],
+        "warnings_contains": ["outside refund window"],
+    }
+    write_vector(
+        "23-revocation-refund-window/b-after-window",
+        payload=None,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected_b,
+        revocation_record=record_after,
+    )
+
+
 def main() -> None:
     _clear_leaf_dirs(VECTORS_DIR)
     VECTORS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1521,6 +1596,7 @@ def main() -> None:
     gen_20_sig_canonicity()
     gen_21_canon_strict()
     gen_22_b64u_decoder_parity()
+    gen_23_revocation_refund_window()
     leaf_count = sum(1 for _ in VECTORS_DIR.rglob("expected.json"))
     print(f"generated {leaf_count} vector cases under {VECTORS_DIR}")
 
