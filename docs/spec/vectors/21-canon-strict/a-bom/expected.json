@@ -1,0 +1,9 @@
+{
+  "binding": "not_checked",
+  "ok": false,
+  "revocation": "unknown",
+  "schema": "not_checked",
+  "signature": "invalid",
+  "trust": "unauthenticated_tofu",
+  "warnings": []
+}

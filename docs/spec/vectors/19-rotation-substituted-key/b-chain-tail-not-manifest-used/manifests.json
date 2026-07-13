@@ -1,0 +1,72 @@
+{
+  "chains": {
+    "store.example.com": [
+      {
+        "issued_at": "2025-01-01T00:00:00Z",
+        "issuer": "store.example.com",
+        "keys": [
+          {
+            "kid": "store.example.com/keys/2025-01#ed25519-1",
+            "pub": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
+            "status": "active",
+            "valid_from": "2025-01-01T00:00:00Z",
+            "valid_to": null
+          }
+        ],
+        "manifest_signature": {
+          "kid": "store.example.com/keys/2025-01#ed25519-1",
+          "sig": "VZfebZVkctMN8kvVxm557T7co5Z-1VPlVpvkrzbulHQAMeIbDrx6sTn9NcLzYyBARpdAS8Ke6WpikTbqKIdKBw"
+        },
+        "manifest_version": 1
+      },
+      {
+        "issued_at": "2025-04-01T00:00:00Z",
+        "issuer": "store.example.com",
+        "keys": [
+          {
+            "kid": "store.example.com/keys/2025-01#ed25519-1",
+            "pub": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
+            "status": "retired",
+            "valid_from": "2025-01-01T00:00:00Z",
+            "valid_to": "2025-04-01T00:00:00Z"
+          },
+          {
+            "kid": "store.example.com/keys/2025-04#ed25519-2",
+            "pub": "ypOsFwUYcHHWe4PH_w7-gQjo7EUwV113JoeTM9vavnw",
+            "status": "active",
+            "valid_from": "2025-04-01T00:00:00Z",
+            "valid_to": null
+          }
+        ],
+        "manifest_signature": {
+          "kid": "store.example.com/keys/2025-01#ed25519-1",
+          "sig": "irhtdbQcCMs4qT3zKL2hoPQxpqrcs1vxaqUJlE7CWYTg9VE1E28DkjxfRnSlDCBsHl8MI_SH5cGiqG_lgqLjDA"
+        },
+        "manifest_version": 2
+      }
+    ]
+  },
+  "manifests": {
+    "store.example.com": {
+      "issued_at": "2025-01-01T00:00:00Z",
+      "issuer": "store.example.com",
+      "keys": [
+        {
+          "kid": "store.example.com/keys/2025-01#ed25519-1",
+          "pub": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
+          "status": "active",
+          "valid_from": "2025-01-01T00:00:00Z",
+          "valid_to": null
+        }
+      ],
+      "manifest_signature": {
+        "kid": "store.example.com/keys/2025-01#ed25519-1",
+        "sig": "VZfebZVkctMN8kvVxm557T7co5Z-1VPlVpvkrzbulHQAMeIbDrx6sTn9NcLzYyBARpdAS8Ke6WpikTbqKIdKBw"
+      },
+      "manifest_version": 1
+    }
+  },
+  "provenance": {
+    "store.example.com": "tls"
+  }
+}

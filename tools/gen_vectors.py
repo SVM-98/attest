@@ -136,6 +136,28 @@ REVOKED_AT = "2025-08-01T00:00:00Z"
 CHALLENGE_NONCE = bytes(range(32, 48))
 
 
+# --- 2026-07-13 regression-corpus constants (vectors 19-25) -------------------
+
+SUBSTITUTED_KEY_SEED = (
+    bytes([6]) * 32
+)  # vector 19a: key the attacker swaps into the candidate manifest
+SUBSTITUTED_KP = keys.from_seed(SUBSTITUTED_KEY_SEED)
+
+SMALL_ORDER_POINT = bytes([1]) + bytes(31)  # canonical encoding of the identity element (order 1)
+SMALL_ORDER_KID = (
+    f"{ISSUER_ID}/keys/2025-01#ed25519-5"  # vector 20b: listed key whose pub is small-order
+)
+
+REFUND_WINDOW_DAYS = 14  # vector 23: ISSUED_AT 2025-07-02 -> window end 2025-07-16
+REVOKED_INSIDE_WINDOW_AT = (
+    "2025-07-10T00:00:00Z"  # vector 23a: inside the window (REVOKED_AT 2025-08-01 is outside)
+)
+
+SUPPLEMENTARY_TITLE = (
+    "Music \U0001d11e Theme"  # vector 21f/g: U+1D11E, needs a surrogate pair when escaped
+)
+
+
 # --- generic helpers --------------------------------------------------------
 
 
@@ -147,6 +169,44 @@ def _write_json(path: Path, obj: object) -> None:
 def _write_bytes(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
+
+
+def _clear_leaf_dirs(root: Path) -> None:
+    """Remove only the leaf *directories* under `root`, preserving files —
+    regeneration must not delete the hand-authored README.md (pre-2026-07-13
+    the whole tree was rmtree'd and the README lost on every regen)."""
+    if not root.exists():
+        return
+    for child in root.iterdir():
+        if child.is_dir():
+            shutil.rmtree(child)
+
+
+def _text_max_depth(text: str) -> int:
+    """Max bracket nesting depth of a JSON text, ignoring brackets inside
+    strings — the measuring twin of `canon._check_depth`'s walk, used to
+    assert the depth-boundary vectors (21b/c/d) sit exactly on 255/256/257."""
+    depth = 0
+    max_depth = 0
+    in_string = False
+    escaped = False
+    for ch in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch in "[{":
+            depth += 1
+            max_depth = max(max_depth, depth)
+        elif ch in "]}":
+            depth -= 1
+    return max_depth
 
 
 def _manifest_material(
@@ -178,9 +238,7 @@ def _trust_material(
 
 def _issuer_only_trust() -> dict[str, Any]:
     """The common case: a single trusted issuer manifest, TLS provenance."""
-    return _trust_material(
-        (ISSUER_ID, _manifest_material(ISSUER_ID, ISSUER_KID, ISSUER_KP), "tls")
-    )
+    return _trust_material((ISSUER_ID, _manifest_material(ISSUER_ID, ISSUER_KID, ISSUER_KP), "tls"))
 
 
 def _base_payload_kwargs(**overrides: Any) -> dict[str, Any]:
@@ -209,11 +267,19 @@ def _assert_schema_valid(payload: dict[str, Any]) -> None:
         raise AssertionError(f"generator built a schema-invalid payload: {violations}")
 
 
-def write_vector(name: str, *, payload: dict[str, Any] | None, envelope: dict[str, Any] | None,
-                  envelope_raw: bytes | None, trust: dict[str, Any], expected: dict[str, Any],
-                  disclosure: dict[str, Any] | None = None,
-                  manifest_pristine: dict[str, Any] | None = None,
-                  revocation_record: dict[str, Any] | None = None) -> None:
+def write_vector(
+    name: str,
+    *,
+    payload: dict[str, Any] | None,
+    envelope: dict[str, Any] | None,
+    envelope_raw: bytes | None,
+    trust: dict[str, Any],
+    expected: dict[str, Any],
+    disclosure: dict[str, Any] | None = None,
+    manifest_pristine: dict[str, Any] | None = None,
+    revocation_record: dict[str, Any] | None = None,
+    canonical: bytes | None = None,
+) -> None:
     vector_dir = VECTORS_DIR / name
     if payload is not None:
         _write_json(vector_dir / "payload.json", payload)
@@ -229,6 +295,8 @@ def write_vector(name: str, *, payload: dict[str, Any] | None, envelope: dict[st
         _write_json(vector_dir / "manifest_pristine.json", manifest_pristine)
     if revocation_record is not None:
         _write_json(vector_dir / "revocation.json", revocation_record)
+    if canonical is not None:
+        _write_bytes(vector_dir / "canonical.json", canonical)
 
 
 # --- vector 01: valid-minimal ------------------------------------------------
@@ -249,8 +317,14 @@ def gen_01_valid_minimal() -> None:
         "errors": [],
         "warnings": [],
     }
-    write_vector("01-valid-minimal", payload=payload, envelope=envelope, envelope_raw=None,
-                 trust=trust, expected=expected)
+    write_vector(
+        "01-valid-minimal",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected,
+    )
 
 
 # --- vector 02: valid-full ----------------------------------------------------
@@ -298,8 +372,14 @@ def gen_02_valid_full() -> None:
         "errors": [],
         "warnings_contains": ["drm-bound"],
     }
-    write_vector("02-valid-full", payload=payload, envelope=envelope, envelope_raw=None,
-                 trust=trust, expected=expected)
+    write_vector(
+        "02-valid-full",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected,
+    )
 
 
 # --- vector 03: tampered-payload ----------------------------------------------
@@ -324,8 +404,14 @@ def gen_03_tampered_payload() -> None:
         "errors_contains": ["signature verification failed"],
         "warnings": [],
     }
-    write_vector("03-tampered-payload", payload=payload, envelope=tampered, envelope_raw=None,
-                 trust=trust, expected=expected)
+    write_vector(
+        "03-tampered-payload",
+        payload=payload,
+        envelope=tampered,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected,
+    )
 
 
 # --- vector 04: wrong-key -----------------------------------------------------
@@ -348,8 +434,14 @@ def gen_04_wrong_key() -> None:
         "errors_contains": ["no key", "in issuer manifest"],
         "warnings": [],
     }
-    write_vector("04-wrong-key", payload=payload, envelope=envelope, envelope_raw=None,
-                 trust=trust, expected=expected)
+    write_vector(
+        "04-wrong-key",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected,
+    )
 
 
 # --- vector 05: issuer-mismatch -----------------------------------------------
@@ -382,8 +474,14 @@ def gen_05_issuer_mismatch() -> None:
         "errors_contains": ["issuer_mismatch"],
         "warnings": [],
     }
-    write_vector("05-issuer-mismatch", payload=payload, envelope=envelope, envelope_raw=None,
-                 trust=trust, expected=expected)
+    write_vector(
+        "05-issuer-mismatch",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected,
+    )
 
 
 # --- vector 06: duplicate-key-reject ------------------------------------------
@@ -414,8 +512,14 @@ def gen_06_duplicate_key_reject() -> None:
         "errors_contains": ["duplicate object key"],
         "warnings": [],
     }
-    write_vector("06-duplicate-key-reject", payload=payload, envelope=None,
-                 envelope_raw=duplicated.encode("utf-8"), trust=trust, expected=expected)
+    write_vector(
+        "06-duplicate-key-reject",
+        payload=payload,
+        envelope=None,
+        envelope_raw=duplicated.encode("utf-8"),
+        trust=trust,
+        expected=expected,
+    )
 
 
 # --- vector 07: unicode-canon (two sub-cases) ---------------------------------
@@ -458,8 +562,14 @@ def gen_07_unicode_canon() -> None:
         "errors": [],
         "warnings": [],
     }
-    write_vector("07-unicode-canon/a-nfd-and-int-boundary-accepted", payload=payload,
-                 envelope=envelope, envelope_raw=None, trust=trust, expected=expected_a)
+    write_vector(
+        "07-unicode-canon/a-nfd-and-int-boundary-accepted",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected_a,
+    )
 
     # Sub-case b: bump the same field one past the I-JSON safe boundary. This
     # payload can never be produced by issue() (canon.canonical_bytes() -
@@ -484,8 +594,14 @@ def gen_07_unicode_canon() -> None:
         "errors_contains": ["integer out of I-JSON safe range"],
         "warnings": [],
     }
-    write_vector("07-unicode-canon/b-int-boundary-rejected", payload=None,
-                 envelope=rejected_envelope, envelope_raw=None, trust=trust, expected=expected_b)
+    write_vector(
+        "07-unicode-canon/b-int-boundary-rejected",
+        payload=None,
+        envelope=rejected_envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected_b,
+    )
 
 
 # --- vector 08: sig-malleability ----------------------------------------------
@@ -519,8 +635,14 @@ def gen_08_sig_malleability() -> None:
         "errors_contains": ["signature verification failed"],
         "warnings": [],
     }
-    write_vector("08-sig-malleability", payload=payload, envelope=malleated, envelope_raw=None,
-                 trust=trust, expected=expected)
+    write_vector(
+        "08-sig-malleability",
+        payload=payload,
+        envelope=malleated,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected,
+    )
 
 
 # --- vector 09: commitment (three sub-cases) ----------------------------------
@@ -552,8 +674,15 @@ def _commitment_subvector(subname: str, identifier: str, identifier_type: str) -
         "commitment_b64u": commitment_b64u,
         "normalized_identifier": commitment.normalize(identifier, identifier_type),
     }
-    write_vector(f"09-commitment/{subname}", payload=payload, envelope=envelope,
-                 envelope_raw=None, trust=trust, expected=expected, disclosure=disclosure)
+    write_vector(
+        f"09-commitment/{subname}",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected,
+        disclosure=disclosure,
+    )
 
 
 def gen_09_commitment() -> None:
@@ -584,8 +713,14 @@ def gen_10_unknown_field() -> None:
         "errors": [],
         "warnings_contains": ["unknown payload field", "promo_code"],
     }
-    write_vector("10-unknown-field", payload=payload, envelope=envelope, envelope_raw=None,
-                 trust=trust, expected=expected)
+    write_vector(
+        "10-unknown-field",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected,
+    )
 
 
 # --- vector 11: manifest-tamper -----------------------------------------------
@@ -628,8 +763,15 @@ def gen_11_manifest_tamper() -> None:
             "manifest_pristine.json is the untampered, self-consistent original."
         ),
     }
-    write_vector("11-manifest-tamper", payload=payload, envelope=envelope, envelope_raw=None,
-                 trust=trust, expected=expected, manifest_pristine=pristine_manifest)
+    write_vector(
+        "11-manifest-tamper",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected,
+        manifest_pristine=pristine_manifest,
+    )
 
 
 # --- vector 12: retired-key-ok ------------------------------------------------
@@ -658,8 +800,14 @@ def gen_12_retired_key_ok() -> None:
         "errors": [],
         "warnings_contains": ["retired"],
     }
-    write_vector("12-retired-key-ok", payload=payload, envelope=envelope, envelope_raw=None,
-                 trust=trust, expected=expected)
+    write_vector(
+        "12-retired-key-ok",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected,
+    )
 
 
 # --- vector 13: compromised-key -------------------------------------------------
@@ -692,11 +840,34 @@ def gen_13_compromised_key() -> None:
         "errors_contains": ["compromised"],
         "warnings": [],
     }
-    write_vector("13-compromised-key", payload=payload, envelope=envelope, envelope_raw=None,
-                 trust=trust, expected=expected)
+    write_vector(
+        "13-compromised-key",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected,
+    )
 
 
 # --- vector 14 / 14b: rotation continuity / discontinuity -----------------------
+
+
+def _genuine_rotation_pair() -> tuple[dict[str, Any], dict[str, Any]]:
+    """A legitimate v1 -> v2 rotation: v2 retires the old key, introduces
+    ROTATED_KID, and is signed by ISSUER_KID (active in v1) -> continuity holds."""
+    v1 = _manifest_material(ISSUER_ID, ISSUER_KID, ISSUER_KP)
+    v2_entries = [
+        manifests.key_entry(
+            ISSUER_KID, ISSUER_KP.pub, KEY_VALID_FROM, ROTATION_ISSUED_AT, "retired"
+        ),
+        manifests.key_entry(ROTATED_KID, ROTATED_KP.pub, ROTATION_ISSUED_AT, None, "active"),
+    ]
+    v2 = manifests.build_key_manifest(
+        ISSUER_ID, 2, ROTATION_ISSUED_AT, v2_entries, ISSUER_KP, ISSUER_KID
+    )
+    assert manifests.check_continuity(v1, v2) is True
+    return v1, v2
 
 
 def gen_14_rotation_continuity() -> None:
@@ -709,17 +880,7 @@ def gen_14_rotation_continuity() -> None:
     value (`verified`, since provenance is `tls`) rather than being forced
     to `unverified_rotation`. The receipt itself is issued by the NEW key,
     proving verification correctly resolves against the CURRENT (v2) manifest."""
-    v1 = _manifest_material(ISSUER_ID, ISSUER_KID, ISSUER_KP)  # version 1, sole active key
-    entries_v2 = [
-        manifests.key_entry(
-            ISSUER_KID, ISSUER_KP.pub, KEY_VALID_FROM, ROTATION_ISSUED_AT, "retired"
-        ),
-        manifests.key_entry(ROTATED_KID, ROTATED_KP.pub, ROTATION_ISSUED_AT, None, "active"),
-    ]
-    v2 = manifests.build_key_manifest(
-        ISSUER_ID, 2, ROTATION_ISSUED_AT, entries_v2, ISSUER_KP, ISSUER_KID
-    )
-    assert manifests.check_continuity(v1, v2) is True
+    v1, v2 = _genuine_rotation_pair()
 
     payload = issue.build_payload(**_base_payload_kwargs(issued_at=RECEIPT_ISSUED_AFTER_ROTATION))
     _assert_schema_valid(payload)
@@ -736,8 +897,14 @@ def gen_14_rotation_continuity() -> None:
         "errors": [],
         "warnings": [],
     }
-    write_vector("14-rotation-continuity", payload=payload, envelope=envelope, envelope_raw=None,
-                 trust=trust, expected=expected)
+    write_vector(
+        "14-rotation-continuity",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected,
+    )
 
 
 def gen_14b_rotation_discontinuous() -> None:
@@ -780,8 +947,14 @@ def gen_14b_rotation_discontinuous() -> None:
         "errors": [],
         "warnings": [],
     }
-    write_vector("14b-rotation-discontinuous", payload=payload, envelope=envelope,
-                 envelope_raw=None, trust=trust, expected=expected)
+    write_vector(
+        "14b-rotation-discontinuous",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected,
+    )
 
 
 # --- vector 15: revoked-policy ---------------------------------------------------
@@ -814,8 +987,15 @@ def gen_15_revoked_policy() -> None:
         "errors": [],
         "warnings": [],
     }
-    write_vector("15-revoked-policy", payload=payload, envelope=envelope, envelope_raw=None,
-                 trust=trust, expected=expected, revocation_record=record)
+    write_vector(
+        "15-revoked-policy",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected,
+        revocation_record=record,
+    )
 
 
 # --- vector 16: revocation-against-none-ignored ----------------------------------
@@ -846,8 +1026,15 @@ def gen_16_revocation_against_none_ignored() -> None:
         "errors": [],
         "warnings_contains": ["revocability is 'none'"],
     }
-    write_vector("16-revocation-against-none-ignored", payload=payload, envelope=envelope,
-                 envelope_raw=None, trust=trust, expected=expected, revocation_record=record)
+    write_vector(
+        "16-revocation-against-none-ignored",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected,
+        revocation_record=record,
+    )
 
 
 # --- vector 17: binding-proven (two sub-cases) -----------------------------------
@@ -887,8 +1074,15 @@ def gen_17_binding_proven() -> None:
         "errors": [],
         "warnings": [],
     }
-    write_vector("17-binding-proven/a-salt-disclosure", payload=payload_a, envelope=envelope_a,
-                 envelope_raw=None, trust=trust, expected=expected_a, disclosure=disclosure_a)
+    write_vector(
+        "17-binding-proven/a-salt-disclosure",
+        payload=payload_a,
+        envelope=envelope_a,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected_a,
+        disclosure=disclosure_a,
+    )
 
     # (b) pubkey challenge-response transcript
     payload_b = issue.build_payload(**_base_payload_kwargs(buyer_pubkey=BUYER_KP.pub))
@@ -911,8 +1105,15 @@ def gen_17_binding_proven() -> None:
         "errors": [],
         "warnings": [],
     }
-    write_vector("17-binding-proven/b-pubkey-challenge", payload=payload_b, envelope=envelope_b,
-                 envelope_raw=None, trust=trust, expected=expected_b, disclosure=disclosure_b)
+    write_vector(
+        "17-binding-proven/b-pubkey-challenge",
+        payload=payload_b,
+        envelope=envelope_b,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected_b,
+        disclosure=disclosure_b,
+    )
 
 
 # --- vector 18: drm-bound ---------------------------------------------------------
@@ -940,12 +1141,544 @@ def gen_18_drm_bound() -> None:
         "errors": [],
         "warnings_contains": ["drm-bound"],
     }
-    write_vector("18-drm-bound", payload=payload, envelope=envelope, envelope_raw=None,
-                 trust=trust, expected=expected)
+    write_vector(
+        "18-drm-bound",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected,
+    )
+
+
+# --- vector 19: rotation-substituted-key (2 sub-cases) ---------------------------
+
+
+def gen_19_rotation_substituted_key() -> None:
+    """Regression pair for the 2026-07-13 must-fix #1 (key substitution in
+    check_continuity) and the PR #4 chain-tail binding fix.
+
+    (a) The candidate v2 re-declares ISSUER_KID but with SUBSTITUTED_KP's
+    public key, and is signed by SUBSTITUTED_KP under that kid. The manifest
+    is SELF-consistent (its own declared pub verifies its own signature) —
+    exactly the attack the pre-fix code fell for by validating the candidate
+    signature against the candidate's self-declared pub. The fixed
+    check_continuity resolves the signer pub from the TRUSTED manifest, where
+    ISSUER_KID maps to the real key -> signature mismatch -> discontinuous ->
+    trust: "unverified_rotation" (a trust downgrade, not a rejection: ok stays
+    True per §11.1, same reasoning as vector 14b).
+
+    (b) The chain [v1, v2] is genuinely continuous, but the manifest under
+    `manifests` (the one used to resolve the receipt's kid) is v1, NOT the
+    chain tail v2. Post-PR#4, a chain only vouches for the manifest it ends
+    with -> unverified_rotation."""
+    # (a) substituted candidate key
+    v1 = _manifest_material(ISSUER_ID, ISSUER_KID, ISSUER_KP)
+    evil_entries = [
+        manifests.key_entry(ISSUER_KID, SUBSTITUTED_KP.pub, KEY_VALID_FROM, None, "active"),
+        manifests.key_entry(ROTATED_KID, ROTATED_KP.pub, ROTATION_ISSUED_AT, None, "active"),
+    ]
+    v2_evil = manifests.build_key_manifest(
+        ISSUER_ID, 2, ROTATION_ISSUED_AT, evil_entries, SUBSTITUTED_KP, ISSUER_KID
+    )
+    assert manifests.verify_key_manifest(v2_evil) is True  # self-consistent: that's the point
+    assert manifests.check_continuity(v1, v2_evil) is False  # but the trusted root unmasks it
+
+    payload = issue.build_payload(**_base_payload_kwargs(issued_at=RECEIPT_ISSUED_AFTER_ROTATION))
+    _assert_schema_valid(payload)
+    envelope = issue.issue(payload, ROTATED_KP, ROTATED_KID)
+    trust_a = _trust_material((ISSUER_ID, v2_evil, "tls"), chains={ISSUER_ID: [v1, v2_evil]})
+    expected_downgrade = {
+        "signature": "valid",
+        "schema": "valid",
+        "revocation": "unknown",
+        "binding": "not_checked",
+        "trust": "unverified_rotation",
+        "ok": True,
+        "errors": [],
+        "warnings": [],
+    }
+    write_vector(
+        "19-rotation-substituted-key/a-substituted-candidate-key",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust_a,
+        expected=expected_downgrade,
+    )
+
+    # (b) valid chain whose tail is not the manifest in use
+    v1b, v2b = _genuine_rotation_pair()
+    payload_b = issue.build_payload(**_base_payload_kwargs())
+    _assert_schema_valid(payload_b)
+    envelope_b = issue.issue(
+        payload_b, ISSUER_KP, ISSUER_KID
+    )  # resolvable in v1 (the manifest used)
+    trust_b = _trust_material((ISSUER_ID, v1b, "tls"), chains={ISSUER_ID: [v1b, v2b]})
+    write_vector(
+        "19-rotation-substituted-key/b-chain-tail-not-manifest-used",
+        payload=payload_b,
+        envelope=envelope_b,
+        envelope_raw=None,
+        trust=trust_b,
+        expected=expected_downgrade,
+    )
+
+
+# --- vector 20: sig-canonicity (three sub-cases) ------------------------------
+
+
+def gen_20_sig_canonicity() -> None:
+    """Ed25519 pinned-ruleset edges (design §4): S must satisfy S < L
+    (vector 08 already pins S+L; sub-case a pins the exact boundary S == L),
+    and small-order A (signer pubkey) / small-order R (signature prefix) must
+    be rejected — libsodium rejects both natively, @noble does with
+    zip215:false (verifiers/ts/src/ed25519.ts). The identity element is used
+    as the canonical small-order point."""
+    payload = issue.build_payload(**_base_payload_kwargs())
+    _assert_schema_valid(payload)
+    envelope = issue.issue(payload, ISSUER_KP, ISSUER_KID)
+    trust = _issuer_only_trust()
+    original_sig = keys.b64u_decode(envelope["signatures"][0]["sig"])
+    r_bytes, s_bytes = original_sig[:32], original_sig[32:]
+
+    rejected = {
+        "signature": "invalid",
+        "schema": "not_checked",
+        "revocation": "unknown",
+        "binding": "not_checked",
+        "trust": "verified",
+        "ok": False,
+        "errors_contains": ["signature verification failed"],
+        "warnings": [],
+    }
+
+    # (a) S == L exactly: the smallest non-canonical scalar.
+    s_equals_l = copy.deepcopy(envelope)
+    s_equals_l["signatures"][0]["sig"] = keys.b64u(r_bytes + keys.L.to_bytes(32, "little"))
+    write_vector(
+        "20-sig-canonicity/a-s-equals-l",
+        payload=payload,
+        envelope=s_equals_l,
+        envelope_raw=None,
+        trust=trust,
+        expected=rejected,
+    )
+
+    # (b) signer pubkey is small-order: manifest lists SMALL_ORDER_KID with the
+    # identity point as pub (manifest itself is signed by ISSUER_KID, so its
+    # self-verify holds); the envelope claims SMALL_ORDER_KID.
+    so_entries = [
+        manifests.key_entry(ISSUER_KID, ISSUER_KP.pub, KEY_VALID_FROM, None, "active"),
+        manifests.key_entry(SMALL_ORDER_KID, SMALL_ORDER_POINT, KEY_VALID_FROM, None, "active"),
+    ]
+    so_manifest = manifests.build_key_manifest(
+        ISSUER_ID, 1, MANIFEST_ISSUED_AT, so_entries, ISSUER_KP, ISSUER_KID
+    )
+    so_envelope = copy.deepcopy(envelope)
+    so_envelope["signatures"][0]["kid"] = SMALL_ORDER_KID
+    write_vector(
+        "20-sig-canonicity/b-small-order-pubkey",
+        payload=None,
+        envelope=so_envelope,
+        envelope_raw=None,
+        trust=_trust_material((ISSUER_ID, so_manifest, "tls")),
+        expected=rejected,
+    )
+
+    # (c) signature R component is small-order, S kept from the real signature.
+    so_r = copy.deepcopy(envelope)
+    so_r["signatures"][0]["sig"] = keys.b64u(SMALL_ORDER_POINT + s_bytes)
+    write_vector(
+        "20-sig-canonicity/c-small-order-r",
+        payload=None,
+        envelope=so_r,
+        envelope_raw=None,
+        trust=trust,
+        expected=rejected,
+    )
+
+
+def _nested_list(levels: int) -> Any:
+    value: Any = 1
+    for _ in range(levels):
+        value = [value]
+    return value
+
+
+def gen_21_canon_strict() -> None:
+    """Strict-parser parity set: BOM, depth boundary triple, lone surrogate,
+    and supplementary-plane raw-vs-escaped equivalence. Parse-level rejects
+    reuse vector 06's expected shape (issuer unextractable -> TOFU trust)."""
+    parse_reject_base = {
+        "signature": "invalid",
+        "schema": "not_checked",
+        "revocation": "unknown",
+        "binding": "not_checked",
+        "trust": "unauthenticated_tofu",
+        "ok": False,
+        "warnings": [],
+    }
+    accepted_with_unknown_field = {
+        "signature": "valid",
+        "schema": "valid",
+        "revocation": "unknown",
+        "binding": "not_checked",
+        "trust": "verified",
+        "ok": True,
+        "errors": [],
+        "warnings_contains": ["unknown payload field"],
+    }
+    trust = _issuer_only_trust()
+
+    # (a) BOM: both parsers reject, with language-specific messages -> no errors* field.
+    payload = issue.build_payload(**_base_payload_kwargs())
+    _assert_schema_valid(payload)
+    envelope = issue.issue(payload, ISSUER_KP, ISSUER_KID)
+    bom_raw = b"\xef\xbb\xbf" + json.dumps(envelope).encode("utf-8")
+    write_vector(
+        "21-canon-strict/a-bom",
+        payload=None,
+        envelope=None,
+        envelope_raw=bom_raw,
+        trust=trust,
+        expected=dict(parse_reject_base),
+    )
+
+    # (b)(c)(d) depth boundary triple: whole-text nesting 255 / 256 / 257.
+    # The deep structure lives in an unknown top-level payload field "x"
+    # (vector 10 pins unknown-field tolerance: schema stays valid + warning).
+    for depth_target, subname in ((255, "b-depth-255"), (256, "c-depth-256"), (257, "d-depth-257")):
+        deep_payload = issue.build_payload(**_base_payload_kwargs())
+        # envelope text depth at "x" = {envelope {payload [x nesting...]}} = 2 + levels
+        deep_payload["x"] = _nested_list(depth_target - 2)
+        deep_envelope = issue.issue(deep_payload, ISSUER_KP, ISSUER_KID)
+        deep_raw = json.dumps(deep_envelope).encode("utf-8")
+        assert _text_max_depth(deep_raw.decode("utf-8")) == depth_target
+        if depth_target <= 256:
+            expected: dict[str, Any] = dict(accepted_with_unknown_field)
+        else:
+            expected = dict(parse_reject_base)
+            expected["errors_contains"] = ["maximum nesting depth exceeded"]
+        write_vector(
+            f"21-canon-strict/{subname}",
+            payload=None,
+            envelope=None,
+            envelope_raw=deep_raw,
+            trust=trust,
+            expected=expected,
+        )
+
+    # (e) lone surrogate via \uXXXX escape, injected textually (a payload
+    # carrying it can never be signed: canonical_bytes rejects it).
+    surr_payload = issue.build_payload(**_base_payload_kwargs())
+    surr_payload["x"] = "PLACEHOLDER_SURR"
+    surr_envelope = issue.issue(surr_payload, ISSUER_KP, ISSUER_KID)
+    surr_raw_text = json.dumps(surr_envelope).replace('"PLACEHOLDER_SURR"', '"\\ud800"')
+    assert "\\ud800" in surr_raw_text
+    surr_expected = dict(parse_reject_base)
+    surr_expected["errors_contains"] = ["lone surrogate"]
+    write_vector(
+        "21-canon-strict/e-lone-surrogate",
+        payload=None,
+        envelope=None,
+        envelope_raw=surr_raw_text.encode("utf-8"),
+        trust=trust,
+        expected=surr_expected,
+    )
+
+    # (f)(g) supplementary-plane raw vs escaped: same signed payload, two
+    # byte-level encodings of the same envelope -> both must verify (JCS
+    # canonical form is what got signed, independent of transport escaping).
+    supp_payload = issue.build_payload(**_base_payload_kwargs(title=SUPPLEMENTARY_TITLE))
+    _assert_schema_valid(supp_payload)
+    supp_envelope = issue.issue(supp_payload, ISSUER_KP, ISSUER_KID)
+    raw_text = json.dumps(supp_envelope, ensure_ascii=False)
+    escaped_text = json.dumps(supp_envelope, ensure_ascii=True)
+    assert "\U0001d11e" in raw_text and "\\ud834\\udd1e" in escaped_text
+    accepted_clean = {
+        "signature": "valid",
+        "schema": "valid",
+        "revocation": "unknown",
+        "binding": "not_checked",
+        "trust": "verified",
+        "ok": True,
+        "errors": [],
+        "warnings": [],
+    }
+    write_vector(
+        "21-canon-strict/f-supplementary-raw",
+        payload=supp_payload,
+        envelope=None,
+        envelope_raw=raw_text.encode("utf-8"),
+        trust=trust,
+        expected=dict(accepted_clean),
+        canonical=canon.canonical_bytes(supp_payload),
+    )
+    write_vector(
+        "21-canon-strict/g-supplementary-escaped",
+        payload=None,
+        envelope=None,
+        envelope_raw=escaped_text.encode("utf-8"),
+        trust=trust,
+        expected=dict(accepted_clean),
+        canonical=canon.canonical_bytes(supp_payload),
+    )
+
+
+_B64U_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+
+
+def gen_22_b64u_decoder_parity() -> None:
+    """Both languages deliberately accept non-strict base64url on the sig
+    field (padding, standard alphabet, dirty trailing bits) -- triaged
+    LOW/by-design-symmetric in the 2026-07-13 review. The parity risk is one
+    decoder tightening without the other; pin the shared behavior."""
+    payload = issue.build_payload(**_base_payload_kwargs())
+    _assert_schema_valid(payload)
+    envelope = issue.issue(payload, ISSUER_KP, ISSUER_KID)
+    trust = _issuer_only_trust()
+    sig_text: str = envelope["signatures"][0]["sig"]
+    sig_bytes = keys.b64u_decode(sig_text)
+    accepted = {
+        "signature": "valid",
+        "schema": "valid",
+        "revocation": "unknown",
+        "binding": "not_checked",
+        "trust": "verified",
+        "ok": True,
+        "errors": [],
+        "warnings": [],
+    }
+
+    # (a) explicit padding
+    padded = copy.deepcopy(envelope)
+    padded["signatures"][0]["sig"] = sig_text + "=" * (-len(sig_text) % 4)
+    assert padded["signatures"][0]["sig"].endswith("==")  # 86 chars -> two pad chars
+    assert keys.b64u_decode(padded["signatures"][0]["sig"]) == sig_bytes
+    write_vector(
+        "22-b64u-decoder-parity/a-padding-accepted",
+        payload=payload,
+        envelope=padded,
+        envelope_raw=None,
+        trust=trust,
+        expected=dict(accepted),
+    )
+
+    # (b) standard +/ alphabet
+    assert "-" in sig_text or "_" in sig_text, "fixed sig must exercise the urlsafe alphabet"
+    std = copy.deepcopy(envelope)
+    std["signatures"][0]["sig"] = sig_text.replace("-", "+").replace("_", "/")
+    assert std["signatures"][0]["sig"] != sig_text
+    assert keys.b64u_decode(std["signatures"][0]["sig"]) == sig_bytes
+    write_vector(
+        "22-b64u-decoder-parity/b-standard-alphabet-accepted",
+        payload=None,
+        envelope=std,
+        envelope_raw=None,
+        trust=trust,
+        expected=dict(accepted),
+    )
+
+    # (c) non-zero discarded trailing bits in the final char (4 bits unused)
+    last_idx = _B64U_ALPHABET.index(sig_text[-1])
+    dirty_char = _B64U_ALPHABET[last_idx ^ 0x0F]
+    dirty = copy.deepcopy(envelope)
+    dirty["signatures"][0]["sig"] = sig_text[:-1] + dirty_char
+    assert dirty["signatures"][0]["sig"] != sig_text
+    assert keys.b64u_decode(dirty["signatures"][0]["sig"]) == sig_bytes
+    write_vector(
+        "22-b64u-decoder-parity/c-trailing-bits-accepted",
+        payload=None,
+        envelope=dirty,
+        envelope_raw=None,
+        trust=trust,
+        expected=dict(accepted),
+    )
+
+
+# --- vector 23: revocation-refund-window ------------------------------------
+
+
+def gen_23_revocation_refund_window() -> None:
+    """A `revocability: "refund_window"` receipt with `revocation_window_days
+    = REFUND_WINDOW_DAYS` (14): per verify.py:359-367 a revocation record is
+    effective iff `revoked_at <= issued_at + revocation_window_days`, i.e.
+    ISSUED_AT 2025-07-02 -> window end 2025-07-16. (a) REVOKED_INSIDE_WINDOW_AT
+    (2025-07-10) is inside the window -> effective, `revocation: "revoked"`,
+    `ok: False`. (b) REVOKED_AT (2025-08-01) is outside -> the record is
+    ignored, `revocation: "invalid_revocation_ignored"`, a warning is
+    emitted, and `ok` is UNAFFECTED (`True`). Both records are otherwise
+    authenticated and well-formed (`verify_record` asserted True at
+    generation time) so the boundary is exercised purely on the refund-window
+    comparison, mirroring the `revoked_policy` / `revocation_against_none`
+    generation-time discipline (vectors 15/16)."""
+    payload = issue.build_payload(
+        **_base_payload_kwargs(
+            revocability="refund_window", revocation_window_days=REFUND_WINDOW_DAYS
+        )
+    )
+    _assert_schema_valid(payload)
+    envelope = issue.issue(payload, ISSUER_KP, ISSUER_KID)
+    issuer_manifest = _manifest_material(ISSUER_ID, ISSUER_KID, ISSUER_KP)
+    trust = _trust_material((ISSUER_ID, issuer_manifest, "tls"))
+
+    record_inside = revocation.build_record(
+        RECEIPT_ID, "revoked", REVOKED_INSIDE_WINDOW_AT, ISSUER_KP, ISSUER_KID
+    )
+    assert revocation.verify_record(record_inside, issuer_manifest) is True
+    expected_a = {
+        "signature": "valid",
+        "schema": "valid",
+        "revocation": "revoked",
+        "binding": "not_checked",
+        "trust": "verified",
+        "ok": False,
+        "errors": [],
+        "warnings": [],
+    }
+    write_vector(
+        "23-revocation-refund-window/a-inside-window",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected_a,
+        revocation_record=record_inside,
+    )
+
+    record_after = revocation.build_record(RECEIPT_ID, "revoked", REVOKED_AT, ISSUER_KP, ISSUER_KID)
+    assert (
+        revocation.verify_record(record_after, issuer_manifest) is True
+    )  # authenticated, but ignored
+    expected_b = {
+        "signature": "valid",
+        "schema": "valid",
+        "revocation": "invalid_revocation_ignored",
+        "binding": "not_checked",
+        "trust": "verified",
+        "ok": True,
+        "errors": [],
+        "warnings_contains": ["outside refund window"],
+    }
+    write_vector(
+        "23-revocation-refund-window/b-after-window",
+        payload=None,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected_b,
+        revocation_record=record_after,
+    )
+
+
+def gen_24_canonical_roundtrip() -> None:
+    """A plain valid receipt that additionally commits its payload's exact
+    canonical bytes; both primary runners must reproduce them byte-for-byte
+    (see the runner docstrings). ASCII here; vectors 21 f/g carry the same
+    file for the supplementary-plane hard case."""
+    payload = issue.build_payload(**_base_payload_kwargs())
+    _assert_schema_valid(payload)
+    envelope = issue.issue(payload, ISSUER_KP, ISSUER_KID)
+    expected = {
+        "signature": "valid",
+        "schema": "valid",
+        "revocation": "unknown",
+        "binding": "not_checked",
+        "trust": "verified",
+        "ok": True,
+        "errors": [],
+        "warnings": [],
+    }
+    write_vector(
+        "24-canonical-roundtrip",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=_issuer_only_trust(),
+        expected=expected,
+        canonical=canon.canonical_bytes(payload),
+    )
+
+
+def _sign_manually(payload: dict[str, Any]) -> dict[str, Any]:
+    """Build a signature envelope the way `issue.issue` does internally,
+    bypassing its schema-validity gate. Used only for vector 25, whose
+    payloads are deliberately schema-invalid but still JCS-signable (see
+    `gen_25_schema_parity`)."""
+    payload_bytes = canon.canonical_bytes(payload)
+    sig = keys.sign(payload_bytes, ISSUER_KP)
+    return {
+        "payload": payload,
+        "signatures": [{"kid": ISSUER_KID, "alg": "Ed25519", "sig": keys.b64u(sig)}],
+    }
+
+
+def gen_25_schema_parity() -> None:
+    """Direct regressions for the two schema drifts the 2026-07-13 review
+    caught: work.edition accepting non-strings in schema.ts (must-fix #5)
+    and the ULID regex accepting a first char > '7' (must-fix #7, pattern
+    ^[0-7][0-9A-HJKMNP-TV-Z]{25}$ in both schema implementations). Both
+    payloads are mutated to be schema-invalid AFTER `build_payload` but
+    BEFORE signing (JCS accepts ints and any string) -- `issue.issue`
+    itself would reject them at its schema gate, so the envelope is built
+    manually via `_sign_manually`, isolating the schema check from the
+    signature check."""
+    trust = _issuer_only_trust()
+
+    # (a) work.edition as an int
+    payload_a = issue.build_payload(**_base_payload_kwargs())
+    payload_a["work"]["edition"] = 7
+    violations_a = validate.validate_payload(payload_a)
+    assert any("edition" in v for v in violations_a), violations_a
+    envelope_a = _sign_manually(payload_a)
+    expected_a = {
+        "signature": "valid",
+        "schema": "invalid",
+        "revocation": "unknown",
+        "binding": "not_checked",
+        "trust": "verified",
+        "ok": False,
+        "errors_contains": ["edition"],
+        "warnings": [],
+    }
+    write_vector(
+        "25-schema-parity/a-edition-nonstring",
+        payload=payload_a,
+        envelope=envelope_a,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected_a,
+    )
+
+    # (b) receipt_id first char '8' (> 128-bit ULID timestamp prefix)
+    payload_b = issue.build_payload(**_base_payload_kwargs())
+    payload_b["receipt_id"] = "8" + RECEIPT_ID[1:]
+    violations_b = validate.validate_payload(payload_b)
+    assert any("receipt_id" in v for v in violations_b), violations_b
+    envelope_b = _sign_manually(payload_b)
+    expected_b = {
+        "signature": "valid",
+        "schema": "invalid",
+        "revocation": "unknown",
+        "binding": "not_checked",
+        "trust": "verified",
+        "ok": False,
+        "errors_contains": ["receipt_id"],
+        "warnings": [],
+    }
+    write_vector(
+        "25-schema-parity/b-ulid-first-char",
+        payload=payload_b,
+        envelope=envelope_b,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected_b,
+    )
 
 
 def main() -> None:
-    shutil.rmtree(VECTORS_DIR, ignore_errors=True)
+    _clear_leaf_dirs(VECTORS_DIR)
     VECTORS_DIR.mkdir(parents=True, exist_ok=True)
     gen_01_valid_minimal()
     gen_02_valid_full()
@@ -966,6 +1699,13 @@ def main() -> None:
     gen_16_revocation_against_none_ignored()
     gen_17_binding_proven()
     gen_18_drm_bound()
+    gen_19_rotation_substituted_key()
+    gen_20_sig_canonicity()
+    gen_21_canon_strict()
+    gen_22_b64u_decoder_parity()
+    gen_23_revocation_refund_window()
+    gen_24_canonical_roundtrip()
+    gen_25_schema_parity()
     leaf_count = sum(1 for _ in VECTORS_DIR.rglob("expected.json"))
     print(f"generated {leaf_count} vector cases under {VECTORS_DIR}")
 
