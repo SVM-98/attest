@@ -3,7 +3,7 @@ import { TrustStore, findKey, withinValidity, chainContinuous } from './manifest
 import { verifyStrict, Ed25519LengthError } from './ed25519.js'
 import { b64uDecode } from './b64u.js'
 import { validatePayload, SCHEMA_TOP_LEVEL_KEYS } from './schema.js'
-import { classifyRevocation } from './revocation.js'
+import { classifyRevocation, MAX_REVOCATION_RECORDS } from './revocation.js'
 import { computeCommitment, verifyChallenge } from './commitment.js'
 import { b64uEncode } from './b64u.js'
 import {
@@ -88,6 +88,7 @@ function classifyBinding(payload: JsonObject, d: Disclosure): Binding {
 export function verify(
   envelopeBytes: Uint8Array, trustStore: TrustStore,
   revocationView: JsonValue[] | null = null, disclosure: Disclosure | null = null,
+  maxRevocationRecords: number = MAX_REVOCATION_RECORDS,
 ): VerificationResult {
   if (revocationView !== null && !Array.isArray(revocationView))
     throw new TypeError('revocation_view must be a list of records or None')
@@ -184,7 +185,7 @@ export function verify(
   let revocation = 'unknown'
   let binding: Binding = 'not_checked'
   if (schema === 'valid') {
-    revocation = classifyRevocation(payload, revocationView, manifest, warnings)
+    revocation = classifyRevocation(payload, revocationView, manifest, warnings, maxRevocationRecords)
     binding = disclosure != null ? classifyBinding(payload, disclosure) : 'not_checked'
   }
 

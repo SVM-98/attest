@@ -4,8 +4,12 @@
 // revocation.test.ts / manifests.test.ts.
 import { describe, it, expect, vi } from 'vitest'
 import { ed25519 } from '@noble/curves/ed25519'
-import { loadsStrict, canonicalBytes, JsonObject } from '../src/canon.js'
+import { join } from 'node:path'
+import { loadsStrict, canonicalBytes, JsonObject, JsonValue } from '../src/canon.js'
 import { b64uEncode } from '../src/b64u.js'
+import { VECTORS_ROOT, envelopeBytes, trustStore, revocationView } from './helpers/vectors.js'
+import { verify } from '../src/verify.js'
+import { MAX_REVOCATION_RECORDS } from '../src/revocation.js'
 
 // Wrap verifyKeyManifest in a call-counting spy that delegates to the real
 // implementation, so the once-per-classification contract is testable.
@@ -99,5 +103,37 @@ describe('cached manifest self-verify (improvement #17)', () => {
     expect(verifyRecord(record(), keyManifest)).toBe(true)
     const tampered = { ...keyManifest, issued_at: '2027-01-01T00:00:00Z' } as JsonObject
     expect(verifyRecord(record(), tampered)).toBe(false)
+  })
+})
+
+describe('revocation view bound (improvement #17)', () => {
+  it('exports the default cap', () => {
+    expect(MAX_REVOCATION_RECORDS).toBe(10_000)
+  })
+
+  it('oversized view -> unknown + verbatim warning, never evaluated', () => {
+    const view = [1, 2, 3, 4].map((d) => record(`2026-07-0${d}T00:00:00Z`))
+    const warnings: string[] = []
+    const result = classifyRevocation(policyPayload, view, keyManifest, warnings, 3)
+    expect(result).toBe('unknown')
+    expect(warnings).toContain('revocation view exceeds 3 records (4 supplied), not evaluated')
+  })
+
+  it('view exactly at cap evaluates normally (boundary is strict >)', () => {
+    const view = [1, 2, 3].map((d) => record(`2026-07-0${d}T00:00:00Z`))
+    const warnings: string[] = []
+    expect(classifyRevocation(policyPayload, view, keyManifest, warnings, 3)).toBe('revoked')
+    expect(warnings).toEqual([])
+  })
+
+  it('verify() threads the cap (vector 15 record replicated past an injected cap)', () => {
+    const dir = join(VECTORS_ROOT, '15-revoked-policy')
+    const single = revocationView(dir)! // loader returns unknown[]; entries are loadsStrict-parsed
+    const big = [0, 1, 2, 3].map(() => single[0]!) as JsonValue[]
+    const capped = verify(envelopeBytes(dir), trustStore(dir), big, null, 3)
+    expect(capped.revocation).toBe('unknown')
+    expect(capped.warnings).toContain('revocation view exceeds 3 records (4 supplied), not evaluated')
+    const uncapped = verify(envelopeBytes(dir), trustStore(dir), big)
+    expect(uncapped.revocation).toBe('revoked')
   })
 })

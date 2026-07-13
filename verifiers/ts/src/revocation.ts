@@ -3,7 +3,7 @@ import { verifyKeyManifest, findKey } from './manifests.js'
 import { verifyStrict } from './ed25519.js'
 import { b64uDecode } from './b64u.js'
 import { parseStrictUtc, parseIsoLenient } from './dates.js'
-import { revocationFailedVerify, outsideRefundWindow, WARN } from './messages.js'
+import { revocationFailedVerify, outsideRefundWindow, revocationViewOversize, WARN } from './messages.js'
 
 function asObject(v: JsonValue | undefined): JsonObject | null {
   return v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as JsonObject) : null
@@ -50,10 +50,24 @@ function refundWindowEnd(payload: JsonObject): number | null {
   return issued + Number(days) * 86_400_000
 }
 
+// Preflight bound on the untrusted revocation view (review improvement #17):
+// a legitimate view for one verify() call is an issuer's records for one
+// receipt — realistically single digits; 10k is far above any legitimate case
+// and keeps hostile worst-case work bounded. Mirrors Python's
+// _MAX_REVOCATION_RECORDS.
+export const MAX_REVOCATION_RECORDS = 10_000
+
 export function classifyRevocation(
   payload: JsonObject, view: JsonValue[] | null, issuerManifest: JsonObject, warnings: string[],
+  maxRecords: number = MAX_REVOCATION_RECORDS,
 ): string {
   if (!view || view.length === 0) return 'unknown'
+  // Oversized view: not evaluated at all — never truncate (a subset could
+  // misreport), never throw. "unknown" is the honest verdict.
+  if (view.length > maxRecords) {
+    warnings.push(revocationViewOversize(view.length, maxRecords))
+    return 'unknown'
+  }
 
   // One manifest self-verify per classification, not per record (improvement #17).
   const manifestOk = verifyKeyManifest(issuerManifest)
