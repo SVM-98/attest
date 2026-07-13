@@ -70,7 +70,8 @@ def test_manifest_self_verify_runs_once_per_classification(
 
     monkeypatch.setattr(manifests, "verify_key_manifest", counting)
     warnings: list[str] = []
-    result = verify._classify_revocation(payload, view, manifest, warnings)
+    errors: list[str] = []
+    result = verify._classify_revocation(payload, view, manifest, warnings, errors)
     assert result == "revoked"
     assert calls["count"] == 1
 
@@ -124,10 +125,11 @@ def test_default_cap_is_10_000() -> None:
     assert verify._MAX_REVOCATION_RECORDS == 10_000
 
 
-def test_oversized_view_reports_unknown_with_warning_and_ok_unaffected() -> None:
-    """Overflow = warn + unknown: the feed is not evaluated at all (no
-    truncation), and `unknown` never flips `ok` — even though the same view
-    under the default cap would revoke this receipt (next test)."""
+def test_oversized_view_on_revocable_receipt_fails_closed() -> None:
+    """Overflow on a REVOCABLE receipt fails closed: an untrusted view too
+    large to evaluate must not certify the receipt as ok. Returning "unknown"
+    with ok=true would let an append-only feed-poisoning attacker suppress a
+    genuine revocation by padding past the cap (Codex adversarial review)."""
     payload = make_payload(license={"revocability": "policy"})
     envelope = issue.issue(payload, KP, KID)
     view = [_record(f"2026-07-0{i}T00:00:00Z") for i in range(1, 5)]  # 4 records
@@ -138,8 +140,47 @@ def test_oversized_view_reports_unknown_with_warning_and_ok_unaffected() -> None
         max_revocation_records=3,
     )
     assert result.revocation == "unknown"
+    assert (
+        "revocation view exceeds 3 records (4 supplied), cannot certify a revocable receipt"
+        in result.errors
+    )
+    assert result.ok is False
+
+
+def test_oversized_view_on_irrevocable_receipt_warns_and_stays_ok() -> None:
+    """Overflow on an irrevocable ("none") receipt is a non-fatal warning:
+    revocation can never affect ok, so an oversized feed cannot force not-ok."""
+    payload = make_payload()  # revocability: none (base payload default)
+    envelope = issue.issue(payload, KP, KID)
+    view = [_record(f"2026-07-0{i}T00:00:00Z") for i in range(1, 5)]  # 4 records
+    result = verify.verify(
+        _to_bytes(envelope),
+        _trust_store(_key_manifest()),
+        revocation_view=view,
+        max_revocation_records=3,
+    )
+    assert result.revocation == "unknown"
     assert "revocation view exceeds 3 records (4 supplied), not evaluated" in result.warnings
+    assert result.errors == ()
     assert result.ok is True
+
+
+def test_padding_a_genuine_revocation_past_the_cap_cannot_suppress_it() -> None:
+    """The suppression scenario Codex flagged: a genuine issuer-signed
+    revocation for a policy receipt, padded with junk past the cap, must NOT
+    flip the receipt to ok. Fail-closed: revocation "unknown" but ok=false."""
+    payload = make_payload(license={"revocability": "policy"})
+    envelope = issue.issue(payload, KP, KID)
+    genuine = _record("2026-07-03T00:00:00Z")
+    junk = [{"receipt_id": "x", "status": "revoked", "revoked_at": "2026-07-03T00:00:00Z"}] * 3
+    view = [genuine, *junk]  # 4 entries > cap 3
+    result = verify.verify(
+        _to_bytes(envelope),
+        _trust_store(_key_manifest()),
+        revocation_view=view,
+        max_revocation_records=3,
+    )
+    assert result.ok is False
 
 
 def test_same_view_under_default_cap_is_still_revoked() -> None:
@@ -156,6 +197,10 @@ def test_view_exactly_at_cap_evaluates_normally() -> None:
     payload = make_payload(license={"revocability": "policy"})
     view = [_record(f"2026-07-0{i}T00:00:00Z") for i in range(1, 4)]  # 3 records
     warnings: list[str] = []
-    result = verify._classify_revocation(payload, view, _key_manifest(), warnings, max_records=3)
+    errors: list[str] = []
+    result = verify._classify_revocation(
+        payload, view, _key_manifest(), warnings, errors, max_records=3
+    )
     assert result == "revoked"
     assert warnings == []
+    assert errors == []
