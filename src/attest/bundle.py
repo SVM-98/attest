@@ -52,7 +52,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from attest import keys, manifests, verify
+from attest import canon, keys, manifests, verify
 
 _PROVENANCE_BUNDLE = "bundle"
 _SECRET_FILE_MODE = 0o600  # disclose output carries delivery.salt (a bearer secret)
@@ -340,6 +340,13 @@ def _guard_zip(zf: zipfile.ZipFile, max_entries: int, max_total_bytes: int) -> N
         )
 
 
+def _loads(data: bytes) -> Any:
+    """Parse bundle-internal JSON through the strict canonical parser (rejects
+    duplicate keys, floats, BOMs) so imported trust material matches what the
+    verifier will accept (2026-07-13 review, finding 9)."""
+    return canon.loads_strict(data)
+
+
 def import_bundle(
     attest_path: Path,
     private_path: Path | None = None,
@@ -380,9 +387,9 @@ def import_bundle(
         _guard_zip(zf, max_entries, max_total_bytes)
         for filename in sorted(zf.namelist()):
             if filename.startswith("receipts/") and filename.endswith(".attest.json"):
-                receipts.append(json.loads(budget.read(zf, filename)))
+                receipts.append(_loads(budget.read(zf, filename)))
             elif filename.startswith("manifests/") and filename.endswith(".json"):
-                blob = json.loads(budget.read(zf, filename))
+                blob = _loads(budget.read(zf, filename))
                 issuer = blob.get("issuer")
                 if not isinstance(issuer, str):
                     continue
@@ -400,6 +407,19 @@ def import_bundle(
                         "— bundle is corrupt or tampered"
                     )
                 legal_texts[digest] = content
+
+    # Every legal hash referenced by any imported receipt must be present — mirror
+    # export's completeness pass so a stripped bundle can't import as if it still
+    # preserved the deal (2026-07-13 review, finding 10).
+    for envelope in receipts:
+        payload = envelope.get("payload") if isinstance(envelope, dict) else None
+        if isinstance(payload, dict):
+            for digest in _referenced_legal_hashes(payload):
+                if digest not in legal_texts:
+                    raise BundleError(
+                        f"bundle is missing legal text for referenced hash {digest!r} "
+                        "— it cannot preserve the deal this receipt refers to"
+                    )
 
     manifests_map: dict[str, dict[str, Any]] = {}
     provenance: dict[str, str] = {}
@@ -422,7 +442,7 @@ def import_bundle(
         with zipfile.ZipFile(private_path, "r") as zf:
             _guard_zip(zf, max_entries, max_total_bytes)
             if "salts.json" in zf.namelist():
-                raw_salts: dict[str, str] = json.loads(budget.read(zf, "salts.json"))
+                raw_salts: dict[str, str] = _loads(budget.read(zf, "salts.json"))
                 salts = {receipt_id: keys.b64u_decode(s) for receipt_id, s in raw_salts.items()}
 
     return ImportedBundle(

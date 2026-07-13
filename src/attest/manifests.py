@@ -35,6 +35,27 @@ def _parse_date(value: str) -> datetime:
     return datetime.strptime(value, _DATE_FMT)
 
 
+def _within_window(issued_at: object, entry: dict[str, Any]) -> bool:
+    """Fail-closed: `issued_at` (a str) falls within the key entry's
+    [valid_from, valid_to] window. Any malformed/missing bound → False."""
+    if not isinstance(issued_at, str):
+        return False
+    try:
+        issued = _parse_date(issued_at)
+        valid_from = _parse_date(entry["valid_from"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    if issued < valid_from:
+        return False
+    valid_to = entry.get("valid_to")
+    if valid_to is None:
+        return True
+    try:
+        return issued <= _parse_date(valid_to)
+    except (TypeError, ValueError):
+        return False
+
+
 def _signable(manifest: dict[str, Any]) -> bytes:
     body = {k: v for k, v in manifest.items() if k != "manifest_signature"}
     return canon.canonical_bytes(body)
@@ -59,9 +80,13 @@ def key_entry(
 
 def find_key(manifest: dict[str, Any], kid: str) -> dict[str, Any] | None:
     """Return the `keys[]` entry with the given `kid`, or None if absent."""
-    entries: list[dict[str, Any]] = manifest.get("keys", [])
+    entries = manifest.get("keys", [])
+    if not isinstance(entries, list):
+        return None
     for entry in entries:
-        if entry.get("kid") == kid:
+        # Tolerate a malformed keys[] member (e.g. `keys: [null]`) instead of
+        # crashing the caller's verification (2026-07-13 review, finding 11).
+        if isinstance(entry, dict) and entry.get("kid") == kid:
             return entry
     return None
 
@@ -123,6 +148,11 @@ def check_continuity(trusted: dict[str, Any], candidate: dict[str, Any]) -> bool
         return False
     signer_entry = find_key(trusted, signer_kid)
     if signer_entry is None or signer_entry.get("status") != _ACTIVE:
+        return False
+    # The signer key must also cover the candidate's issuance in its validity
+    # window (consistency with verify_artifact_manifest) (2026-07-13 review,
+    # finding 12).
+    if not _within_window(candidate.get("issued_at"), signer_entry):
         return False
     # Bind continuity to the key TRUSTED vouches for: the candidate's signature
     # must verify under the pub `trusted` holds for signer_kid, NOT the pub the
