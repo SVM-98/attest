@@ -1,0 +1,12 @@
+{
+  "binding": "not_checked",
+  "errors_contains": [
+    "receipt_id"
+  ],
+  "ok": false,
+  "revocation": "unknown",
+  "schema": "invalid",
+  "signature": "valid",
+  "trust": "verified",
+  "warnings": []
+}
