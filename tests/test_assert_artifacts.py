@@ -1,4 +1,5 @@
 import io
+import json
 import tarfile
 import zipfile
 from pathlib import Path
@@ -10,6 +11,7 @@ from tools.assert_artifacts import (
     assert_npm_tarball,
     assert_sdist,
     assert_wheel,
+    main,
 )
 
 
@@ -97,3 +99,77 @@ def test_npm_forbidden_private_raises() -> None:
 def test_npm_forbidden_src_raises() -> None:
     with pytest.raises(ArtifactError, match="forbidden"):
         assert_npm_tarball(_pack([*NPM_OK, "src/verify.ts"]))
+
+
+def test_npm_forbidden_private_case_insensitive_raises() -> None:
+    with pytest.raises(ArtifactError, match="forbidden"):
+        assert_npm_tarball(_pack([*NPM_OK, "secret.PRIVATE.attest"]))
+
+
+def test_npm_forbidden_src_case_insensitive_raises() -> None:
+    with pytest.raises(ArtifactError, match="forbidden"):
+        assert_npm_tarball(_pack([*NPM_OK, "Src/verify.ts"]))
+
+
+def test_npm_forbidden_tests_dir_raises() -> None:
+    with pytest.raises(ArtifactError, match="forbidden"):
+        assert_npm_tarball(_pack([*NPM_OK, "tests/verify.ts"]))
+
+
+def test_npm_forbidden_tsconfig_raises() -> None:
+    with pytest.raises(ArtifactError, match="forbidden"):
+        assert_npm_tarball(_pack([*NPM_OK, "tsconfig.json"]))
+
+
+def test_npm_privateer_is_not_a_false_positive() -> None:
+    assert_npm_tarball(_pack([*NPM_OK, "api.privateer.md"]))  # no raise
+
+
+def test_npm_tsconfig_guide_is_not_a_false_positive() -> None:
+    assert_npm_tarball(_pack([*NPM_OK, "docs/tsconfig-guide.md"]))  # no raise
+
+
+def test_wheel_license_txt_lookalike_does_not_satisfy_license_requirement(
+    tmp_path: Path,
+) -> None:
+    members = [m for m in WHEEL_OK if "LICENSE" not in m] + ["LICENSE.txt"]
+    with pytest.raises(ArtifactError, match="LICENSE"):
+        assert_wheel(_make_wheel(tmp_path, members))
+
+
+def test_wheel_py_typed_old_lookalike_does_not_satisfy_requirement(
+    tmp_path: Path,
+) -> None:
+    members = [m for m in WHEEL_OK if m != "attest/py.typed"] + ["attest/py.typed.old"]
+    with pytest.raises(ArtifactError, match=r"py\.typed"):
+        assert_wheel(_make_wheel(tmp_path, members))
+
+
+def test_wheel_schema_bak_lookalike_does_not_satisfy_requirement(tmp_path: Path) -> None:
+    members = [m for m in WHEEL_OK if "schema" not in m] + ["foo.schema.json.bak"]
+    with pytest.raises(ArtifactError, match="schema"):
+        assert_wheel(_make_wheel(tmp_path, members))
+
+
+def test_main_no_targets_returns_nonzero() -> None:
+    assert main([]) != 0
+
+
+def test_main_all_targets_ok_returns_zero(tmp_path: Path) -> None:
+    wheel = _make_wheel(tmp_path, WHEEL_OK)
+    sdist = _make_sdist(tmp_path, SDIST_OK)
+    npm_pack_json = tmp_path / "npm-pack.json"
+    npm_pack_json.write_text(json.dumps(_pack(NPM_OK)))
+    assert (
+        main(
+            [
+                "--wheel",
+                str(wheel),
+                "--sdist",
+                str(sdist),
+                "--npm-pack-json",
+                str(npm_pack_json),
+            ]
+        )
+        == 0
+    )

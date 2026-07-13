@@ -11,7 +11,8 @@ import re
 import sys
 import tarfile
 import zipfile
-from pathlib import Path
+from collections.abc import Callable
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 
@@ -19,50 +20,92 @@ class ArtifactError(Exception):
     """A built artifact is missing a required member or contains a forbidden one."""
 
 
-# Substrings/suffixes that MUST be present in the wheel.
-_WHEEL_REQUIRED = (
+# Exact-path needles: a member must equal the needle, or end with "/" + needle
+# (i.e. the needle is the member's full path relative to some archive root).
+# A raw substring match (the previous behaviour) would let lookalikes such as
+# "attest/py.typed.old" or "backup/attest/py.typed" satisfy the requirement.
+_WHEEL_REQUIRED_EXACT = (
     "attest/__init__.py",
     "attest/py.typed",
-    ".schema.json",  # bundled JSON schema resource
 )
-_WHEEL_REQUIRED_LICENSE = "LICENSE"  # somewhere under dist-info (hatchling places it in licenses/)
+# Suffix needles: a member's basename must end with the needle.
+_WHEEL_REQUIRED_BASENAME_SUFFIX = (".schema.json",)  # bundled JSON schema resource
+# hatchling places the license at "<dist-info>/licenses/LICENSE" in the wheel.
+_LICENSE_BASENAME = "LICENSE"
 
-_SDIST_REQUIRED = (
+_SDIST_REQUIRED_EXACT = (
     "pyproject.toml",
     "src/attest/__init__.py",
     "src/attest/py.typed",
 )
-_SDIST_REQUIRED_LICENSE = "LICENSE"
+# hatchling places the license at "<sdist-root>/LICENSE" in the sdist.
 
 _NPM_REQUIRED = ("dist/", "README.md", "CHANGELOG.md", "package.json")
-# Regexes for members that must NEVER ship in the npm tarball.
+# Regexes for members that must NEVER ship in the npm tarball. Anchored on
+# path-component / filename boundaries (not raw substrings) and
+# case-insensitive, so lookalikes (e.g. "api.privateer.md",
+# "docs/tsconfig-guide.md") don't false-positive while real leaks
+# (e.g. "secret.PRIVATE.attest", "Src/verify.ts", "tests/verify.ts") are
+# still caught.
 _NPM_FORBIDDEN = (
-    re.compile(r"\.private"),
-    re.compile(r"(^|/)src/"),
-    re.compile(r"(^|/)test/"),
-    re.compile(r"tsconfig"),
+    re.compile(r"(?:^|[./])private(?:[./]|$)", re.IGNORECASE),
+    re.compile(r"(^|/)(src|tests?)/", re.IGNORECASE),
+    re.compile(r"(^|/)tsconfig(\.[^/]*)?$", re.IGNORECASE),
 )
 
 
-def _require(members: list[str], needle: str, kind: str) -> None:
+def _require_contains(members: list[str], needle: str, kind: str) -> None:
     if not any(needle in m for m in members):
         raise ArtifactError(f"{kind}: required member matching {needle!r} not found")
+
+
+def _require_member(
+    members: list[str], predicate: Callable[[str], bool], description: str, kind: str
+) -> None:
+    if not any(predicate(m) for m in members):
+        raise ArtifactError(f"{kind}: required member matching {description!r} not found")
+
+
+def _is_exact_or_suffix(needle: str) -> Callable[[str], bool]:
+    """Member equals `needle`, or ends with `/needle` (i.e. needle is the
+    member's full path under some archive root)."""
+
+    def predicate(member: str) -> bool:
+        return member == needle or member.endswith("/" + needle)
+
+    return predicate
+
+
+def _basename_endswith(suffix: str) -> Callable[[str], bool]:
+    def predicate(member: str) -> bool:
+        return PurePosixPath(member).name.endswith(suffix)
+
+    return predicate
+
+
+def _basename_equals(name: str) -> Callable[[str], bool]:
+    def predicate(member: str) -> bool:
+        return PurePosixPath(member).name == name
+
+    return predicate
 
 
 def assert_wheel(path: Path) -> None:
     with zipfile.ZipFile(path) as z:
         members = z.namelist()
-    for needle in _WHEEL_REQUIRED:
-        _require(members, needle, "wheel")
-    _require(members, _WHEEL_REQUIRED_LICENSE, "wheel")
+    for needle in _WHEEL_REQUIRED_EXACT:
+        _require_member(members, _is_exact_or_suffix(needle), needle, "wheel")
+    for suffix in _WHEEL_REQUIRED_BASENAME_SUFFIX:
+        _require_member(members, _basename_endswith(suffix), suffix, "wheel")
+    _require_member(members, _basename_equals(_LICENSE_BASENAME), _LICENSE_BASENAME, "wheel")
 
 
 def assert_sdist(path: Path) -> None:
     with tarfile.open(path, "r:gz") as t:
         members = t.getnames()
-    for needle in _SDIST_REQUIRED:
-        _require(members, needle, "sdist")
-    _require(members, _SDIST_REQUIRED_LICENSE, "sdist")
+    for needle in _SDIST_REQUIRED_EXACT:
+        _require_member(members, _is_exact_or_suffix(needle), needle, "sdist")
+    _require_member(members, _basename_equals(_LICENSE_BASENAME), _LICENSE_BASENAME, "sdist")
 
 
 def assert_npm_tarball(pack_json: list[dict[str, Any]]) -> None:
@@ -70,7 +113,7 @@ def assert_npm_tarball(pack_json: list[dict[str, Any]]) -> None:
         raise ArtifactError("npm: empty `npm pack --json` output")
     files = [f["path"] for f in pack_json[0].get("files", [])]
     for needle in _NPM_REQUIRED:
-        _require(files, needle, "npm")
+        _require_contains(files, needle, "npm")
     for f in files:
         for pat in _NPM_FORBIDDEN:
             if pat.search(f):
@@ -83,6 +126,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--sdist", type=Path)
     parser.add_argument("--npm-pack-json", type=Path, help="file with `npm pack --json` output")
     args = parser.parse_args(argv)
+    if not (args.wheel or args.sdist or args.npm_pack_json):
+        print(
+            "artifact assertion failed: no target given "
+            "(pass --wheel, --sdist, and/or --npm-pack-json)",
+            file=sys.stderr,
+        )
+        return 2
     try:
         if args.wheel:
             assert_wheel(args.wheel)
