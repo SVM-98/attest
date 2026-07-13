@@ -1413,6 +1413,7 @@ def gen_21_canon_strict() -> None:
         envelope_raw=raw_text.encode("utf-8"),
         trust=trust,
         expected=dict(accepted_clean),
+        canonical=canon.canonical_bytes(supp_payload),
     )
     write_vector(
         "21-canon-strict/g-supplementary-escaped",
@@ -1421,6 +1422,7 @@ def gen_21_canon_strict() -> None:
         envelope_raw=escaped_text.encode("utf-8"),
         trust=trust,
         expected=dict(accepted_clean),
+        canonical=canon.canonical_bytes(supp_payload),
     )
 
 
@@ -1570,6 +1572,35 @@ def gen_23_revocation_refund_window() -> None:
     )
 
 
+def gen_24_canonical_roundtrip() -> None:
+    """A plain valid receipt that additionally commits its payload's exact
+    canonical bytes; both primary runners must reproduce them byte-for-byte
+    (see the runner docstrings). ASCII here; vectors 21 f/g carry the same
+    file for the supplementary-plane hard case."""
+    payload = issue.build_payload(**_base_payload_kwargs())
+    _assert_schema_valid(payload)
+    envelope = issue.issue(payload, ISSUER_KP, ISSUER_KID)
+    expected = {
+        "signature": "valid",
+        "schema": "valid",
+        "revocation": "unknown",
+        "binding": "not_checked",
+        "trust": "verified",
+        "ok": True,
+        "errors": [],
+        "warnings": [],
+    }
+    write_vector(
+        "24-canonical-roundtrip",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=_issuer_only_trust(),
+        expected=expected,
+        canonical=canon.canonical_bytes(payload),
+    )
+
+
 def main() -> None:
     _clear_leaf_dirs(VECTORS_DIR)
     VECTORS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1597,6 +1628,7 @@ def main() -> None:
     gen_21_canon_strict()
     gen_22_b64u_decoder_parity()
     gen_23_revocation_refund_window()
+    gen_24_canonical_roundtrip()
     leaf_count = sum(1 for _ in VECTORS_DIR.rglob("expected.json"))
     print(f"generated {leaf_count} vector cases under {VECTORS_DIR}")
 
