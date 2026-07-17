@@ -226,11 +226,11 @@ def _cmd_keygen(args: argparse.Namespace) -> int:
 
 
 def _cmd_manifest_init(args: argparse.Namespace) -> int:
+    if _same_file_target(args.seed, args.out):
+        raise CliUsageError("--seed and --out must be different paths")
     if args.mldsa_key is not None and _same_file_target(args.mldsa_key, args.out):
         # Reading --mldsa-key then writing --out to the same path would clobber
-        # the freshly-read ML-DSA secret file (finding 18 policy, extended to the
-        # new hybrid input; the pre-existing --seed-vs---out aliasing is out of
-        # scope for this fix wave).
+        # the freshly-read ML-DSA secret file.
         raise CliUsageError("--mldsa-key and --out must be different paths")
     kp = _load_seed_kp(args.seed)
     signing_kp: keys.SigningKeyPair | pq.HybridSigningKeys = kp
@@ -245,16 +245,25 @@ def _cmd_manifest_init(args: argparse.Namespace) -> int:
     manifest = manifests.build_key_manifest(
         args.issuer, 1, args.issued_at, [entry], signing_kp, args.kid
     )
+    if not manifests.verify_key_manifest(manifest):
+        raise CliUsageError(
+            "built manifest does not self-verify; check that --seed and --mldsa-key are "
+            "a valid matching keypair"
+        )
     _write_json_file(args.out, manifest)
     _print_json({"out": str(args.out), "issuer": args.issuer, "manifest_version": 1})
     return EXIT_OK
 
 
 def _cmd_manifest_rotate(args: argparse.Namespace) -> int:
+    if _same_file_target(args.signing_seed, args.out):
+        raise CliUsageError("--signing-seed and --out must be different paths")
     if args.mldsa_key is not None and _same_file_target(args.mldsa_key, args.out):
         # Same input-vs-output aliasing hazard as manifest init/issue (finding 18
         # policy, extended to the new hybrid input).
         raise CliUsageError("--mldsa-key and --out must be different paths")
+    if args.new_mldsa_pub is not None and _same_file_target(args.new_mldsa_pub, args.out):
+        raise CliUsageError("--new-mldsa-pub and --out must be different paths")
 
     existing = _read_json(args.manifest_in)
     if not isinstance(existing, dict) or "keys" not in existing:
@@ -264,13 +273,26 @@ def _cmd_manifest_rotate(args: argparse.Namespace) -> int:
     compromise_kids: list[str] = args.compromise_kid or []
 
     new_entry = None
+    if args.new_mldsa_pub is not None and (args.new_kid is None or args.new_pub is None):
+        raise CliUsageError("--new-mldsa-pub requires --new-kid and --new-pub")
     if args.new_kid is not None or args.new_pub is not None:
         if args.new_kid is None or args.new_pub is None:
             raise CliUsageError("--new-kid and --new-pub must be given together")
         if args.valid_from is None:
             raise CliUsageError("--valid-from is required when adding a new key")
         new_pub = _read_b64u_file(args.new_pub)
-        new_entry = manifests.key_entry(args.new_kid, new_pub, args.valid_from, args.valid_to)
+        new_mldsa_pub = None
+        if args.new_mldsa_pub is not None:
+            new_mldsa_pub = _read_b64u_file(args.new_mldsa_pub)
+            if len(new_mldsa_pub) != pq.ML_DSA_65_PK_LEN:
+                raise CliUsageError("new --mldsa-pub is not a 1952-byte ML-DSA-65 public key")
+        new_entry = manifests.key_entry(
+            args.new_kid,
+            new_pub,
+            args.valid_from,
+            args.valid_to,
+            pub_ml_dsa_65=new_mldsa_pub,
+        )
 
     if new_entry is None and not retire_kids and not compromise_kids:
         raise CliUsageError(
@@ -331,18 +353,13 @@ def _cmd_manifest_rotate(args: argparse.Namespace) -> int:
     except ValueError as exc:
         raise CliUsageError(str(exc)) from exc
 
-    # Backstop: the shape/pub-match guards above catch the common mistakes but
-    # not (a) a --signing-seed that isn't the entry-bound Ed25519 key, (b) an
-    # --mldsa-key whose pub matches the entry but whose sk belongs to a
-    # different key, or (c) an unknown --signing-kid absent from the manifest
-    # — all three currently produce a manifest that fails verify_key_manifest
-    # at exit 0. A correct rotation always self-verifies, so this can never
-    # reject a good rotation (adversarial re-review, Task 8 fix wave 2,
-    # important finding).
-    if not manifests.verify_key_manifest(manifest):
+    # A candidate must be self-consistent AND directly continue the input
+    # manifest: the signing key must be active in the input, its validity
+    # window must cover this issuance, and the version must advance by one.
+    if not manifests.check_continuity(existing, manifest):
         raise CliUsageError(
-            "rotation produced a manifest that does not self-verify; "
-            "check that --signing-seed and --mldsa-key match the signing key entry"
+            "rotation does not continue the input manifest: the signing key must be active "
+            "in it and the version must increment by one"
         )
 
     _write_json_file(args.out, manifest)
@@ -357,6 +374,8 @@ def _cmd_manifest_rotate(args: argparse.Namespace) -> int:
 
 
 def _cmd_manifest_artifacts(args: argparse.Namespace) -> int:
+    if _same_file_target(args.signing_seed, args.out):
+        raise CliUsageError("--signing-seed and --out must be different paths")
     artifacts = _read_json(args.artifacts)
     if not isinstance(artifacts, list):
         raise CliUsageError(f"{args.artifacts} must contain a JSON array of artifact entries")
@@ -387,6 +406,10 @@ def _cmd_manifest_artifacts(args: argparse.Namespace) -> int:
 
 
 def _cmd_issue(args: argparse.Namespace) -> int:
+    if _same_file_target(args.seed, args.out):
+        raise CliUsageError("--seed and --out must be different paths")
+    if args.salt_out is not None and _same_file_target(args.seed, args.salt_out):
+        raise CliUsageError("--seed and --salt-out must be different paths")
     if args.salt_out is not None and args.salt is None:
         raise CliUsageError("--salt-out requires --salt (nothing to write out otherwise)")
     if args.salt_out is not None and _same_file_target(args.out, args.salt_out):
@@ -398,9 +421,7 @@ def _cmd_issue(args: argparse.Namespace) -> int:
     if args.attest_version == "0.1" and args.mldsa_key is not None:
         raise CliUsageError("--mldsa-key requires --attest-version 0.2")
     if args.mldsa_key is not None and _same_file_target(args.mldsa_key, args.out):
-        # Same input-vs-output aliasing hazard as --salt/--salt-out above (finding
-        # 18 policy, extended to the new hybrid input; the pre-existing --seed-vs
-        # ---out aliasing is out of scope for this fix wave).
+        # Same input-vs-output aliasing hazard as --salt/--salt-out above.
         raise CliUsageError("--mldsa-key and --out must be different paths")
     if (
         args.mldsa_key is not None
@@ -734,6 +755,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--signing-seed", required=True, type=Path)
     p.add_argument("--new-kid", default=None, help="kid of a new key to add (with --new-pub)")
     p.add_argument("--new-pub", type=Path, default=None, help="public key file of the new key")
+    p.add_argument(
+        "--new-mldsa-pub",
+        type=Path,
+        default=None,
+        help="ML-DSA-65 public key file for the new key; makes the new entry hybrid — "
+        "requires --new-pub",
+    )
     p.add_argument("--valid-from", default=None, help="required only when adding a new key")
     p.add_argument("--valid-to", default=None)
     p.add_argument(
