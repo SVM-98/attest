@@ -1,0 +1,12 @@
+{
+  "binding": "not_checked",
+  "errors_contains": [
+    "hybrid envelope requires algs Ed25519 and ML-DSA-65 in order"
+  ],
+  "ok": false,
+  "revocation": "unknown",
+  "schema": "not_checked",
+  "signature": "invalid",
+  "trust": "verified",
+  "warnings": []
+}
