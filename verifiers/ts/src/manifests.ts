@@ -78,7 +78,7 @@ export function withinValidity(issuedAt: unknown, entry: JsonObject): boolean {
   if (issued === null || from === null) return false
   if (issued < from) return false
   const to = entry['valid_to']
-  if (to === null) return true
+  if (to === null || to === undefined) return true
   const toMs = parseStrictUtc(to)
   if (toMs === null) return false
   return issued <= toMs
@@ -90,7 +90,7 @@ function withinReleaseWindow(at: unknown, entry: JsonObject): boolean {
   if (t === null || from === null) return false
   if (t < from) return false
   const to = entry['valid_to']
-  if (to === null) return true
+  if (to === null || to === undefined) return true
   const toMs = parseStrictUtc(to)
   return toMs !== null && t <= toMs
 }

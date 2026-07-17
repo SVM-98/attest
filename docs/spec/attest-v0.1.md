@@ -187,7 +187,7 @@ Key-entry object (`keys[]`):
 | `kid` | string, `<issuer-domain>/keys/<label>#<name>` | REQUIRED | Domain prefix (text before the first `/`) MUST equal `issuer`. |
 | `pub` | string, base64url, 32 decoded bytes | REQUIRED | Ed25519 public key. |
 | `valid_from` | string, UTC `Z` timestamp | REQUIRED | |
-| `valid_to` | string, UTC `Z` timestamp, or `null` | REQUIRED | `null` = open-ended. |
+| `valid_to` | string, UTC `Z` timestamp, or `null` | OPTIONAL | Absent or `null` = open-ended (no upper bound). |
 | `status` | enum `active` \| `retired` \| `compromised` | REQUIRED | See §7.3. |
 
 **Non-normative note:** the design's illustrative manifest JSON (design §5) also shows a per-key `alg` member; the reference implementation and every shipped vector omit it, because v0.1 fixes exactly one algorithm (Ed25519, §10) for the whole manifest scope — a per-key `alg` would be redundant. This specification follows the implementation: `keys[]` entries carry no `alg` member.

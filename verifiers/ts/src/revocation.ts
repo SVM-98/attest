@@ -29,7 +29,7 @@ export function verifyRecordSignature(record: JsonObject, keyManifest: JsonObjec
     const from = parseStrictUtc(entry['valid_from'])
     if (at === null || from === null || at < from) return false
     const to = entry['valid_to']
-    if (to !== null) { const toMs = parseStrictUtc(to); if (toMs === null || at > toMs) return false }
+    if (to !== null && to !== undefined) { const toMs = parseStrictUtc(to); if (toMs === null || at > toMs) return false }
     const pub = entry['pub']
     if (typeof pub !== 'string') return false
     return verifyStrict(signableRecordBytes(record), b64uDecode(sig['sig']), b64uDecode(pub))
