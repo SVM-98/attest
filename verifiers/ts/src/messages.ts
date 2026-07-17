@@ -5,6 +5,8 @@
 export function pyRepr(x: unknown): string {
   if (typeof x === 'string') return `'${x}'`
   if (x === null || x === undefined) return 'None'
+  if (typeof x === 'boolean') return x ? 'True' : 'False'
+  if (Array.isArray(x)) return `[${x.map(pyRepr).join(', ')}]`
   return String(x)
 }
 
@@ -20,6 +22,13 @@ export const ERR = {
   FLOATS_NOT_ALLOWED: 'floats are not allowed in the attest-JCS profile',
   LONE_SURROGATE: 'lone surrogate not allowed in the attest-JCS profile',
   TYPE_NOT_JSON: 'type not representable in JSON',
+  // v0.2 hybrid envelope (Ed25519 + ML-DSA-65) — byte-identical to verify.py.
+  hybridSigCount: 'hybrid envelope requires exactly two signatures',
+  hybridAlgs: 'hybrid envelope requires algs Ed25519 and ML-DSA-65 in order',
+  hybridKidShared: 'hybrid envelope signatures must share a single kid',
+  hybridKidType: "malformed signature block: 'kid' must be a string",
+  hybridSigType: "malformed signature block: 'sig' must be a string",
+  mldsaSigInvalid: 'ML-DSA-65 signature verification failed',
 } as const
 
 export const WARN = {
@@ -37,6 +46,7 @@ export const keyRetired = (kid: string) => `key ${kid} is retired`
 export const issuedAtOutsideWindow = (issuedAt: unknown) => `issued_at ${pyRepr(issuedAt)} outside key validity window`
 export const malformedKeyMaterial = (msg: string) => `malformed key material: ${msg}`
 export const malformedSigMaterial = (msg: string) => `malformed signature material: ${msg}`
+export const keyEntryNotHybrid = (kid: string) => `key entry for kid ${pyRepr(kid)} has no ML-DSA-65 public key`
 
 // canon (CanonError messages)
 export const duplicateKey = (k: string) => `duplicate object key: ${pyRepr(k)}`
