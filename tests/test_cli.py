@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from attest import cli, keys, revocation
+from attest import cli, keys, pq, revocation
 from tests.helpers import make_payload
 
 ISSUER = "store.example.com"
@@ -36,6 +36,26 @@ def _keygen(tmp_path: Path, name: str) -> tuple[Path, Path]:
     rc = cli.main(["keygen", "--seed-out", str(seed_out), "--pub-out", str(pub_out)])
     assert rc == 0
     return seed_out, pub_out
+
+
+def _keygen_hybrid(tmp_path: Path, name: str) -> tuple[Path, Path, Path]:
+    seed_out = tmp_path / f"{name}.seed"
+    pub_out = tmp_path / f"{name}.pub"
+    mldsa_out = tmp_path / f"{name}.mldsa"
+    rc = cli.main(
+        [
+            "keygen",
+            "--seed-out",
+            str(seed_out),
+            "--pub-out",
+            str(pub_out),
+            "--hybrid",
+            "--mldsa-out",
+            str(mldsa_out),
+        ]
+    )
+    assert rc == 0
+    return seed_out, pub_out, mldsa_out
 
 
 def _manifest_init(tmp_path: Path, seed: Path, out_name: str = "manifest.json") -> Path:
@@ -1033,3 +1053,127 @@ def test_manifest_rotate_compromising_signing_key_exits_2(tmp_path: Path, capsys
     )
     assert rc == 2
     assert capsys.readouterr().err != ""
+
+
+# --- hybrid (v0.2) CLI support -------------------------------------------------
+
+
+def test_keygen_hybrid_writes_0600_mldsa_file(tmp_path: Path) -> None:
+    _seed_out, _pub_out, mldsa_out = _keygen_hybrid(tmp_path, "issuer")
+
+    mode = stat.S_IMODE(mldsa_out.stat().st_mode)
+    assert mode == 0o600
+
+    key_file = json.loads(mldsa_out.read_text(encoding="utf-8"))
+    assert key_file["alg"] == "ML-DSA-65"
+    assert len(keys.b64u_decode(key_file["sk"])) == pq.ML_DSA_65_SK_LEN
+    assert len(keys.b64u_decode(key_file["pub"])) == pq.ML_DSA_65_PK_LEN
+
+
+def test_issue_v02_roundtrips_through_verify(tmp_path: Path, capsys: CapSys) -> None:
+    seed_out, _pub_out, mldsa_out = _keygen_hybrid(tmp_path, "issuer")
+
+    manifest_path = tmp_path / "manifest.json"
+    rc = cli.main(
+        [
+            "manifest",
+            "init",
+            "--issuer",
+            ISSUER,
+            "--kid",
+            KID,
+            "--seed",
+            str(seed_out),
+            "--mldsa-key",
+            str(mldsa_out),
+            "--valid-from",
+            VALID_FROM,
+            "--issued-at",
+            VALID_FROM,
+            "--out",
+            str(manifest_path),
+        ]
+    )
+    assert rc == 0
+
+    payload_path = _write_payload(tmp_path, attest_version="0.2")
+    envelope_path = tmp_path / "envelope.json"
+    rc = cli.main(
+        [
+            "issue",
+            "--payload",
+            str(payload_path),
+            "--seed",
+            str(seed_out),
+            "--mldsa-key",
+            str(mldsa_out),
+            "--attest-version",
+            "0.2",
+            "--kid",
+            KID,
+            "--out",
+            str(envelope_path),
+        ]
+    )
+    assert rc == 0
+
+    trust_dir = _trust_dir(tmp_path, manifest_path)
+    capsys.readouterr()
+    rc = cli.main(["verify", str(envelope_path), "--trust-dir", str(trust_dir)])
+    result = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert result["ok"] is True
+    assert result["signature"] == "valid"
+
+
+def test_issue_v02_without_mldsa_key_errors(tmp_path: Path, capsys: CapSys) -> None:
+    seed, _pub = _keygen(tmp_path, "issuer")
+    payload_path = _write_payload(tmp_path, attest_version="0.2")
+    out = tmp_path / "envelope.json"
+
+    rc = cli.main(
+        [
+            "issue",
+            "--payload",
+            str(payload_path),
+            "--seed",
+            str(seed),
+            "--attest-version",
+            "0.2",
+            "--kid",
+            KID,
+            "--out",
+            str(out),
+        ]
+    )
+
+    assert rc == 2
+    assert capsys.readouterr().err != ""
+    assert not out.exists()
+
+
+def test_issue_v01_with_mldsa_key_errors(tmp_path: Path, capsys: CapSys) -> None:
+    seed_out, _pub_out, mldsa_out = _keygen_hybrid(tmp_path, "issuer")
+    payload_path = _write_payload(tmp_path)  # default attest_version "0.1"
+    out = tmp_path / "envelope.json"
+
+    rc = cli.main(
+        [
+            "issue",
+            "--payload",
+            str(payload_path),
+            "--seed",
+            str(seed_out),
+            "--mldsa-key",
+            str(mldsa_out),
+            "--kid",
+            KID,
+            "--out",
+            str(out),
+        ]
+    )
+
+    assert rc == 2
+    assert capsys.readouterr().err != ""
+    assert not out.exists()
