@@ -808,3 +808,27 @@ def test_key_hash_prefix_matches_hand_computed_sha256() -> None:
         base64.b64decode(mldsa_blob_b64)[:4]
         == hashlib.sha256(b"test-log\n\xffattest-ml-dsa-65" + hk.mldsa.pub).digest()[:4]
     )
+
+
+# --- hostile-input bounds: error-message and allocation guards ---------------
+
+
+def test_parse_checkpoint_bounds_error_message_for_huge_malformed_size_line() -> None:
+    # A multi-hundred-KB malformed field must not be fully rendered into the
+    # TlogError message (repr amplification -> allocation DoS).
+    root_b64 = base64.b64encode(ROOT).decode("ascii")
+    text = f"{ORIGIN}\n{'x' * 100_000}\n{root_b64}\n\n— {LOG_NAME} AA==\n"
+    with pytest.raises(tlog.TlogError) as exc_info:
+        tlog.parse_checkpoint(text)
+    assert len(str(exc_info.value)) < 200
+
+
+def test_parse_checkpoint_rejects_oversized_signature_blob_before_decoding() -> None:
+    # Base64 length is checked BEFORE b64decode so a hostile multi-megabyte
+    # blob never gets decoded into a large allocation.
+    huge_b64 = "A" * (tlog._MAX_SIG_B64_LEN + 4)
+    text = f"{ORIGIN}\n3\n{base64.b64encode(ROOT).decode('ascii')}\n\n— {LOG_NAME} {huge_b64}\n"
+    with pytest.raises(tlog.TlogError) as exc_info:
+        tlog.parse_checkpoint(text)
+    assert "exceeds" in str(exc_info.value)
+    assert len(str(exc_info.value)) < 200
