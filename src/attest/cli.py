@@ -53,6 +53,19 @@ class CliUsageError(Exception):
 # --- small I/O helpers -------------------------------------------------------
 
 
+def _same_file_target(a: Path, b: Path) -> bool:
+    """True if `a` and `b` denote the same file: identical resolved path
+    (covers relative paths and symlinks, even for a path that does not exist
+    yet) OR the same existing inode (covers hard links, which resolve()
+    cannot see). Fail-safe: a stat error means 'not provably the same'."""
+    if a.resolve() == b.resolve():
+        return True
+    try:
+        return a.samefile(b)
+    except OSError:
+        return False
+
+
 def _read_json(path: Path) -> Any:
     try:
         text = path.read_text(encoding="utf-8")
@@ -169,7 +182,7 @@ def _safe_name(value: str) -> str:
 
 
 def _cmd_keygen(args: argparse.Namespace) -> int:
-    if args.seed_out.resolve() == args.pub_out.resolve():
+    if _same_file_target(args.seed_out, args.pub_out):
         # Aliased outputs would overwrite the seed with the pubkey (2026-07-13
         # review, finding 18).
         raise CliUsageError("--seed-out and --pub-out must be different paths")
@@ -178,8 +191,8 @@ def _cmd_keygen(args: argparse.Namespace) -> int:
     if not args.hybrid and args.mldsa_out is not None:
         raise CliUsageError("--mldsa-out requires --hybrid")
     if args.mldsa_out is not None and (
-        args.mldsa_out.resolve() == args.seed_out.resolve()
-        or args.mldsa_out.resolve() == args.pub_out.resolve()
+        _same_file_target(args.mldsa_out, args.seed_out)
+        or _same_file_target(args.mldsa_out, args.pub_out)
     ):
         # Same aliasing hazard as --seed-out/--pub-out above (2026-07-13 review,
         # finding 18), extended to the new ML-DSA output (fix wave, Task 8).
@@ -213,7 +226,7 @@ def _cmd_keygen(args: argparse.Namespace) -> int:
 
 
 def _cmd_manifest_init(args: argparse.Namespace) -> int:
-    if args.mldsa_key is not None and args.mldsa_key.resolve() == args.out.resolve():
+    if args.mldsa_key is not None and _same_file_target(args.mldsa_key, args.out):
         # Reading --mldsa-key then writing --out to the same path would clobber
         # the freshly-read ML-DSA secret file (finding 18 policy, extended to the
         # new hybrid input; the pre-existing --seed-vs---out aliasing is out of
@@ -238,7 +251,7 @@ def _cmd_manifest_init(args: argparse.Namespace) -> int:
 
 
 def _cmd_manifest_rotate(args: argparse.Namespace) -> int:
-    if args.mldsa_key is not None and args.mldsa_key.resolve() == args.out.resolve():
+    if args.mldsa_key is not None and _same_file_target(args.mldsa_key, args.out):
         # Same input-vs-output aliasing hazard as manifest init/issue (finding 18
         # policy, extended to the new hybrid input).
         raise CliUsageError("--mldsa-key and --out must be different paths")
@@ -376,7 +389,7 @@ def _cmd_manifest_artifacts(args: argparse.Namespace) -> int:
 def _cmd_issue(args: argparse.Namespace) -> int:
     if args.salt_out is not None and args.salt is None:
         raise CliUsageError("--salt-out requires --salt (nothing to write out otherwise)")
-    if args.salt_out is not None and args.out.resolve() == args.salt_out.resolve():
+    if args.salt_out is not None and _same_file_target(args.out, args.salt_out):
         # Aliased outputs would overwrite the receipt with the raw salt (2026-07-13
         # review, finding 18).
         raise CliUsageError("--out and --salt-out must be different paths")
@@ -384,7 +397,7 @@ def _cmd_issue(args: argparse.Namespace) -> int:
         raise CliUsageError("--attest-version 0.2 requires --mldsa-key")
     if args.attest_version == "0.1" and args.mldsa_key is not None:
         raise CliUsageError("--mldsa-key requires --attest-version 0.2")
-    if args.mldsa_key is not None and args.mldsa_key.resolve() == args.out.resolve():
+    if args.mldsa_key is not None and _same_file_target(args.mldsa_key, args.out):
         # Same input-vs-output aliasing hazard as --salt/--salt-out above (finding
         # 18 policy, extended to the new hybrid input; the pre-existing --seed-vs
         # ---out aliasing is out of scope for this fix wave).
@@ -392,7 +405,7 @@ def _cmd_issue(args: argparse.Namespace) -> int:
     if (
         args.mldsa_key is not None
         and args.salt_out is not None
-        and args.mldsa_key.resolve() == args.salt_out.resolve()
+        and _same_file_target(args.mldsa_key, args.salt_out)
     ):
         # Same input-vs-output aliasing hazard, extended to --salt-out: reading
         # --mldsa-key then overwriting it with the raw salt at exit 0 would
