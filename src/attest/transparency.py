@@ -66,7 +66,7 @@ from __future__ import annotations
 import datetime
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from attest import anchor, tlog
 
@@ -104,7 +104,10 @@ _WARN_CONSISTENCY_PROOF_MISSING = "consistency_proof_missing"
 _WARN_CONSISTENCY_PROOF_INVALID = "consistency_proof_invalid"
 _WARN_CONSISTENCY_PROOF_TOO_LONG = "consistency_proof_too_long"
 _WARN_EQUIVOCATION_DETECTED = "log_equivocation_detected"
+_WARN_ANCHORS_INVALID = "anchors_invalid"
+_WARN_ANCHOR_TIME_INVALID = "anchor_time_invalid"
 _WARN_POST_HORIZON_UNANCHORED = "post_horizon_unanchored"
+_WARN_EVIDENCE_EVALUATION_FAILED = "evidence_evaluation_failed"
 
 
 class TransparencyError(ValueError):
@@ -137,39 +140,53 @@ def _not_checked(warning: str) -> TransparencyResult:
     )
 
 
-def _iso8601(unix_time: int) -> str:
+def _iso8601(unix_time: int) -> str | None:
     """Render a unix-seconds timestamp as `YYYY-MM-DDTHH:MM:SSZ` (UTC).
 
     KAT: `1700000000 -> "2023-11-14T22:13:20Z"`.
+
+    Returns `None` if the platform cannot render the supplied timestamp.
+    Verified anchor times are bounded in `anchor._validate_policy`, but this
+    remains a defensive containment for future anchor-verdict paths.
     """
-    return datetime.datetime.fromtimestamp(unix_time, tz=datetime.UTC).strftime(
-        "%Y-%m-%dT%H:%M:%SZ"
-    )
+    try:
+        return datetime.datetime.fromtimestamp(unix_time, tz=datetime.UTC).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+    except (ValueError, OverflowError, OSError):
+        return None
 
 
 def _validate_log_keys(log_keys: object) -> list[tlog.LogKey]:
-    """Trusted arg: raises `TransparencyError` rather than degrading."""
-    if not isinstance(log_keys, list) or not all(isinstance(k, tlog.LogKey) for k in log_keys):
+    """Deep-validate the trusted pinned-key list."""
+    if not isinstance(log_keys, list):
         raise TransparencyError(f"log_keys must be a list of LogKey, got {type(log_keys).__name__}")
-    return log_keys
+    try:
+        return [tlog._validate_log_key(log_key) for log_key in log_keys]
+    except tlog.TlogError as exc:
+        raise TransparencyError(str(exc)) from exc
 
 
 def _validate_expected_origin(expected_origin: object) -> str:
-    if not isinstance(expected_origin, str):
-        raise TransparencyError(
-            f"expected_origin must be a str, got {type(expected_origin).__name__}"
-        )
-    return expected_origin
+    try:
+        return tlog._validate_origin(expected_origin, "expected_origin")
+    except tlog.TlogError as exc:
+        raise TransparencyError(str(exc)) from exc
 
 
 def _validate_policy(policy: object) -> anchor.AnchorPolicy:
-    if not isinstance(policy, anchor.AnchorPolicy):
-        raise TransparencyError(f"policy must be an AnchorPolicy, got {type(policy).__name__}")
-    return policy
+    try:
+        return anchor._validate_policy(policy)
+    except anchor.AnchorError as exc:
+        raise TransparencyError(str(exc)) from exc
 
 
 def _validate_expected_entry(expected_entry: object) -> dict[str, Any]:
-    if not isinstance(expected_entry, dict):
+    try:
+        tlog.encode_entry(cast(dict[str, Any], expected_entry))
+    except tlog.TlogError as exc:
+        raise TransparencyError(str(exc)) from exc
+    if not isinstance(expected_entry, dict):  # defensive: encode_entry has already rejected this.
         raise TransparencyError(
             f"expected_entry must be a dict, got {type(expected_entry).__name__}"
         )
@@ -215,27 +232,14 @@ def _find_verified_checkpoint(
     return None
 
 
-def evaluate_transparency(
-    evidence: dict[str, Any],
+def _evaluate_untrusted_evidence(
+    evidence: object,
     *,
     log_keys: list[tlog.LogKey],
     expected_origin: str,
     policy: anchor.AnchorPolicy,
     expected_entry: dict[str, Any],
 ) -> TransparencyResult:
-    """Evaluate one untrusted transparency/corroboration evidence bundle.
-
-    NEVER raises because of `evidence` — every malformation degrades to
-    `TRANSPARENCY_NOT_CHECKED`/`CORROBORATION_NONE` with a warning naming the
-    condition, per the decision order in the module docstring. Raises
-    `TransparencyError` if `log_keys`, `expected_origin`, `policy`, or
-    `expected_entry` — the trusted, verifier-config side — is malformed.
-    """
-    log_keys = _validate_log_keys(log_keys)
-    expected_origin = _validate_expected_origin(expected_origin)
-    policy = _validate_policy(policy)
-    expected_entry = _validate_expected_entry(expected_entry)
-
     if not isinstance(evidence, dict):
         return _not_checked(_WARN_EVIDENCE_INVALID)
 
@@ -287,16 +291,16 @@ def evaluate_transparency(
     # --- Step 4: an optional prior checkpoint claim. A validly-signed prior
     # whose consistency check fails is proof of equivocation (hard verdict);
     # anything else that prevents evaluating the claim is fail-safe. ---
-    prior_checkpoint_text = evidence.get("prior_checkpoint")
-    if prior_checkpoint_text is not None:
+    if "prior_checkpoint" in evidence:
+        prior_checkpoint_text = evidence.get("prior_checkpoint")
         prior_checkpoint = _find_verified_checkpoint(
             prior_checkpoint_text, matching_keys, expected_origin
         )
         if prior_checkpoint is None:
             return _not_checked(_WARN_PRIOR_CHECKPOINT_INVALID)
-        raw_consistency_proof = evidence.get("consistency_proof")
-        if raw_consistency_proof is None:
+        if "consistency_proof" not in evidence:
             return _not_checked(_WARN_CONSISTENCY_PROOF_MISSING)
+        raw_consistency_proof = evidence.get("consistency_proof")
         if not isinstance(raw_consistency_proof, list):
             return _not_checked(_WARN_CONSISTENCY_PROOF_INVALID)
         if len(raw_consistency_proof) > _MAX_PROOF_LEN:
@@ -316,6 +320,9 @@ def evaluate_transparency(
                 corroboration=CORROBORATION_NONE,
                 warnings=[_WARN_EQUIVOCATION_DETECTED],
             )
+    elif "consistency_proof" in evidence:
+        if not isinstance(evidence.get("consistency_proof"), list):
+            return _not_checked(_WARN_CONSISTENCY_PROOF_INVALID)
 
     # --- Step 5: base standing. ---
     transparency_state = TRANSPARENCY_LOGGED
@@ -325,12 +332,22 @@ def evaluate_transparency(
     # --- Step 6: an optional anchor claim upgrades transparency_state if a
     # PQ-surviving proof verifies. ---
     anchor_verdict: anchor.AnchorVerdict | None = None
-    anchors_evidence = evidence.get("anchors")
-    if anchors_evidence is not None:
+    if "anchors" in evidence:
+        anchors_evidence = evidence.get("anchors")
+        if not isinstance(anchors_evidence, dict):
+            return _not_checked(_WARN_ANCHORS_INVALID)
         anchor_verdict = anchor.verify_anchor(anchors_evidence, checkpoint, policy)
         warnings.extend(anchor_verdict.warnings)
         if anchor_verdict.pq_surviving and anchor_verdict.anchored_before is not None:
-            transparency_state = f"anchored_before:{_iso8601(anchor_verdict.anchored_before)}"
+            rendered_anchor_time = _iso8601(anchor_verdict.anchored_before)
+            if rendered_anchor_time is None:
+                warnings.append(_WARN_ANCHOR_TIME_INVALID)
+                return TransparencyResult(
+                    transparency=TRANSPARENCY_NOT_CHECKED,
+                    corroboration=CORROBORATION_NONE,
+                    warnings=warnings,
+                )
+            transparency_state = f"anchored_before:{rendered_anchor_time}"
 
     # --- Step 7: a declared CRQC horizon caps standing back down unless a
     # PQ-surviving anchor lands strictly before it. `anchor.passes_horizon`
@@ -352,3 +369,38 @@ def evaluate_transparency(
     return TransparencyResult(
         transparency=transparency_state, corroboration=corroboration_state, warnings=warnings
     )
+
+
+def evaluate_transparency(
+    evidence: dict[str, Any],
+    *,
+    log_keys: list[tlog.LogKey],
+    expected_origin: str,
+    policy: anchor.AnchorPolicy,
+    expected_entry: dict[str, Any],
+) -> TransparencyResult:
+    """Evaluate one untrusted transparency/corroboration evidence bundle.
+
+    Raises `TransparencyError` for a malformed trusted argument. Once those
+    arguments validate, no behavior supplied by `evidence` may escape this
+    boundary as an exception.
+    """
+    log_keys = _validate_log_keys(log_keys)
+    expected_origin = _validate_expected_origin(expected_origin)
+    policy = _validate_policy(policy)
+    expected_entry = _validate_expected_entry(expected_entry)
+
+    try:
+        return _evaluate_untrusted_evidence(
+            evidence,
+            log_keys=log_keys,
+            expected_origin=expected_origin,
+            policy=policy,
+            expected_entry=expected_entry,
+        )
+    # This is deliberate adversarial-boundary confinement, not lazy error
+    # handling: hostile dict `get`/`__getitem__`/`__eq__` implementations can
+    # raise outside the precise shape-error catches above. Never catch
+    # BaseException, so interrupts and process-control exceptions still work.
+    except Exception:
+        return _not_checked(_WARN_EVIDENCE_EVALUATION_FAILED)

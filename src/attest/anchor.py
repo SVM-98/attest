@@ -63,6 +63,9 @@ _MAX_OPS_PER_PROOF = 64
 # force large parse-time allocations.
 _MAX_CHECKPOINT_TEXT_LEN = 500_000
 _MAX_OP_HEX_LEN = 2048  # hex chars (1024 bytes) per append/prepend operand
+# `datetime` can render through 9999-12-31T23:59:59Z, but no later Unix
+# timestamp. Keep pinned and untrusted proof times inside that shared bound.
+_MAX_RENDERABLE_UNIX_TIME = 253402300799
 
 _KNOWN_OTS_OPS = frozenset({"sha256", "append", "prepend"})
 
@@ -164,8 +167,15 @@ def _validate_policy(policy: object) -> AnchorPolicy:
             raise AnchorError(
                 f"PinnedHeader.merkle_root must be 64 lowercase hex chars: {header.merkle_root!r}"
             )
-        if not isinstance(header.time, int) or isinstance(header.time, bool) or header.time <= 0:
-            raise AnchorError(f"PinnedHeader.time must be a positive int: {header.time!r}")
+        if (
+            not isinstance(header.time, int)
+            or isinstance(header.time, bool)
+            or not 0 < header.time <= _MAX_RENDERABLE_UNIX_TIME
+        ):
+            raise AnchorError(
+                "PinnedHeader.time must be a positive int no later than "
+                f"{_MAX_RENDERABLE_UNIX_TIME}: {header.time!r}"
+            )
     if policy.crqc_horizon is not None and (
         not isinstance(policy.crqc_horizon, int) or isinstance(policy.crqc_horizon, bool)
     ):
@@ -222,8 +232,17 @@ def _verify_ots_proof(
     if not isinstance(header_hash, str) or not _HEX64_RE.fullmatch(header_hash):
         return False, 0, "ots proof 'header_hash' must be 64 lowercase hex chars"
     header_time = proof.get("header_time")
-    if not isinstance(header_time, int) or isinstance(header_time, bool) or header_time <= 0:
-        return False, 0, "ots proof 'header_time' must be a positive int"
+    if (
+        not isinstance(header_time, int)
+        or isinstance(header_time, bool)
+        or not 0 < header_time <= _MAX_RENDERABLE_UNIX_TIME
+    ):
+        return (
+            False,
+            0,
+            "ots proof 'header_time' must be a positive int no later than "
+            f"{_MAX_RENDERABLE_UNIX_TIME}",
+        )
 
     accumulator = accumulator_start
     for op in ops:
