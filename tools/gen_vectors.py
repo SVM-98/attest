@@ -61,7 +61,11 @@ import unicodedata
 from pathlib import Path
 from typing import Any
 
-from attest import canon, commitment, issue, keys, manifests, revocation, ulid, validate
+from dilithium_py.ml_dsa import (
+    ML_DSA_65,
+)  # DEV-ONLY oracle: deterministic vector material; runtime uses pqcrypto/@noble
+
+from attest import canon, commitment, issue, keys, manifests, pq, revocation, ulid, validate
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 VECTORS_DIR = REPO_ROOT / "docs" / "spec" / "vectors"
@@ -158,6 +162,15 @@ SUPPLEMENTARY_TITLE = (
 )
 
 
+# --- vector 26 (hybrid conformance) additional fixed inputs -----------------
+#
+# ML-DSA-65 vector key material via `ML_DSA_65.key_derive` (deterministic, dev
+# oracle only) — `bytes([26]) * 32`, continuing the seed-byte-value numbering
+# scheme used for Ed25519 keys above (1/2/3/4/5/6/9 already taken).
+
+HYBRID_MLDSA_PK, HYBRID_MLDSA_SK = ML_DSA_65.key_derive(bytes([26]) * 32)
+
+
 # --- generic helpers --------------------------------------------------------
 
 
@@ -214,6 +227,67 @@ def _manifest_material(
 ) -> dict[str, Any]:
     entries = [manifests.key_entry(kid, kp.pub, KEY_VALID_FROM, None, status)]
     return manifests.build_key_manifest(issuer_id, 1, MANIFEST_ISSUED_AT, entries, kp, kid)
+
+
+def _oracle_sign(msg: bytes) -> bytes:
+    """DEV-ONLY: deterministic ML-DSA-65 signing for vector generation only
+    (`pq.sign`/pqcrypto is non-deterministic — verified live 2026-07-17 —
+    so it can never produce byte-reproducible vector material). Runtime
+    verification of these signatures still goes through `pq.verify_strict`
+    (pqcrypto), cross-checked against this oracle's output at generation time."""
+    return ML_DSA_65.sign(HYBRID_MLDSA_SK, msg, deterministic=True)
+
+
+def _hybrid_key_entry(
+    kid: str, ed_kp: keys.SigningKeyPair, status: str = "active"
+) -> dict[str, Any]:
+    return manifests.key_entry(
+        kid, ed_kp.pub, KEY_VALID_FROM, None, status, pub_ml_dsa_65=HYBRID_MLDSA_PK
+    )
+
+
+def _hybrid_manifest(
+    issuer_id: str,
+    kid: str,
+    ed_kp: keys.SigningKeyPair,
+    version: int = 1,
+    issued_at: str = MANIFEST_ISSUED_AT,
+    status: str = "active",
+) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "issuer": issuer_id,
+        "manifest_version": version,
+        "issued_at": issued_at,
+        "keys": [_hybrid_key_entry(kid, ed_kp, status)],
+    }
+    signable = manifests._signable(body)
+    body["manifest_signature"] = {
+        "kid": kid,
+        "sig": keys.b64u(keys.sign(signable, ed_kp)),
+        "sig_ml_dsa_65": keys.b64u(_oracle_sign(signable)),
+    }
+    return body
+
+
+def _hybrid_envelope(
+    payload: dict[str, Any], ed_kp: keys.SigningKeyPair, kid: str
+) -> dict[str, Any]:
+    canonical = canon.canonical_bytes(payload)
+    return {
+        "payload": payload,
+        "signatures": [
+            {"kid": kid, "alg": "Ed25519", "sig": keys.b64u(keys.sign(canonical, ed_kp))},
+            {"kid": kid, "alg": pq.ML_DSA_65_ALG, "sig": keys.b64u(_oracle_sign(canonical))},
+        ],
+    }
+
+
+def _flip_sig_byte(sig_b64u: str) -> str:
+    """Corrupt a b64u-encoded signature by flipping one byte, re-encoded —
+    used to build the tampered-leg vectors (26b/26c)."""
+    raw = bytearray(keys.b64u_decode(sig_b64u))
+    raw[0] ^= 0xFF
+    return keys.b64u(bytes(raw))
 
 
 def _trust_material(
@@ -1677,6 +1751,196 @@ def gen_25_schema_parity() -> None:
     )
 
 
+# --- vector 26: hybrid (v0.2 Ed25519+ML-DSA-65) conformance (8 sub-cases) ----
+
+
+def gen_26_hybrid() -> None:
+    """v0.2 hybrid envelope conformance (design Task 8/9): the receipt carries
+    two ordered signatures over the same canonical payload bytes, Ed25519
+    then ML-DSA-65, both required (AND semantics, `verify.py` §step-1
+    hybrid path). ML-DSA-65 signing here goes through the deterministic
+    dev oracle (`dilithium_py`, `_oracle_sign`), never `pq.sign`/pqcrypto
+    (verified non-deterministic live 2026-07-17) — `issue.issue()` and
+    `manifests.build_key_manifest`'s hybrid path are therefore never used
+    to produce vector material; every hybrid envelope/manifest below is
+    built by the local `_hybrid_envelope`/`_hybrid_manifest` helpers instead."""
+    assert manifests.verify_key_manifest(_hybrid_manifest(ISSUER_ID, ISSUER_KID, ISSUER_KP))
+
+    payload = issue.build_payload(**_base_payload_kwargs(attest_version="0.2"))
+    _assert_schema_valid(payload)
+    hybrid_manifest = _hybrid_manifest(ISSUER_ID, ISSUER_KID, ISSUER_KP)
+    hybrid_trust = _trust_material((ISSUER_ID, hybrid_manifest, "tls"))
+
+    # (a) all-valid baseline.
+    envelope_a = _hybrid_envelope(payload, ISSUER_KP, ISSUER_KID)
+    expected_a = {
+        "signature": "valid",
+        "schema": "valid",
+        "revocation": "unknown",
+        "binding": "not_checked",
+        "trust": "verified",
+        "ok": True,
+        "errors": [],
+        "warnings": [],
+    }
+    write_vector(
+        "26-hybrid/a-valid-hybrid",
+        payload=payload,
+        envelope=envelope_a,
+        envelope_raw=None,
+        trust=hybrid_trust,
+        expected=expected_a,
+    )
+
+    invalid_hybrid_base = {
+        "signature": "invalid",
+        "schema": "not_checked",
+        "revocation": "unknown",
+        "binding": "not_checked",
+        "trust": "verified",
+        "ok": False,
+        "warnings": [],
+    }
+
+    # (b) Ed25519 leg tampered: the ML-DSA-65 leg alone can't save it.
+    envelope_b = copy.deepcopy(envelope_a)
+    envelope_b["signatures"][0]["sig"] = _flip_sig_byte(envelope_b["signatures"][0]["sig"])
+    expected_b = dict(invalid_hybrid_base)
+    expected_b["errors_contains"] = ["signature verification failed"]
+    write_vector(
+        "26-hybrid/b-ed25519-leg-tampered",
+        payload=None,
+        envelope=envelope_b,
+        envelope_raw=None,
+        trust=hybrid_trust,
+        expected=expected_b,
+    )
+
+    # (c) ML-DSA-65 leg tampered: the Ed25519 leg alone can't save it either.
+    envelope_c = copy.deepcopy(envelope_a)
+    envelope_c["signatures"][1]["sig"] = _flip_sig_byte(envelope_c["signatures"][1]["sig"])
+    expected_c = dict(invalid_hybrid_base)
+    expected_c["errors_contains"] = ["ML-DSA-65 signature verification failed"]
+    write_vector(
+        "26-hybrid/c-mldsa-leg-tampered",
+        payload=None,
+        envelope=envelope_c,
+        envelope_raw=None,
+        trust=hybrid_trust,
+        expected=expected_c,
+    )
+
+    # (d) ML-DSA-65 leg entirely missing: only one signature entry present.
+    envelope_d = copy.deepcopy(envelope_a)
+    envelope_d["signatures"] = envelope_d["signatures"][:1]
+    expected_d = dict(invalid_hybrid_base)
+    expected_d["errors_contains"] = ["hybrid envelope requires exactly two signatures"]
+    write_vector(
+        "26-hybrid/d-mldsa-leg-missing",
+        payload=None,
+        envelope=envelope_d,
+        envelope_raw=None,
+        trust=hybrid_trust,
+        expected=expected_d,
+    )
+
+    # (e) both legs claim alg "Ed25519" — order/identity of algs is pinned,
+    # never inferred from the second entry's own claim.
+    envelope_e = copy.deepcopy(envelope_a)
+    envelope_e["signatures"][1]["alg"] = "Ed25519"
+    expected_e = dict(invalid_hybrid_base)
+    expected_e["errors_contains"] = ["hybrid envelope requires algs Ed25519 and ML-DSA-65 in order"]
+    write_vector(
+        "26-hybrid/e-duplicate-ed25519-alg",
+        payload=None,
+        envelope=envelope_e,
+        envelope_raw=None,
+        trust=hybrid_trust,
+        expected=expected_e,
+    )
+
+    # (f) the two legs claim different kids.
+    envelope_f = copy.deepcopy(envelope_a)
+    envelope_f["signatures"][1]["kid"] = ISSUER_KID + "#ml-dsa"
+    expected_f = dict(invalid_hybrid_base)
+    expected_f["errors_contains"] = ["hybrid envelope signatures must share a single kid"]
+    write_vector(
+        "26-hybrid/f-kid-mismatch-between-legs",
+        payload=None,
+        envelope=envelope_f,
+        envelope_raw=None,
+        trust=hybrid_trust,
+        expected=expected_f,
+    )
+
+    # (g) a structurally valid hybrid envelope, but the resolved key entry is
+    # Ed25519-only (no `pub_ml_dsa_65`) — the second leg has nothing to verify
+    # against. Substring-only errors_contains (no rendered kid): Python's
+    # `{kid!r}` repr and the TS verifier's pyRepr-equivalent are a known,
+    # deferred cross-language divergence (2026-07-13 review) — asserting the
+    # kid-free suffix keeps this leaf parity-safe across both runtimes.
+    ed_only_manifest = _manifest_material(ISSUER_ID, ISSUER_KID, ISSUER_KP)
+    expected_g = dict(invalid_hybrid_base)
+    expected_g["errors_contains"] = ["has no ML-DSA-65 public key"]
+    write_vector(
+        "26-hybrid/g-key-entry-not-hybrid",
+        payload=None,
+        envelope=envelope_a,
+        envelope_raw=None,
+        trust=_trust_material((ISSUER_ID, ed_only_manifest, "tls")),
+        expected=expected_g,
+    )
+
+    # (h) manifest rotation continuity broken by a downgraded (ed-only)
+    # `manifest_signature` on the candidate — the single-manifest RECEIPT
+    # path never self-verifies the trust manifest (TOFU §5), so this
+    # downgrade is only caught via CONTINUITY (`check_continuity` ->
+    # `_verify_signature_block`), not by rejecting the receipt itself: the
+    # receipt's own hybrid signature (against v2's still-hybrid key entry)
+    # verifies cleanly, and `trust` alone is forced down to
+    # "unverified_rotation" (mirrors 14b: a downgrade signal, not a
+    # rejection — `ok` excludes `trust` by spec).
+    v1 = _hybrid_manifest(ISSUER_ID, ISSUER_KID, ISSUER_KP, version=1)
+    v2_body: dict[str, Any] = {
+        "issuer": ISSUER_ID,
+        "manifest_version": 2,
+        "issued_at": ROTATION_ISSUED_AT,
+        "keys": [_hybrid_key_entry(ISSUER_KID, ISSUER_KP, status="active")],
+    }
+    v2_signable = manifests._signable(v2_body)
+    v2 = dict(v2_body)
+    v2["manifest_signature"] = {
+        "kid": ISSUER_KID,
+        "sig": keys.b64u(keys.sign(v2_signable, ISSUER_KP)),  # ed-only: sig_ml_dsa_65 omitted
+    }
+    assert manifests.check_continuity(v1, v2) is False  # downgrade breaks continuity
+
+    payload_h = issue.build_payload(
+        **_base_payload_kwargs(attest_version="0.2", issued_at=RECEIPT_ISSUED_AFTER_ROTATION)
+    )
+    _assert_schema_valid(payload_h)
+    envelope_h = _hybrid_envelope(payload_h, ISSUER_KP, ISSUER_KID)
+    trust_h = _trust_material((ISSUER_ID, v2, "tls"), chains={ISSUER_ID: [v1, v2]})
+    expected_h = {
+        "signature": "valid",
+        "schema": "valid",
+        "revocation": "unknown",
+        "binding": "not_checked",
+        "trust": "unverified_rotation",
+        "ok": True,
+        "errors": [],
+        "warnings": [],
+    }
+    write_vector(
+        "26-hybrid/h-manifest-downgraded-continuity",
+        payload=payload_h,
+        envelope=envelope_h,
+        envelope_raw=None,
+        trust=trust_h,
+        expected=expected_h,
+    )
+
+
 def main() -> None:
     _clear_leaf_dirs(VECTORS_DIR)
     VECTORS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1706,6 +1970,7 @@ def main() -> None:
     gen_23_revocation_refund_window()
     gen_24_canonical_roundtrip()
     gen_25_schema_parity()
+    gen_26_hybrid()
     leaf_count = sum(1 for _ in VECTORS_DIR.rglob("expected.json"))
     print(f"generated {leaf_count} vector cases under {VECTORS_DIR}")
 

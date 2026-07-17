@@ -26,10 +26,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
-from attest import canon, commitment, keys, manifests, revocation, validate
+from attest import canon, commitment, keys, manifests, pq, revocation, validate
 
 _ALG = "Ed25519"  # hard-coded — never selected from any field, mirrors issue.py
-_SUPPORTED_ATTEST_VERSIONS = frozenset({"0.1"})
+_SUPPORTED_ATTEST_VERSIONS = frozenset({"0.1", "0.2"})
 _KNOWN_EOL_VALUES = frozenset({"artifacts-remain-redownloadable", "escrow", "none"})
 _DATE_FMT = "%Y-%m-%dT%H:%M:%SZ"
 
@@ -550,78 +550,167 @@ def verify(
             trust = _TRUST_UNVERIFIED_ROTATION
 
     # --- Step 1: envelope well-formed; attest_version supported; signatures
-    # length == 1; alg == "Ed25519" (read only to reject, never to select).
+    # length == 1 (v0.1) or exactly the hybrid pair (v0.2); alg checked against
+    # the literal expected string(s) (read only to reject, never to select).
     attest_version = payload.get("attest_version")
-    if attest_version not in _SUPPORTED_ATTEST_VERSIONS:
+    if not isinstance(attest_version, str) or attest_version not in _SUPPORTED_ATTEST_VERSIONS:
         return _invalid(f"unsupported attest_version: {attest_version!r}")
 
-    if len(signatures_obj) != 1:
-        return _invalid(f"signatures must contain exactly one entry, got {len(signatures_obj)}")
+    if attest_version == "0.2":
+        # --- v0.2 hybrid path: AND semantics — both the Ed25519 leg AND the
+        # ML-DSA-65 leg must verify, or the receipt is invalid. Every failure
+        # below fails closed via `_invalid`, never raising.
+        if len(signatures_obj) != 2:
+            return _invalid("hybrid envelope requires exactly two signatures")
 
-    sig_block = signatures_obj[0]
-    if not isinstance(sig_block, dict):
-        return _invalid("malformed signature block")
+        sig0, sig1 = signatures_obj
+        if not isinstance(sig0, dict) or not isinstance(sig1, dict):
+            return _invalid("malformed signature block")
 
-    kid = sig_block.get("kid")
-    alg = sig_block.get("alg")
-    sig_b64 = sig_block.get("sig")
-    if not isinstance(kid, str) or not isinstance(sig_b64, str):
-        return _invalid("malformed signature block: 'kid'/'sig' must be strings")
+        if sig0.get("alg") != _ALG or sig1.get("alg") != pq.ML_DSA_65_ALG:
+            return _invalid("hybrid envelope requires algs Ed25519 and ML-DSA-65 in order")
 
-    if alg != _ALG:
-        return _invalid(f"unsupported signature algorithm: {alg!r}")
+        kid0 = sig0.get("kid")
+        kid1 = sig1.get("kid")
+        if kid0 != kid1:
+            return _invalid("hybrid envelope signatures must share a single kid")
+        if not isinstance(kid0, str):
+            return _invalid("malformed signature block: 'kid' must be a string")
+        kid = kid0
 
-    # --- Step 2: issuer binding — resolve the key ONLY from the manifest of
-    # payload.issuer.id; kid's DNS-domain prefix and the manifest's own
-    # `issuer` field must both equal it, or reject (issuer_mismatch). This
-    # kills cross-issuer impersonation: a valid manifest for evil.example.com
-    # can never validate a receipt claiming issuer.id "store.example.com".
-    if not isinstance(issuer_id, str):
-        return _invalid("malformed payload: missing issuer.id")
+        ed_sig_b64 = sig0.get("sig")
+        mldsa_sig_b64 = sig1.get("sig")
+        if not isinstance(ed_sig_b64, str) or not isinstance(mldsa_sig_b64, str):
+            return _invalid("malformed signature block: 'sig' must be a string")
 
-    manifest = trust_store.manifests.get(issuer_id)
-    if manifest is None:
-        return _invalid(f"no trusted manifest for issuer {issuer_id!r}")
+        # --- Step 2 (shared with v0.1): issuer binding — resolve the key
+        # ONLY from the manifest of payload.issuer.id; the shared kid's
+        # DNS-domain prefix and the manifest's own `issuer` field must both
+        # equal it, or reject (issuer_mismatch).
+        if not isinstance(issuer_id, str):
+            return _invalid("malformed payload: missing issuer.id")
 
-    if kid.split("/")[0] != issuer_id or manifest.get("issuer") != issuer_id:
-        return _invalid("issuer_mismatch: kid domain does not match payload issuer.id")
+        manifest = trust_store.manifests.get(issuer_id)
+        if manifest is None:
+            return _invalid(f"no trusted manifest for issuer {issuer_id!r}")
 
-    # --- Step 3: key checks — present, not compromised (fail-closed
-    # regardless of issued_at), issued_at within the key's validity window.
-    entry = manifests.find_key(manifest, kid)
-    if entry is None:
-        return _invalid(f"no key {kid!r} in issuer manifest")
+        if kid.split("/")[0] != issuer_id or manifest.get("issuer") != issuer_id:
+            return _invalid("issuer_mismatch: kid domain does not match payload issuer.id")
 
-    status = entry.get("status")
-    if status == _STATUS_COMPROMISED:
-        return _invalid(f"key {kid} is compromised")
-    if status not in (_STATUS_ACTIVE, _STATUS_RETIRED):
-        # Fail closed on missing/unknown status instead of validating like an
-        # active key (2026-07-13 review, finding 4).
-        return _invalid(f"key {kid} has unusable status {status!r}")
+        # --- Step 3 (shared with v0.1): key checks — present, not
+        # compromised (fail-closed regardless of issued_at), issued_at within
+        # the key's validity window.
+        entry = manifests.find_key(manifest, kid)
+        if entry is None:
+            return _invalid(f"no key {kid!r} in issuer manifest")
 
-    issued_at = payload.get("issued_at")
-    if not isinstance(issued_at, str) or not _within_validity(issued_at, entry):
-        return _invalid(f"issued_at {issued_at!r} outside key validity window")
+        status = entry.get("status")
+        if status == _STATUS_COMPROMISED:
+            return _invalid(f"key {kid} is compromised")
+        if status not in (_STATUS_ACTIVE, _STATUS_RETIRED):
+            return _invalid(f"key {kid} has unusable status {status!r}")
 
-    if status == _STATUS_RETIRED:
-        warnings.append(f"key {kid} is retired")
+        issued_at = payload.get("issued_at")
+        if not isinstance(issued_at, str) or not _within_validity(issued_at, entry):
+            return _invalid(f"issued_at {issued_at!r} outside key validity window")
 
-    # --- Step 4: Ed25519.verify(JCS(payload), sig, pub) under the pinned
-    # ruleset. canon.canonical_bytes(payload) is the only signature input.
-    try:
-        pub = keys.b64u_decode(entry["pub"])
-        sig = keys.b64u_decode(sig_b64)
-    except (KeyError, TypeError, ValueError) as exc:
-        return _invalid(f"malformed key material: {exc}")
+        if status == _STATUS_RETIRED:
+            warnings.append(f"key {kid} is retired")
 
-    try:
-        signature_ok = keys.verify_strict(canon.canonical_bytes(payload), sig, pub)
-    except ValueError as exc:
-        return _invalid(f"malformed signature material: {exc}")
+        # --- Hybrid-only: the resolved key entry must itself carry an
+        # ML-DSA-65 public key, or there is nothing to verify the second leg
+        # against.
+        if "pub_ml_dsa_65" not in entry:
+            return _invalid(f"key entry for kid {kid!r} has no ML-DSA-65 public key")
 
-    if not signature_ok:
-        return _invalid("signature verification failed")
+        try:
+            ed_pub = keys.b64u_decode(entry["pub"])
+            mldsa_pub = keys.b64u_decode(entry["pub_ml_dsa_65"])
+            ed_sig = keys.b64u_decode(ed_sig_b64)
+            mldsa_sig = keys.b64u_decode(mldsa_sig_b64)
+        except (KeyError, TypeError, ValueError) as exc:
+            return _invalid(f"malformed key material: {exc}")
+
+        try:
+            canonical = canon.canonical_bytes(payload)
+            ed_ok = keys.verify_strict(canonical, ed_sig, ed_pub)
+        except ValueError as exc:
+            return _invalid(f"malformed signature material: {exc}")
+        if not ed_ok:
+            return _invalid("signature verification failed")
+
+        if not pq.verify_strict(canonical, mldsa_sig, mldsa_pub):
+            return _invalid("ML-DSA-65 signature verification failed")
+    else:
+        if len(signatures_obj) != 1:
+            return _invalid(f"signatures must contain exactly one entry, got {len(signatures_obj)}")
+
+        sig_block = signatures_obj[0]
+        if not isinstance(sig_block, dict):
+            return _invalid("malformed signature block")
+
+        raw_kid = sig_block.get("kid")
+        alg = sig_block.get("alg")
+        sig_b64 = sig_block.get("sig")
+        if not isinstance(raw_kid, str) or not isinstance(sig_b64, str):
+            return _invalid("malformed signature block: 'kid'/'sig' must be strings")
+        kid = raw_kid
+
+        if alg != _ALG:
+            return _invalid(f"unsupported signature algorithm: {alg!r}")
+
+        # --- Step 2: issuer binding — resolve the key ONLY from the manifest
+        # of payload.issuer.id; kid's DNS-domain prefix and the manifest's
+        # own `issuer` field must both equal it, or reject (issuer_mismatch).
+        # This kills cross-issuer impersonation: a valid manifest for
+        # evil.example.com can never validate a receipt claiming issuer.id
+        # "store.example.com".
+        if not isinstance(issuer_id, str):
+            return _invalid("malformed payload: missing issuer.id")
+
+        manifest = trust_store.manifests.get(issuer_id)
+        if manifest is None:
+            return _invalid(f"no trusted manifest for issuer {issuer_id!r}")
+
+        if kid.split("/")[0] != issuer_id or manifest.get("issuer") != issuer_id:
+            return _invalid("issuer_mismatch: kid domain does not match payload issuer.id")
+
+        # --- Step 3: key checks — present, not compromised (fail-closed
+        # regardless of issued_at), issued_at within the key's validity window.
+        entry = manifests.find_key(manifest, kid)
+        if entry is None:
+            return _invalid(f"no key {kid!r} in issuer manifest")
+
+        status = entry.get("status")
+        if status == _STATUS_COMPROMISED:
+            return _invalid(f"key {kid} is compromised")
+        if status not in (_STATUS_ACTIVE, _STATUS_RETIRED):
+            # Fail closed on missing/unknown status instead of validating
+            # like an active key (2026-07-13 review, finding 4).
+            return _invalid(f"key {kid} has unusable status {status!r}")
+
+        issued_at = payload.get("issued_at")
+        if not isinstance(issued_at, str) or not _within_validity(issued_at, entry):
+            return _invalid(f"issued_at {issued_at!r} outside key validity window")
+
+        if status == _STATUS_RETIRED:
+            warnings.append(f"key {kid} is retired")
+
+        # --- Step 4: Ed25519.verify(JCS(payload), sig, pub) under the pinned
+        # ruleset. canon.canonical_bytes(payload) is the only signature input.
+        try:
+            pub = keys.b64u_decode(entry["pub"])
+            sig = keys.b64u_decode(sig_b64)
+        except (KeyError, TypeError, ValueError) as exc:
+            return _invalid(f"malformed key material: {exc}")
+
+        try:
+            signature_ok = keys.verify_strict(canon.canonical_bytes(payload), sig, pub)
+        except ValueError as exc:
+            return _invalid(f"malformed signature material: {exc}")
+
+        if not signature_ok:
+            return _invalid("signature verification failed")
 
     # --- Step 5: schema validation of the parsed payload from step 0.
     violations = validate.validate_payload(payload)

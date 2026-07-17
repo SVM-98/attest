@@ -6,7 +6,7 @@
   "additionalProperties": true,
   "required": ["attest_version", "receipt_id", "issued_at", "issuer", "buyer", "work", "license", "survivability"],
   "properties": {
-    "attest_version": { "const": "0.1" },
+    "attest_version": { "enum": ["0.1", "0.2"] },
     "receipt_id": { "type": "string", "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$" },
     "issued_at": { "type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$" },
     "supersedes": { "type": ["string", "null"], "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$" },

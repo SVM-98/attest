@@ -73,6 +73,21 @@ Each leaf directory contains:
 | 25a | `schema-parity/a-edition-nonstring` | `work.edition` set to a non-string (an int) before signing, so the signature genuinely covers the invalid payload — signature valid, `schema: "invalid"` (pins schema drift where an implementation's runtime type accepts non-strings). |
 | 25b | `schema-parity/b-ulid-first-char` | `receipt_id`'s first character set to `'8'`, past the ULID timestamp-prefix range the pinned regex allows (`^[0-7][0-9A-HJKMNP-TV-Z]{25}$`) — signature valid, `schema: "invalid"`. |
 
+### 26: hybrid Ed25519+ML-DSA-65 signatures (attest v0.2)
+
+Checked against [`docs/spec/attest-v0.2.md`](../attest-v0.2.md), the additive delta specification for the `attest_version: "0.2"` hybrid signature profile.
+
+| Leaf | Name | Checks |
+| --- | --- | --- |
+| 26a | `a-valid-hybrid` | The happy path: both the Ed25519 and ML-DSA-65 legs verify against a single hybrid key-manifest entry — `ok: true`. |
+| 26b | `b-ed25519-leg-tampered` | The Ed25519 leg's signature bytes flipped post-signing — `signature: "invalid"`. |
+| 26c | `c-mldsa-leg-tampered` | The ML-DSA-65 leg's signature bytes flipped post-signing — `signature: "invalid"`. |
+| 26d | `d-mldsa-leg-missing` | The ML-DSA-65 signature entry stripped, leaving one signature — rejected outright (`signatures` must have length exactly 2), never treated as a v0.1-shaped fallback. |
+| 26e | `e-duplicate-ed25519-alg` | Both signature entries carry `alg: "Ed25519"` instead of the fixed `[Ed25519, ML-DSA-65]` order — rejected. |
+| 26f | `f-kid-mismatch-between-legs` | The two signature entries carry different `kid` values — rejected (the hybrid pair must be one signer). |
+| 26g | `g-key-entry-not-hybrid` | The resolved manifest key entry has no `pub_ml_dsa_65` — rejected, nothing to verify the PQ leg against. |
+| 26h | `h-manifest-downgraded-continuity` | A rotation candidate manifest signed by a hybrid key but whose `manifest_signature` was downgraded to Ed25519-only — the receipt's own signature still verifies, but the manifest fails its own hybrid AND-check, so the rotation chain is discontinuous: `trust: "unverified_rotation"`. |
+
 ## Regeneration
 
 The vectors are generated deterministically by [`tools/gen_vectors.py`](../../../tools/gen_vectors.py): every keypair, salt, timestamp, and ULID randomness source is a fixed constant (no wall-clock reads, no CSPRNG). Running
