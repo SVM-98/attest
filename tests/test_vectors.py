@@ -154,9 +154,10 @@ def test_vectors_directory_is_nonempty() -> None:
     """Guard against a silently-empty parametrize list (e.g. a wrong
     `VECTORS_DIR` path) making the whole suite above vacuously pass."""
     # 23 Fase 1/2 leaves (01-18) + 20 regression-corpus leaves (19-25, 2026-07-13)
-    # + 8 hybrid conformance leaves (26, 2026-07-17):
+    # + 8 hybrid conformance leaves (26, 2026-07-17) + 1 absent-valid_to
+    # parity leaf (27, 2026-07-17):
     # 19 a/b, 20 a-c, 21 a-g, 22 a-c, 23 a/b, 24, 25 a/b, 26 a-h.
-    assert len(_VECTOR_DIRS) >= 51
+    assert len(_VECTOR_DIRS) >= 52
 
 
 _CANONICAL_DIRS = [p for p in _VECTOR_DIRS if (p / "canonical.json").exists()]
