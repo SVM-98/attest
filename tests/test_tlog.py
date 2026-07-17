@@ -813,6 +813,35 @@ def test_key_hash_prefix_matches_hand_computed_sha256() -> None:
 # --- hostile-input bounds: error-message and allocation guards ---------------
 
 
+def test_parse_checkpoint_rejects_too_many_lines_before_splitting() -> None:
+    # Keep this below the total-text cap so it pins the zero-allocation
+    # newline-count guard rather than the length guard.
+    text = "\n" * (tlog._MAX_NOTE_LINES + 1)
+    with pytest.raises(tlog.TlogError) as exc_info:
+        tlog.parse_checkpoint(text)
+    assert f"too many lines (max {tlog._MAX_NOTE_LINES})" in str(exc_info.value)
+    assert len(str(exc_info.value)) < 200
+
+
+def test_parse_checkpoint_rejects_oversized_note_text_before_splitting() -> None:
+    # A long origin line reaches the aggregate cap before any line splitting.
+    text = "x" * (tlog._MAX_NOTE_TEXT_LEN + 1) + "\n"
+    with pytest.raises(tlog.TlogError) as exc_info:
+        tlog.parse_checkpoint(text)
+    assert str(tlog._MAX_NOTE_TEXT_LEN) in str(exc_info.value)
+    assert len(str(exc_info.value)) < 200
+
+
+def test_parse_checkpoint_accepts_maximum_number_of_signature_lines() -> None:
+    signature = f"— {LOG_NAME} AA==\n"
+    header = f"{ORIGIN}\n3\n{base64.b64encode(ROOT).decode('ascii')}\n\n"
+    text = header + signature * tlog._MAX_NOTE_SIGNATURES
+    checkpoint = tlog.parse_checkpoint(text)
+    assert checkpoint.origin == ORIGIN
+    assert checkpoint.tree_size == 3
+    assert checkpoint.root == ROOT
+
+
 def test_parse_checkpoint_bounds_error_message_for_huge_malformed_size_line() -> None:
     # A multi-hundred-KB malformed field must not be fully rendered into the
     # TlogError message (repr amplification -> allocation DoS).
