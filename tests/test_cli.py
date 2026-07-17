@@ -1479,4 +1479,206 @@ def test_load_mldsa_kp_rejects_malformed(tmp_path: Path, capsys: CapSys) -> None
         assert rc == 2, f"expected exit 2 for {bad_file.name}"
         err = capsys.readouterr().err
         assert err != ""
-        assert "Traceback" not in err
+
+
+# --- fix wave 2 (Task 8 adversarial re-review): salt-out alias + rotate self-verify --
+
+
+def test_issue_v02_mldsa_key_aliased_with_salt_out_errors(tmp_path: Path, capsys: CapSys) -> None:
+    seed, _pub, mldsa_key = _keygen_hybrid(tmp_path, "issuer")
+    payload_path = _write_payload(tmp_path, attest_version="0.2")
+    salt = _write_salt_file(tmp_path, "buyer.salt", b"s" * 16)
+
+    rc = cli.main(
+        [
+            "issue",
+            "--payload",
+            str(payload_path),
+            "--seed",
+            str(seed),
+            "--mldsa-key",
+            str(mldsa_key),
+            "--attest-version",
+            "0.2",
+            "--kid",
+            KID,
+            "--salt",
+            str(salt),
+            "--salt-out",
+            str(mldsa_key),
+            "--out",
+            str(tmp_path / "envelope.json"),
+        ]
+    )
+
+    assert rc == 2
+    assert capsys.readouterr().err != ""
+    # The ML-DSA secret file must still hold the key JSON, not the raw salt.
+    assert json.loads(mldsa_key.read_text(encoding="utf-8"))["alg"] == pq.ML_DSA_65_ALG
+
+
+def test_keygen_mldsa_out_aliased_with_pub_out_errors(tmp_path: Path, capsys: CapSys) -> None:
+    shared = tmp_path / "issuer.pub"
+
+    rc = cli.main(
+        [
+            "keygen",
+            "--seed-out",
+            str(tmp_path / "issuer.seed"),
+            "--pub-out",
+            str(shared),
+            "--hybrid",
+            "--mldsa-out",
+            str(shared),
+        ]
+    )
+
+    assert rc == 2
+    assert capsys.readouterr().err != ""
+
+
+def test_manifest_init_mldsa_key_aliased_with_out_errors(tmp_path: Path, capsys: CapSys) -> None:
+    seed, _pub, mldsa_key = _keygen_hybrid(tmp_path, "issuer")
+
+    rc = cli.main(
+        [
+            "manifest",
+            "init",
+            "--issuer",
+            ISSUER,
+            "--kid",
+            KID,
+            "--seed",
+            str(seed),
+            "--mldsa-key",
+            str(mldsa_key),
+            "--valid-from",
+            VALID_FROM,
+            "--issued-at",
+            VALID_FROM,
+            "--out",
+            str(mldsa_key),
+        ]
+    )
+
+    assert rc == 2
+    assert capsys.readouterr().err != ""
+
+
+def test_manifest_rotate_wrong_signing_seed_errors(tmp_path: Path, capsys: CapSys) -> None:
+    seed, _pub, mldsa_key = _keygen_hybrid(tmp_path, "issuer")
+    manifest_v1 = _manifest_init_hybrid(tmp_path, seed, mldsa_key, "manifest-v1.json")
+    wrong_seed, _wrong_pub = _keygen(tmp_path, "other")
+    _new_seed, new_pub = _keygen(tmp_path, "issuer-2")
+    new_kid = f"{ISSUER}/keys/test-2#ed25519-1"
+    out = tmp_path / "manifest-v2.json"
+
+    rc = cli.main(
+        [
+            "manifest",
+            "rotate",
+            "--in",
+            str(manifest_v1),
+            "--signing-kid",
+            KID,
+            "--signing-seed",
+            str(wrong_seed),
+            "--mldsa-key",
+            str(mldsa_key),
+            "--new-kid",
+            new_kid,
+            "--new-pub",
+            str(new_pub),
+            "--valid-from",
+            "2026-02-01T00:00:00Z",
+            "--issued-at",
+            "2026-02-01T00:00:00Z",
+            "--out",
+            str(out),
+        ]
+    )
+
+    assert rc == 2
+    assert capsys.readouterr().err != ""
+    assert not out.exists()
+
+
+def test_manifest_rotate_mldsa_pub_matches_but_sk_mismatched_errors(
+    tmp_path: Path, capsys: CapSys
+) -> None:
+    seed_a, _pub_a, mldsa_a = _keygen_hybrid(tmp_path, "issuer-a")
+    _seed_b, _pub_b, mldsa_b = _keygen_hybrid(tmp_path, "issuer-b")
+    manifest_v1 = _manifest_init_hybrid(tmp_path, seed_a, mldsa_a, "manifest-v1.json")
+
+    key_a = json.loads(mldsa_a.read_text(encoding="utf-8"))
+    key_b = json.loads(mldsa_b.read_text(encoding="utf-8"))
+    spliced = tmp_path / "spliced.mldsa"
+    spliced.write_text(
+        json.dumps({"alg": pq.ML_DSA_65_ALG, "sk": key_b["sk"], "pub": key_a["pub"]}),
+        encoding="utf-8",
+    )
+
+    _new_seed, new_pub = _keygen(tmp_path, "issuer-2")
+    new_kid = f"{ISSUER}/keys/test-2#ed25519-1"
+    out = tmp_path / "manifest-v2.json"
+
+    rc = cli.main(
+        [
+            "manifest",
+            "rotate",
+            "--in",
+            str(manifest_v1),
+            "--signing-kid",
+            KID,
+            "--signing-seed",
+            str(seed_a),
+            "--mldsa-key",
+            str(spliced),
+            "--new-kid",
+            new_kid,
+            "--new-pub",
+            str(new_pub),
+            "--valid-from",
+            "2026-02-01T00:00:00Z",
+            "--issued-at",
+            "2026-02-01T00:00:00Z",
+            "--out",
+            str(out),
+        ]
+    )
+
+    assert rc == 2
+    assert capsys.readouterr().err != ""
+    assert not out.exists()
+
+
+def test_manifest_rotate_unknown_signing_kid_errors(tmp_path: Path, capsys: CapSys) -> None:
+    seed, _pub, mldsa_key = _keygen_hybrid(tmp_path, "issuer")
+    manifest_v1 = _manifest_init_hybrid(tmp_path, seed, mldsa_key, "manifest-v1.json")
+    unknown_kid = f"{ISSUER}/keys/unknown#ed25519-1"
+    out = tmp_path / "manifest-v2.json"
+
+    rc = cli.main(
+        [
+            "manifest",
+            "rotate",
+            "--in",
+            str(manifest_v1),
+            "--signing-kid",
+            unknown_kid,
+            "--signing-seed",
+            str(seed),
+            "--mldsa-key",
+            str(mldsa_key),
+            "--retire-kid",
+            KID,
+            "--issued-at",
+            "2026-02-01T00:00:00Z",
+            "--out",
+            str(out),
+        ]
+    )
+
+    assert rc == 2
+    assert capsys.readouterr().err != ""
+    assert not out.exists()

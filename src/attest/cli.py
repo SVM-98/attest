@@ -318,6 +318,20 @@ def _cmd_manifest_rotate(args: argparse.Namespace) -> int:
     except ValueError as exc:
         raise CliUsageError(str(exc)) from exc
 
+    # Backstop: the shape/pub-match guards above catch the common mistakes but
+    # not (a) a --signing-seed that isn't the entry-bound Ed25519 key, (b) an
+    # --mldsa-key whose pub matches the entry but whose sk belongs to a
+    # different key, or (c) an unknown --signing-kid absent from the manifest
+    # — all three currently produce a manifest that fails verify_key_manifest
+    # at exit 0. A correct rotation always self-verifies, so this can never
+    # reject a good rotation (adversarial re-review, Task 8 fix wave 2,
+    # important finding).
+    if not manifests.verify_key_manifest(manifest):
+        raise CliUsageError(
+            "rotation produced a manifest that does not self-verify; "
+            "check that --signing-seed and --mldsa-key match the signing key entry"
+        )
+
     _write_json_file(args.out, manifest)
     _print_json(
         {
@@ -375,6 +389,16 @@ def _cmd_issue(args: argparse.Namespace) -> int:
         # 18 policy, extended to the new hybrid input; the pre-existing --seed-vs
         # ---out aliasing is out of scope for this fix wave).
         raise CliUsageError("--mldsa-key and --out must be different paths")
+    if (
+        args.mldsa_key is not None
+        and args.salt_out is not None
+        and args.mldsa_key.resolve() == args.salt_out.resolve()
+    ):
+        # Same input-vs-output aliasing hazard, extended to --salt-out: reading
+        # --mldsa-key then overwriting it with the raw salt at exit 0 would
+        # silently destroy the ML-DSA secret (adversarial re-review, Task 8
+        # fix wave 2, important finding).
+        raise CliUsageError("--mldsa-key and --salt-out must be different paths")
 
     payload = _read_json(args.payload)
     ed_signing_kp = _load_seed_kp(args.seed)
