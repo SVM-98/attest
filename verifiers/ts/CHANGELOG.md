@@ -4,6 +4,23 @@ All notable changes to `attest-verifier` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- v0.2 hybrid Ed25519+ML-DSA-65 signature profile (`attest_version: "0.2"`):
+  `verify()` accepts a two-signature hybrid envelope (`[Ed25519, ML-DSA-65]`,
+  fixed order, shared `kid`), verifying both legs over the same
+  `JCS(payload)` bytes with AND semantics — either leg failing invalidates
+  the receipt. Composite key binding lives in the key manifest (`pub` +
+  new `pub_ml_dsa_65`); a hybrid signer's `manifest_signature` gains
+  `sig_ml_dsa_65`, AND-verified, fail-closed both ways. ML-DSA-65
+  verification uses `@noble/post-quantum` (verify-only leg, no secret keys
+  in this package). v0.1 receipts remain valid and verifiable forever; a
+  v0.1-only build MUST reject a v0.2 envelope outright. New public spec:
+  [`docs/spec/attest-v0.2.md`](../../docs/spec/attest-v0.2.md). New
+  conformance leaf group `26-hybrid` (8 leaves), for 51 vectors total.
+
 ## [0.1.2] — 2026-07-13
 
 First npm release from the hardened OIDC pipeline (Trusted Publishing +
