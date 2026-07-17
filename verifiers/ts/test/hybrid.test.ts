@@ -199,8 +199,9 @@ describe('v0.2 hybrid verification', () => {
     expect(() => verify(envelopeBytes(mutated), trustStore(hybridManifest()))).not.toThrow()
     const result = verify(envelopeBytes(mutated), trustStore(hybridManifest()))
     expect(result.signature).toBe('invalid')
-    expect(result.errors.length).toBe(1)
-    expect(result.errors[0]!.startsWith('malformed signature material: ')).toBe(true)
+    expect(result.errors).toEqual([
+      'malformed signature material: integer out of I-JSON safe range: 9007199254740992',
+    ])
   })
 
   it('a non-string attest_version is invalid, not thrown', () => {
