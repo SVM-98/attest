@@ -1,6 +1,7 @@
 import { JsonObject, JsonValue, canonicalBytes, dumps, CanonError, loadsStrict } from './canon.js'
 import { TrustStore, findKey, withinValidity, chainContinuous } from './manifests.js'
 import { verifyStrict, Ed25519LengthError } from './ed25519.js'
+import { verifyStrict as verifyMldsaStrict, ML_DSA_65_ALG } from './mldsa.js'
 import { b64uDecode } from './b64u.js'
 import { validatePayload, SCHEMA_TOP_LEVEL_KEYS } from './schema.js'
 import { classifyRevocation, MAX_REVOCATION_RECORDS } from './revocation.js'
@@ -9,8 +10,12 @@ import { b64uEncode } from './b64u.js'
 import {
   ERR, WARN, unsupportedAttestVersion, signaturesCount, unsupportedSigAlg, noTrustedManifest,
   noKeyInManifest, keyCompromised, keyRetired, issuedAtOutsideWindow, malformedKeyMaterial,
-  malformedSigMaterial, unknownField, unknownEol,
+  malformedSigMaterial, unknownField, unknownEol, keyEntryNotHybrid,
 } from './messages.js'
+
+// attest_version values this verifier's verify() step 1 accepts (v0.1 single-sig,
+// v0.2 hybrid Ed25519+ML-DSA-65). Mirrors verify.py's `_SUPPORTED_ATTEST_VERSIONS`.
+const SUPPORTED_ATTEST_VERSIONS = new Set(['0.1', '0.2'])
 
 export type Signature = 'valid' | 'invalid'
 export type Schema = 'valid' | 'invalid' | 'not_checked'
@@ -141,45 +146,108 @@ export function verify(
     }
   }
 
-  // Step 1 — envelope shape
+  // Step 1 — envelope shape: attest_version supported; signatures length ==
+  // 1 (v0.1) or exactly the hybrid pair (v0.2).
   const attestVersion = payload['attest_version']
-  if (attestVersion !== '0.1') return invalid(unsupportedAttestVersion(attestVersion))
-  if (signatures.length !== 1) return invalid(signaturesCount(signatures.length))
-  const sigBlock = obj(signatures[0])
-  if (!sigBlock) return invalid(ERR.MALFORMED_SIG_BLOCK)
-  const kid = sigBlock['kid'], alg = sigBlock['alg'], sigB64 = sigBlock['sig']
-  if (typeof kid !== 'string' || typeof sigB64 !== 'string') return invalid(ERR.MALFORMED_SIG_BLOCK_TYPES)
-  if (alg !== 'Ed25519') return invalid(unsupportedSigAlg(alg))
+  if (typeof attestVersion !== 'string' || !SUPPORTED_ATTEST_VERSIONS.has(attestVersion))
+    return invalid(unsupportedAttestVersion(attestVersion))
 
-  // Step 2 — issuer binding
-  if (typeof issuerId !== 'string') return invalid(ERR.MISSING_ISSUER_ID)
-  const manifest = trustStore.manifests[issuerId]
-  if (manifest == null) return invalid(noTrustedManifest(issuerId))
-  if (kid.split('/')[0] !== issuerId || manifest['issuer'] !== issuerId) return invalid(ERR.ISSUER_MISMATCH)
+  let manifest: JsonObject | undefined
 
-  // Step 3 — key resolution + status + validity window
-  const entry = findKey(manifest, kid)
-  if (entry == null) return invalid(noKeyInManifest(kid))
-  const status = entry['status']
-  if (status === 'compromised') return invalid(keyCompromised(kid))
-  // Fail closed on a missing/unknown status instead of validating like an active
-  // key (2026-07-13 review, finding 4).
-  if (status !== 'active' && status !== 'retired') return invalid(`key ${kid} has unusable status`)
-  const issuedAt = payload['issued_at']
-  if (typeof issuedAt !== 'string' || !withinValidity(issuedAt, entry)) return invalid(issuedAtOutsideWindow(issuedAt))
-  if (status === 'retired') warnings.push(keyRetired(kid))
+  if (attestVersion === '0.2') {
+    // --- v0.2 hybrid path: AND semantics — both the Ed25519 leg AND the
+    // ML-DSA-65 leg must verify, or the receipt is invalid. Every failure
+    // below fails closed via `invalid()`, never throwing.
+    if (signatures.length !== 2) return invalid(ERR.hybridSigCount)
 
-  // Step 4 — signature
-  let pub: Uint8Array, sig: Uint8Array
-  try { const p = entry['pub']; if (typeof p !== 'string') throw new Error('pub not a string'); pub = b64uDecode(p); sig = b64uDecode(sigB64) }
-  catch (e) { return invalid(malformedKeyMaterial(e instanceof Error ? e.message : String(e))) }
-  let signatureOk: boolean
-  try { signatureOk = verifyStrict(canonicalBytes(payload), sig, pub) }
-  catch (e) {
-    if (e instanceof CanonError || e instanceof Ed25519LengthError) return invalid(malformedSigMaterial(e.message))
-    throw e
+    const sig0 = obj(signatures[0]), sig1 = obj(signatures[1])
+    if (!sig0 || !sig1) return invalid(ERR.MALFORMED_SIG_BLOCK)
+
+    if (sig0['alg'] !== 'Ed25519' || sig1['alg'] !== ML_DSA_65_ALG) return invalid(ERR.hybridAlgs)
+
+    const kid0 = sig0['kid'], kid1 = sig1['kid']
+    if (kid0 !== kid1) return invalid(ERR.hybridKidShared)
+    if (typeof kid0 !== 'string') return invalid(ERR.hybridKidType)
+    const kid = kid0
+
+    const edSigB64 = sig0['sig'], mldsaSigB64 = sig1['sig']
+    if (typeof edSigB64 !== 'string' || typeof mldsaSigB64 !== 'string') return invalid(ERR.hybridSigType)
+
+    // Step 2 (shared with v0.1) — issuer binding
+    if (typeof issuerId !== 'string') return invalid(ERR.MISSING_ISSUER_ID)
+    manifest = trustStore.manifests[issuerId]
+    if (manifest == null) return invalid(noTrustedManifest(issuerId))
+    if (kid.split('/')[0] !== issuerId || manifest['issuer'] !== issuerId) return invalid(ERR.ISSUER_MISMATCH)
+
+    // Step 3 (shared with v0.1) — key resolution + status + validity window
+    const entry = findKey(manifest, kid)
+    if (entry == null) return invalid(noKeyInManifest(kid))
+    const status = entry['status']
+    if (status === 'compromised') return invalid(keyCompromised(kid))
+    if (status !== 'active' && status !== 'retired') return invalid(`key ${kid} has unusable status`)
+    const issuedAt = payload['issued_at']
+    if (typeof issuedAt !== 'string' || !withinValidity(issuedAt, entry)) return invalid(issuedAtOutsideWindow(issuedAt))
+    if (status === 'retired') warnings.push(keyRetired(kid))
+
+    // Hybrid-only: the resolved key entry must itself carry an ML-DSA-65
+    // public key, or there is nothing to verify the second leg against.
+    if (!('pub_ml_dsa_65' in entry)) return invalid(keyEntryNotHybrid(kid))
+
+    let edPub: Uint8Array, mldsaPub: Uint8Array, edSig: Uint8Array, mldsaSig: Uint8Array
+    try {
+      const p = entry['pub'], pm = entry['pub_ml_dsa_65']
+      if (typeof p !== 'string' || typeof pm !== 'string') throw new Error('pub not a string')
+      edPub = b64uDecode(p); mldsaPub = b64uDecode(pm)
+      edSig = b64uDecode(edSigB64); mldsaSig = b64uDecode(mldsaSigB64)
+    } catch (e) { return invalid(malformedKeyMaterial(e instanceof Error ? e.message : String(e))) }
+
+    let canonical: Uint8Array, edOk: boolean
+    try { canonical = canonicalBytes(payload); edOk = verifyStrict(canonical, edSig, edPub) }
+    catch (e) {
+      if (e instanceof CanonError || e instanceof Ed25519LengthError) return invalid(malformedSigMaterial(e.message))
+      throw e
+    }
+    if (!edOk) return invalid(ERR.SIG_VERIFICATION_FAILED)
+
+    if (!verifyMldsaStrict(canonical, mldsaSig, mldsaPub)) return invalid(ERR.mldsaSigInvalid)
+  } else {
+    if (signatures.length !== 1) return invalid(signaturesCount(signatures.length))
+    const sigBlock = obj(signatures[0])
+    if (!sigBlock) return invalid(ERR.MALFORMED_SIG_BLOCK)
+    const kid = sigBlock['kid'], alg = sigBlock['alg'], sigB64 = sigBlock['sig']
+    if (typeof kid !== 'string' || typeof sigB64 !== 'string') return invalid(ERR.MALFORMED_SIG_BLOCK_TYPES)
+    if (alg !== 'Ed25519') return invalid(unsupportedSigAlg(alg))
+
+    // Step 2 — issuer binding
+    if (typeof issuerId !== 'string') return invalid(ERR.MISSING_ISSUER_ID)
+    manifest = trustStore.manifests[issuerId]
+    if (manifest == null) return invalid(noTrustedManifest(issuerId))
+    if (kid.split('/')[0] !== issuerId || manifest['issuer'] !== issuerId) return invalid(ERR.ISSUER_MISMATCH)
+
+    // Step 3 — key resolution + status + validity window
+    const entry = findKey(manifest, kid)
+    if (entry == null) return invalid(noKeyInManifest(kid))
+    const status = entry['status']
+    if (status === 'compromised') return invalid(keyCompromised(kid))
+    // Fail closed on a missing/unknown status instead of validating like an active
+    // key (2026-07-13 review, finding 4).
+    if (status !== 'active' && status !== 'retired') return invalid(`key ${kid} has unusable status`)
+    const issuedAt = payload['issued_at']
+    if (typeof issuedAt !== 'string' || !withinValidity(issuedAt, entry)) return invalid(issuedAtOutsideWindow(issuedAt))
+    if (status === 'retired') warnings.push(keyRetired(kid))
+
+    // Step 4 — signature
+    let pub: Uint8Array, sig: Uint8Array
+    try { const p = entry['pub']; if (typeof p !== 'string') throw new Error('pub not a string'); pub = b64uDecode(p); sig = b64uDecode(sigB64) }
+    catch (e) { return invalid(malformedKeyMaterial(e instanceof Error ? e.message : String(e))) }
+    let signatureOk: boolean
+    try { signatureOk = verifyStrict(canonicalBytes(payload), sig, pub) }
+    catch (e) {
+      if (e instanceof CanonError || e instanceof Ed25519LengthError) return invalid(malformedSigMaterial(e.message))
+      throw e
+    }
+    if (!signatureOk) return invalid(ERR.SIG_VERIFICATION_FAILED)
   }
-  if (!signatureOk) return invalid(ERR.SIG_VERIFICATION_FAILED)
 
   // Step 5 — schema + content warnings
   const violations = validatePayload(payload)

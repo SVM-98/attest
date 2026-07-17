@@ -208,7 +208,7 @@ export function validatePayload(payload: JsonObject): string[] {
   const errors: string[] = []
 
   if (check(errors, 'attest_version' in payload, 'attest_version: required')) {
-    check(errors, payload['attest_version'] === '0.1', "attest_version: must be the constant '0.1'")
+    check(errors, payload['attest_version'] === '0.1' || payload['attest_version'] === '0.2', 'attest_version: must be one of 0.1, 0.2')
   }
   if (check(errors, 'receipt_id' in payload, 'receipt_id: required')) {
     check(errors, typeof payload['receipt_id'] === 'string' && RECEIPT_ID_RE.test(payload['receipt_id']), 'receipt_id: must be a 26-char ULID')

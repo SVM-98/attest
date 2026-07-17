@@ -117,6 +117,13 @@ See [demo/README.md](demo/README.md) for what each step of the demo proves, and
 specification. [docs/spec/vectors/](docs/spec/vectors/) holds the conformance
 corpus every implementation is checked against.
 
+[docs/spec/attest-v0.2.md](docs/spec/attest-v0.2.md) is an additive delta
+specification defining the v0.2 hybrid Ed25519+ML-DSA-65 signature profile
+(post-quantum-resistant receipts, `attest_version: "0.2"`); v0.1 receipts
+remain valid and verifiable forever, and this profile is Stage 1 of a larger
+v0.2 — issuer key transparency/anchoring and transfer records are forthcoming
+in later stages.
+
 ## Roadmap / north star
 
 Non-normative, and deliberately undated — these are directions, not commitments:

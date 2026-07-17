@@ -20,7 +20,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 requires-python = ">=3.12"
-dependencies = ["pynacl>=1.5", "jsonschema>=4.21"]
+dependencies = ["pynacl>=1.5", "jsonschema>=4.21", "pqcrypto==0.4.0"]
 
 [project.urls]
 Homepage = "https://svm-98.github.io/attest/"
@@ -29,7 +29,7 @@ Documentation = "https://github.com/SVM-98/attest/blob/main/docs/spec/attest-v0.
 Issues = "https://github.com/SVM-98/attest/issues"
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-cov", "hypothesis>=6", "ruff", "mypy"]
+dev = ["pytest>=8", "pytest-cov", "hypothesis>=6", "ruff", "mypy", "dilithium-py>=1.4"]
 
 [project.scripts]
 attest = "attest.cli:main"
@@ -56,6 +56,10 @@ mypy_path = "src"
 
 [[tool.mypy.overrides]]
 module = "jsonschema.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "pqcrypto.*"
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

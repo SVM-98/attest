@@ -1,10 +1,14 @@
 import { JsonObject, JsonValue, canonicalBytes } from './canon.js'
 import { verifyStrict } from './ed25519.js'
+import { verifyStrict as verifyMldsaStrict } from './mldsa.js'
 import { b64uDecode } from './b64u.js'
 import { parseStrictUtc } from './dates.js'
 
 export type KeyStatus = 'active' | 'retired' | 'compromised'
-export interface KeyEntry { kid: string; pub: string; valid_from: string; valid_to: string | null; status: KeyStatus }
+export interface KeyEntry {
+  kid: string; pub: string; valid_from: string; valid_to: string | null; status: KeyStatus
+  pub_ml_dsa_65?: string
+}
 export interface KeyManifest {
   issuer: string; manifest_version: number; issued_at: string
   keys: KeyEntry[]; manifest_signature: { kid: string; sig: string }
@@ -35,6 +39,26 @@ export function signableManifestBytes(manifest: JsonObject): Uint8Array {
   return canonicalBytes(body)
 }
 
+// AND rule: `entry` hybrid (carries `pub_ml_dsa_65`) requires BOTH legs present
+// and valid; non-hybrid requires the Ed25519 leg valid and `sig_ml_dsa_65`
+// ABSENT. Any other combination fails closed. Never throws — decode/type
+// errors on untrusted input are treated as verification failure. Mirrors
+// manifests.py's `_verify_signature_block`.
+function verifySignatureBlock(payload: Uint8Array, sigBlock: JsonObject, entry: JsonObject): boolean {
+  const isHybridEntry = 'pub_ml_dsa_65' in entry
+  const hasMldsaLeg = 'sig_ml_dsa_65' in sigBlock
+  if (isHybridEntry !== hasMldsaLeg) return false
+  try {
+    const sig = sigBlock['sig'], pub = entry['pub']
+    if (typeof sig !== 'string' || typeof pub !== 'string') return false
+    const edOk = verifyStrict(payload, b64uDecode(sig), b64uDecode(pub))
+    if (!isHybridEntry) return edOk
+    const mldsaSig = sigBlock['sig_ml_dsa_65'], mldsaPub = entry['pub_ml_dsa_65']
+    if (typeof mldsaSig !== 'string' || typeof mldsaPub !== 'string') return false
+    return edOk && verifyMldsaStrict(payload, b64uDecode(mldsaSig), b64uDecode(mldsaPub))
+  } catch { return false }
+}
+
 export function verifyKeyManifest(manifest: JsonObject): boolean {
   try {
     const sigBlock = asObject(manifest['manifest_signature'])
@@ -43,9 +67,7 @@ export function verifyKeyManifest(manifest: JsonObject): boolean {
     if (typeof kid !== 'string') return false
     const entry = findKey(manifest, kid)
     if (!entry) return false
-    const sig = sigBlock['sig'], pub = entry['pub']
-    if (typeof sig !== 'string' || typeof pub !== 'string') return false
-    return verifyStrict(signableManifestBytes(manifest), b64uDecode(sig), b64uDecode(pub))
+    return verifySignatureBlock(signableManifestBytes(manifest), sigBlock, entry)
     // NOTE: deliberately does NOT check entry.status — a retired/compromised signer still self-verifies.
   } catch { return false }
 }
@@ -89,9 +111,7 @@ export function checkContinuity(trusted: JsonObject, candidate: JsonObject): boo
     // Bind continuity to the key TRUSTED vouches for: verify the candidate's
     // signature under trusted's pub for signer_kid, NOT the candidate's own
     // (attacker-substitutable) entry (2026-07-13 review, finding 1).
-    const sig = sigBlock['sig'], pub = signer['pub']
-    if (typeof sig !== 'string' || typeof pub !== 'string') return false
-    return verifyStrict(signableManifestBytes(candidate), b64uDecode(sig), b64uDecode(pub))
+    return verifySignatureBlock(signableManifestBytes(candidate), sigBlock, signer)
   } catch { return false }
 }
 

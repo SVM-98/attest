@@ -57,3 +57,17 @@ def test_packaged_schema_is_byte_identical_to_normative_copy() -> None:
     packaged = importlib.resources.files("attest.schema").joinpath("attest-receipt.schema.json")
 
     assert packaged.read_bytes() == normative.read_bytes()
+
+
+def test_attest_version_02_accepted() -> None:
+    payload = make_payload(attest_version="0.2")
+
+    assert validate.validate_payload(payload) == []
+
+
+def test_attest_version_unknown_rejected() -> None:
+    payload = make_payload(attest_version="0.3")
+
+    errors = validate.validate_payload(payload)
+
+    assert errors

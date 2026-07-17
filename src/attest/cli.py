@@ -35,7 +35,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from attest import bundle, canon, issue, keys, manifests, verify
+from attest import bundle, canon, issue, keys, manifests, pq, verify
 
 EXIT_OK = 0
 EXIT_VERIFICATION_FAILED = 1
@@ -51,6 +51,19 @@ class CliUsageError(Exception):
 
 
 # --- small I/O helpers -------------------------------------------------------
+
+
+def _same_file_target(a: Path, b: Path) -> bool:
+    """True if `a` and `b` denote the same file: identical resolved path
+    (covers relative paths and symlinks, even for a path that does not exist
+    yet) OR the same existing inode (covers hard links, which resolve()
+    cannot see). Fail-safe: a stat error means 'not provably the same'."""
+    if a.resolve() == b.resolve():
+        return True
+    try:
+        return a.samefile(b)
+    except OSError:
+        return False
 
 
 def _read_json(path: Path) -> Any:
@@ -107,6 +120,28 @@ def _load_seed_kp(path: Path) -> keys.SigningKeyPair:
     return keys.from_seed(_read_b64u_file(path))
 
 
+def _load_mldsa_kp(path: Path) -> pq.MLDSAKeyPair:
+    """Load an ML-DSA-65 key file written by `keygen --hybrid` (0600 JSON:
+    `{"alg": "ML-DSA-65", "sk": <b64u>, "pub": <b64u>}`).
+
+    Any deviation (missing file, bad JSON, wrong alg, malformed/wrong-length
+    b64u material) is a `CliUsageError` — clean exit-2 message, no traceback.
+    """
+    obj = _read_json(path)
+    if not isinstance(obj, dict) or obj.get("alg") != pq.ML_DSA_65_ALG:
+        raise CliUsageError(
+            f"{path} is not a valid ML-DSA-65 key file (expected alg={pq.ML_DSA_65_ALG!r})"
+        )
+    try:
+        sk = keys.b64u_decode(obj["sk"])
+        pub = keys.b64u_decode(obj["pub"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise CliUsageError(f"{path} has malformed sk/pub fields: {exc}") from exc
+    if len(sk) != pq.ML_DSA_65_SK_LEN or len(pub) != pq.ML_DSA_65_PK_LEN:
+        raise CliUsageError(f"{path} has wrong-length ML-DSA-65 key material")
+    return pq.MLDSAKeyPair(sk=sk, pub=pub)
+
+
 # --- trust-dir loading (shared by `verify` and documented for `import`) -----
 
 
@@ -147,17 +182,43 @@ def _safe_name(value: str) -> str:
 
 
 def _cmd_keygen(args: argparse.Namespace) -> int:
-    if args.seed_out.resolve() == args.pub_out.resolve():
+    if _same_file_target(args.seed_out, args.pub_out):
         # Aliased outputs would overwrite the seed with the pubkey (2026-07-13
         # review, finding 18).
         raise CliUsageError("--seed-out and --pub-out must be different paths")
+    if args.hybrid and args.mldsa_out is None:
+        raise CliUsageError("--hybrid requires --mldsa-out")
+    if not args.hybrid and args.mldsa_out is not None:
+        raise CliUsageError("--mldsa-out requires --hybrid")
+    if args.mldsa_out is not None and (
+        _same_file_target(args.mldsa_out, args.seed_out)
+        or _same_file_target(args.mldsa_out, args.pub_out)
+    ):
+        # Same aliasing hazard as --seed-out/--pub-out above (2026-07-13 review,
+        # finding 18), extended to the new ML-DSA output (fix wave, Task 8).
+        raise CliUsageError("--mldsa-out must differ from --seed-out and --pub-out")
+
     kp = keys.generate()
     _write_secret_text(args.seed_out, keys.b64u(kp.seed))
     args.pub_out.parent.mkdir(parents=True, exist_ok=True)
     args.pub_out.write_text(keys.b64u(kp.pub), encoding="utf-8")
-    _print_json(
-        {"pub": keys.b64u(kp.pub), "seed_out": str(args.seed_out), "pub_out": str(args.pub_out)}
-    )
+
+    report = {
+        "pub": keys.b64u(kp.pub),
+        "seed_out": str(args.seed_out),
+        "pub_out": str(args.pub_out),
+    }
+    if args.hybrid:
+        mldsa_kp = pq.generate()
+        mldsa_key_file = {
+            "alg": pq.ML_DSA_65_ALG,
+            "sk": keys.b64u(mldsa_kp.sk),
+            "pub": keys.b64u(mldsa_kp.pub),
+        }
+        _write_secret_text(args.mldsa_out, json.dumps(mldsa_key_file, indent=2, sort_keys=True))
+        report["mldsa_pub"] = keys.b64u(mldsa_kp.pub)
+        report["mldsa_out"] = str(args.mldsa_out)
+    _print_json(report)
     return EXIT_OK
 
 
@@ -165,15 +226,45 @@ def _cmd_keygen(args: argparse.Namespace) -> int:
 
 
 def _cmd_manifest_init(args: argparse.Namespace) -> int:
+    if _same_file_target(args.seed, args.out):
+        raise CliUsageError("--seed and --out must be different paths")
+    if args.mldsa_key is not None and _same_file_target(args.mldsa_key, args.out):
+        # Reading --mldsa-key then writing --out to the same path would clobber
+        # the freshly-read ML-DSA secret file.
+        raise CliUsageError("--mldsa-key and --out must be different paths")
     kp = _load_seed_kp(args.seed)
-    entry = manifests.key_entry(args.kid, kp.pub, args.valid_from, args.valid_to)
-    manifest = manifests.build_key_manifest(args.issuer, 1, args.issued_at, [entry], kp, args.kid)
+    signing_kp: keys.SigningKeyPair | pq.HybridSigningKeys = kp
+    if args.mldsa_key is not None:
+        mldsa_kp = _load_mldsa_kp(args.mldsa_key)
+        entry = manifests.key_entry(
+            args.kid, kp.pub, args.valid_from, args.valid_to, pub_ml_dsa_65=mldsa_kp.pub
+        )
+        signing_kp = pq.HybridSigningKeys(ed=kp, mldsa=mldsa_kp)
+    else:
+        entry = manifests.key_entry(args.kid, kp.pub, args.valid_from, args.valid_to)
+    manifest = manifests.build_key_manifest(
+        args.issuer, 1, args.issued_at, [entry], signing_kp, args.kid
+    )
+    if not manifests.verify_key_manifest(manifest):
+        raise CliUsageError(
+            "built manifest does not self-verify; check that --seed and --mldsa-key are "
+            "a valid matching keypair"
+        )
     _write_json_file(args.out, manifest)
     _print_json({"out": str(args.out), "issuer": args.issuer, "manifest_version": 1})
     return EXIT_OK
 
 
 def _cmd_manifest_rotate(args: argparse.Namespace) -> int:
+    if _same_file_target(args.signing_seed, args.out):
+        raise CliUsageError("--signing-seed and --out must be different paths")
+    if args.mldsa_key is not None and _same_file_target(args.mldsa_key, args.out):
+        # Same input-vs-output aliasing hazard as manifest init/issue (finding 18
+        # policy, extended to the new hybrid input).
+        raise CliUsageError("--mldsa-key and --out must be different paths")
+    if args.new_mldsa_pub is not None and _same_file_target(args.new_mldsa_pub, args.out):
+        raise CliUsageError("--new-mldsa-pub and --out must be different paths")
+
     existing = _read_json(args.manifest_in)
     if not isinstance(existing, dict) or "keys" not in existing:
         raise CliUsageError(f"{args.manifest_in} is not a key manifest")
@@ -182,13 +273,26 @@ def _cmd_manifest_rotate(args: argparse.Namespace) -> int:
     compromise_kids: list[str] = args.compromise_kid or []
 
     new_entry = None
+    if args.new_mldsa_pub is not None and (args.new_kid is None or args.new_pub is None):
+        raise CliUsageError("--new-mldsa-pub requires --new-kid and --new-pub")
     if args.new_kid is not None or args.new_pub is not None:
         if args.new_kid is None or args.new_pub is None:
             raise CliUsageError("--new-kid and --new-pub must be given together")
         if args.valid_from is None:
             raise CliUsageError("--valid-from is required when adding a new key")
         new_pub = _read_b64u_file(args.new_pub)
-        new_entry = manifests.key_entry(args.new_kid, new_pub, args.valid_from, args.valid_to)
+        new_mldsa_pub = None
+        if args.new_mldsa_pub is not None:
+            new_mldsa_pub = _read_b64u_file(args.new_mldsa_pub)
+            if len(new_mldsa_pub) != pq.ML_DSA_65_PK_LEN:
+                raise CliUsageError("new --mldsa-pub is not a 1952-byte ML-DSA-65 public key")
+        new_entry = manifests.key_entry(
+            args.new_kid,
+            new_pub,
+            args.valid_from,
+            args.valid_to,
+            pub_ml_dsa_65=new_mldsa_pub,
+        )
 
     if new_entry is None and not retire_kids and not compromise_kids:
         raise CliUsageError(
@@ -196,7 +300,46 @@ def _cmd_manifest_rotate(args: argparse.Namespace) -> int:
             "--retire-kid/--compromise-kid"
         )
 
-    signing_kp = _load_seed_kp(args.signing_seed)
+    # The signature shape MUST follow the signing entry's own hybrid-ness, not
+    # whether the operator happened to pass --mldsa-key: `_verify_signature_block`
+    # requires the manifest_signature shape to match "pub_ml_dsa_65" in entry and
+    # verifies the ML-DSA leg against the ENTRY's bound pub, so a mismatch here
+    # produces a manifest that is cryptographically invalid at exit 0 (2026-07-13
+    # adversarial review, Task 8 fix wave, finding 1/critical).
+    signer_entry = manifests.find_key(existing, args.signing_kid)
+    mldsa_kp: pq.MLDSAKeyPair | None = None
+    if signer_entry is not None:
+        is_hybrid_signer = "pub_ml_dsa_65" in signer_entry
+        if is_hybrid_signer and args.mldsa_key is None:
+            raise CliUsageError(
+                f"signing key {args.signing_kid!r} is hybrid; --mldsa-key is required"
+            )
+        if not is_hybrid_signer and args.mldsa_key is not None:
+            raise CliUsageError(
+                f"signing key {args.signing_kid!r} is Ed25519-only; --mldsa-key is not allowed"
+            )
+        if is_hybrid_signer and args.mldsa_key is not None:
+            mldsa_kp = _load_mldsa_kp(args.mldsa_key)
+            try:
+                entry_mldsa_pub = keys.b64u_decode(signer_entry["pub_ml_dsa_65"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise CliUsageError(
+                    f"{args.manifest_in} has a malformed pub_ml_dsa_65 for "
+                    f"{args.signing_kid!r}: {exc}"
+                ) from exc
+            if mldsa_kp.pub != entry_mldsa_pub:
+                raise CliUsageError(
+                    "--mldsa-key does not match the signing key's ML-DSA-65 public "
+                    "key in the manifest"
+                )
+
+    ed_signing_kp = _load_seed_kp(args.signing_seed)
+    signing_kp: keys.SigningKeyPair | pq.HybridSigningKeys = ed_signing_kp
+    if args.mldsa_key is not None:
+        if mldsa_kp is None:
+            mldsa_kp = _load_mldsa_kp(args.mldsa_key)
+        signing_kp = pq.HybridSigningKeys(ed=ed_signing_kp, mldsa=mldsa_kp)
+
     try:
         manifest = manifests.rotate_key_manifest(
             existing,
@@ -210,6 +353,15 @@ def _cmd_manifest_rotate(args: argparse.Namespace) -> int:
     except ValueError as exc:
         raise CliUsageError(str(exc)) from exc
 
+    # A candidate must be self-consistent AND directly continue the input
+    # manifest: the signing key must be active in the input, its validity
+    # window must cover this issuance, and the version must advance by one.
+    if not manifests.check_continuity(existing, manifest):
+        raise CliUsageError(
+            "rotation does not continue the input manifest: the signing key must be active "
+            "in it and the version must increment by one"
+        )
+
     _write_json_file(args.out, manifest)
     _print_json(
         {
@@ -222,6 +374,8 @@ def _cmd_manifest_rotate(args: argparse.Namespace) -> int:
 
 
 def _cmd_manifest_artifacts(args: argparse.Namespace) -> int:
+    if _same_file_target(args.signing_seed, args.out):
+        raise CliUsageError("--signing-seed and --out must be different paths")
     artifacts = _read_json(args.artifacts)
     if not isinstance(artifacts, list):
         raise CliUsageError(f"{args.artifacts} must contain a JSON array of artifact entries")
@@ -252,15 +406,40 @@ def _cmd_manifest_artifacts(args: argparse.Namespace) -> int:
 
 
 def _cmd_issue(args: argparse.Namespace) -> int:
+    if _same_file_target(args.seed, args.out):
+        raise CliUsageError("--seed and --out must be different paths")
+    if args.salt_out is not None and _same_file_target(args.seed, args.salt_out):
+        raise CliUsageError("--seed and --salt-out must be different paths")
     if args.salt_out is not None and args.salt is None:
         raise CliUsageError("--salt-out requires --salt (nothing to write out otherwise)")
-    if args.salt_out is not None and args.out.resolve() == args.salt_out.resolve():
+    if args.salt_out is not None and _same_file_target(args.out, args.salt_out):
         # Aliased outputs would overwrite the receipt with the raw salt (2026-07-13
         # review, finding 18).
         raise CliUsageError("--out and --salt-out must be different paths")
+    if args.attest_version == "0.2" and args.mldsa_key is None:
+        raise CliUsageError("--attest-version 0.2 requires --mldsa-key")
+    if args.attest_version == "0.1" and args.mldsa_key is not None:
+        raise CliUsageError("--mldsa-key requires --attest-version 0.2")
+    if args.mldsa_key is not None and _same_file_target(args.mldsa_key, args.out):
+        # Same input-vs-output aliasing hazard as --salt/--salt-out above.
+        raise CliUsageError("--mldsa-key and --out must be different paths")
+    if (
+        args.mldsa_key is not None
+        and args.salt_out is not None
+        and _same_file_target(args.mldsa_key, args.salt_out)
+    ):
+        # Same input-vs-output aliasing hazard, extended to --salt-out: reading
+        # --mldsa-key then overwriting it with the raw salt at exit 0 would
+        # silently destroy the ML-DSA secret (adversarial re-review, Task 8
+        # fix wave 2, important finding).
+        raise CliUsageError("--mldsa-key and --salt-out must be different paths")
 
     payload = _read_json(args.payload)
-    signing_kp = _load_seed_kp(args.seed)
+    ed_signing_kp = _load_seed_kp(args.seed)
+    signing_kp: keys.SigningKeyPair | pq.HybridSigningKeys = ed_signing_kp
+    if args.mldsa_key is not None:
+        mldsa_kp = _load_mldsa_kp(args.mldsa_key)
+        signing_kp = pq.HybridSigningKeys(ed=ed_signing_kp, mldsa=mldsa_kp)
     salt = _read_b64u_file(args.salt) if args.salt is not None else None
     manifest_snapshot = _read_json(args.manifest_snapshot) if args.manifest_snapshot else None
 
@@ -534,6 +713,18 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("keygen", help="Generate an Ed25519 keypair")
     p.add_argument("--seed-out", required=True, type=Path, help="secret seed output path (0600)")
     p.add_argument("--pub-out", required=True, type=Path, help="public key output path")
+    p.add_argument(
+        "--hybrid",
+        action="store_true",
+        help="also generate an ML-DSA-65 keypair for the v0.2 hybrid profile "
+        "(requires --mldsa-out)",
+    )
+    p.add_argument(
+        "--mldsa-out",
+        type=Path,
+        default=None,
+        help="ML-DSA-65 secret key output path (0600 JSON); required with --hybrid",
+    )
     p.set_defaults(func=_cmd_keygen)
 
     p_manifest = sub.add_parser("manifest", help="Key/artifact manifest operations")
@@ -546,6 +737,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--valid-from", required=True)
     p.add_argument("--valid-to", default=None)
     p.add_argument("--issued-at", required=True, help="manifest issuance timestamp")
+    p.add_argument(
+        "--mldsa-key",
+        type=Path,
+        default=None,
+        help="ML-DSA-65 key file (from `keygen --hybrid`); makes the bootstrap entry "
+        "and manifest signature hybrid",
+    )
     p.add_argument("--out", required=True, type=Path)
     p.set_defaults(func=_cmd_manifest_init)
 
@@ -557,6 +755,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--signing-seed", required=True, type=Path)
     p.add_argument("--new-kid", default=None, help="kid of a new key to add (with --new-pub)")
     p.add_argument("--new-pub", type=Path, default=None, help="public key file of the new key")
+    p.add_argument(
+        "--new-mldsa-pub",
+        type=Path,
+        default=None,
+        help="ML-DSA-65 public key file for the new key; makes the new entry hybrid — "
+        "requires --new-pub",
+    )
     p.add_argument("--valid-from", default=None, help="required only when adding a new key")
     p.add_argument("--valid-to", default=None)
     p.add_argument(
@@ -575,6 +780,12 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument("--issued-at", required=True)
+    p.add_argument(
+        "--mldsa-key",
+        type=Path,
+        default=None,
+        help="ML-DSA-65 leg of the signing key; makes the manifest signature hybrid",
+    )
     p.add_argument("--out", required=True, type=Path)
     p.set_defaults(func=_cmd_manifest_rotate)
 
@@ -596,6 +807,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--salt", type=Path, default=None, help="buyer-binding salt to embed")
     p.add_argument("--salt-out", type=Path, default=None, help="also copy --salt to this path")
     p.add_argument("--manifest-snapshot", type=Path, default=None)
+    p.add_argument(
+        "--attest-version",
+        choices=("0.1", "0.2"),
+        default="0.1",
+        help="signing profile; 0.2 requires --mldsa-key (hybrid Ed25519+ML-DSA-65)",
+    )
+    p.add_argument(
+        "--mldsa-key",
+        type=Path,
+        default=None,
+        help="ML-DSA-65 key file (from `keygen --hybrid`); required with --attest-version 0.2",
+    )
     p.add_argument("--out", required=True, type=Path, help="output envelope JSON path")
     p.set_defaults(func=_cmd_issue)
 
