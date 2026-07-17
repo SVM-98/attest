@@ -23,7 +23,7 @@ from collections.abc import Iterable
 from datetime import datetime
 from typing import Any
 
-from attest import canon, keys
+from attest import canon, keys, pq
 
 _DATE_FMT = "%Y-%m-%dT%H:%M:%SZ"
 _ACTIVE = "active"
@@ -67,15 +67,24 @@ def key_entry(
     valid_from: str,
     valid_to: str | None = None,
     status: str = _ACTIVE,
+    pub_ml_dsa_65: bytes | None = None,
 ) -> dict[str, Any]:
-    """Build one `keys[]` entry. `pub` is raw 32-byte Ed25519 public key bytes."""
-    return {
+    """Build one `keys[]` entry. `pub` is raw 32-byte Ed25519 public key bytes.
+
+    Passing `pub_ml_dsa_65` (raw ML-DSA-65 public key bytes) marks the entry
+    hybrid: a manifest signed by this key must carry both signature legs
+    (see `build_key_manifest`/`verify_key_manifest`).
+    """
+    entry: dict[str, Any] = {
         "kid": kid,
         "pub": keys.b64u(pub),
         "valid_from": valid_from,
         "valid_to": valid_to,
         "status": status,
     }
+    if pub_ml_dsa_65 is not None:
+        entry["pub_ml_dsa_65"] = keys.b64u(pub_ml_dsa_65)
+    return entry
 
 
 def find_key(manifest: dict[str, Any], kid: str) -> dict[str, Any] | None:
@@ -91,12 +100,66 @@ def find_key(manifest: dict[str, Any], kid: str) -> dict[str, Any] | None:
     return None
 
 
+def _sign_manifest(
+    manifest: dict[str, Any],
+    signing_kp: keys.SigningKeyPair | pq.HybridSigningKeys,
+    signing_kid: str,
+) -> dict[str, Any]:
+    """Build the `manifest_signature` block for `manifest` (mutates nothing —
+    the caller inserts the returned block).
+
+    Hybrid signing keys (`pq.HybridSigningKeys`) add a second `sig_ml_dsa_65`
+    leg over the same signable bytes as the Ed25519 `sig` leg.
+    """
+    payload = _signable(manifest)
+    if isinstance(signing_kp, pq.HybridSigningKeys):
+        ed_sig = keys.sign(payload, signing_kp.ed)
+        mldsa_sig = pq.sign(payload, signing_kp.mldsa)
+        return {
+            "kid": signing_kid,
+            "sig": keys.b64u(ed_sig),
+            "sig_ml_dsa_65": keys.b64u(mldsa_sig),
+        }
+    sig = keys.sign(payload, signing_kp)
+    return {"kid": signing_kid, "sig": keys.b64u(sig)}
+
+
+def _verify_signature_block(
+    payload: bytes, sig_block: dict[str, Any], entry: dict[str, Any]
+) -> bool:
+    """AND rule: `entry` hybrid (carries `pub_ml_dsa_65`) requires BOTH legs
+    present and valid; non-hybrid requires the Ed25519 leg valid and
+    `sig_ml_dsa_65` ABSENT. Any other combination fails closed. Never raises —
+    decode/type errors on untrusted input are treated as verification failure.
+    """
+    is_hybrid_entry = "pub_ml_dsa_65" in entry
+    has_mldsa_leg = "sig_ml_dsa_65" in sig_block
+    if is_hybrid_entry != has_mldsa_leg:
+        return False
+    try:
+        ed_ok = keys.verify_strict(
+            payload, keys.b64u_decode(sig_block["sig"]), keys.b64u_decode(entry["pub"])
+        )
+        if not is_hybrid_entry:
+            return ed_ok
+        mldsa_ok = pq.verify_strict(
+            payload,
+            keys.b64u_decode(sig_block["sig_ml_dsa_65"]),
+            keys.b64u_decode(entry["pub_ml_dsa_65"]),
+        )
+        return ed_ok and mldsa_ok
+    except (KeyError, ValueError, TypeError):
+        # Manifests arrive from untrusted sources with no schema gate here; fail
+        # closed on wrong-typed fields (e.g. non-str sig/pub -> TypeError) too.
+        return False
+
+
 def build_key_manifest(
     issuer: str,
     manifest_version: int,
     issued_at: str,
     key_entries: list[dict[str, Any]],
-    signing_kp: keys.SigningKeyPair,
+    signing_kp: keys.SigningKeyPair | pq.HybridSigningKeys,
     signing_kid: str,
 ) -> dict[str, Any]:
     manifest: dict[str, Any] = {
@@ -105,8 +168,7 @@ def build_key_manifest(
         "issued_at": issued_at,
         "keys": key_entries,
     }
-    sig = keys.sign(_signable(manifest), signing_kp)
-    manifest["manifest_signature"] = {"kid": signing_kid, "sig": keys.b64u(sig)}
+    manifest["manifest_signature"] = _sign_manifest(manifest, signing_kp, signing_kid)
     return manifest
 
 
@@ -118,14 +180,7 @@ def verify_key_manifest(manifest: dict[str, Any]) -> bool:
     entry = find_key(manifest, sig_block.get("kid", ""))
     if entry is None:
         return False
-    try:
-        return keys.verify_strict(
-            _signable(manifest), keys.b64u_decode(sig_block["sig"]), keys.b64u_decode(entry["pub"])
-        )
-    except (KeyError, ValueError, TypeError):
-        # Manifests arrive from untrusted sources with no schema gate here; fail
-        # closed on wrong-typed fields (e.g. non-str sig/pub -> TypeError) too.
-        return False
+    return _verify_signature_block(_signable(manifest), sig_block, entry)
 
 
 def check_continuity(trusted: dict[str, Any], candidate: dict[str, Any]) -> bool:
@@ -159,19 +214,14 @@ def check_continuity(trusted: dict[str, Any], candidate: dict[str, Any]) -> bool
     # candidate lists for it. Otherwise an attacker reuses a trusted kid, swaps in
     # its own pub, self-signs, and passes — continuity becomes cryptographically
     # hollow (2026-07-13 review, finding 1).
-    try:
-        return keys.verify_strict(
-            _signable(candidate),
-            keys.b64u_decode(candidate["manifest_signature"]["sig"]),
-            keys.b64u_decode(signer_entry["pub"]),
-        )
-    except (KeyError, ValueError, TypeError):
-        return False
+    return _verify_signature_block(
+        _signable(candidate), candidate["manifest_signature"], signer_entry
+    )
 
 
 def rotate_key_manifest(
     existing: dict[str, Any],
-    signing_kp: keys.SigningKeyPair,
+    signing_kp: keys.SigningKeyPair | pq.HybridSigningKeys,
     signing_kid: str,
     issued_at: str,
     new_entry: dict[str, Any] | None = None,
