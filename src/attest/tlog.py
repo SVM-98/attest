@@ -413,6 +413,11 @@ _MAX_TREE_SIZE_DIGITS = 20
 # C2SP recommends a signature limit while requiring acceptance of at least
 # 16. Sixty-four leaves room for witness cosignatures without unbounded work.
 _MAX_NOTE_SIGNATURES = 64
+# Worst-case legitimate note is ~400KB: 3 header lines plus 64 ML-DSA-65
+# signature lines at ~4.4KB base64 each. This matches anchor.py's
+# _MAX_CHECKPOINT_TEXT_LEN rationale, which remains caller-side defense in depth.
+_MAX_NOTE_TEXT_LEN = 500_000
+_MAX_NOTE_LINES = 4 + _MAX_NOTE_SIGNATURES
 # Largest legitimate signature blob is 4 (key hash) + 3309 (ML-DSA-65) =
 # 3313 bytes -> 4420 base64 chars; 8192 is generous headroom. Checked
 # BEFORE base64-decoding so a hostile line cannot force a large allocation.
@@ -565,6 +570,10 @@ def _split_note(text: str) -> tuple[list[str], list[str]]:
         raise TlogError(f"checkpoint text must be a str, got {type(text).__name__}")
     if not text.endswith("\n"):
         raise TlogError("checkpoint text must end with a newline")
+    if len(text) > _MAX_NOTE_TEXT_LEN:
+        raise TlogError(f"checkpoint text exceeds {_MAX_NOTE_TEXT_LEN} chars")
+    if text.count("\n") > _MAX_NOTE_LINES:
+        raise TlogError(f"checkpoint text has too many lines (max {_MAX_NOTE_LINES})")
     lines = text.split("\n")[:-1]  # drop the "" produced by the trailing \n
     if len(lines) < 4:
         raise TlogError("checkpoint text is too short for a header plus blank line")
