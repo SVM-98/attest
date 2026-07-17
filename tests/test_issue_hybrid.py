@@ -60,14 +60,14 @@ def test_v02_with_ed_only_key_raises() -> None:
     payload = make_payload(attest_version="0.2")
     with pytest.raises(issue.IssueError) as exc_info:
         issue.issue(payload, _ed_kp(), _KID)
-    assert "attest_version 0.2 requires hybrid signing keys" in exc_info.value.args[0]
+    assert exc_info.value.args[0] == "attest_version 0.2 requires hybrid signing keys"
 
 
 def test_v01_with_hybrid_key_raises() -> None:
     payload = make_payload(attest_version="0.1")
     with pytest.raises(issue.IssueError) as exc_info:
         issue.issue(payload, _hybrid_kp(), _KID)
-    assert "attest_version 0.1 requires an Ed25519-only signing key" in exc_info.value.args[0]
+    assert exc_info.value.args[0] == "attest_version 0.1 requires an Ed25519-only signing key"
 
 
 def test_build_payload_rejects_unknown_attest_version() -> None:
@@ -90,6 +90,14 @@ def test_build_payload_rejects_unknown_attest_version() -> None:
 
 def test_v01_envelope_unchanged() -> None:
     payload = make_payload(attest_version="0.1")
-    envelope = issue.issue(payload, _ed_kp(), _KID)
-    assert len(envelope["signatures"]) == 1
-    assert envelope["signatures"][0]["alg"] == "Ed25519"
+    kp = _ed_kp()
+    envelope = issue.issue(payload, kp, _KID)
+
+    expected_sig = keys.sign(canon.canonical_bytes(payload), kp)
+    assert envelope["signatures"] == [
+        {
+            "kid": _KID,
+            "alg": "Ed25519",
+            "sig": keys.b64u(expected_sig),
+        }
+    ]
