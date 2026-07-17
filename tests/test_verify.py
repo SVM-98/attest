@@ -166,9 +166,13 @@ def test_missing_signatures_member_is_invalid() -> None:
 def test_unsupported_attest_version_is_invalid() -> None:
     """`attest_version` is gated by verify() itself (step 1), independent of and
     before the jsonschema `const` check in step 5 — hand-sign to bypass
-    issue()'s own schema gate and exercise verify()'s own check directly."""
+    issue()'s own schema gate and exercise verify()'s own check directly.
+
+    "0.3" (not "0.2" — 0.2 is a supported hybrid version as of this receipt
+    format) stands in for an attest_version verify() does not recognize.
+    """
     payload = make_payload()
-    payload["attest_version"] = "0.2"
+    payload["attest_version"] = "0.3"
     sig = keys.sign(canon.canonical_bytes(payload), KP)
     envelope = {
         "payload": payload,
