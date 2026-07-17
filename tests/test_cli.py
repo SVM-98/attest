@@ -1479,6 +1479,7 @@ def test_load_mldsa_kp_rejects_malformed(tmp_path: Path, capsys: CapSys) -> None
         assert rc == 2, f"expected exit 2 for {bad_file.name}"
         err = capsys.readouterr().err
         assert err != ""
+        assert "Traceback" not in err
 
 
 # --- fix wave 2 (Task 8 adversarial re-review): salt-out alias + rotate self-verify --
@@ -1517,6 +1518,42 @@ def test_issue_v02_mldsa_key_aliased_with_salt_out_errors(tmp_path: Path, capsys
     assert json.loads(mldsa_key.read_text(encoding="utf-8"))["alg"] == pq.ML_DSA_65_ALG
 
 
+def test_issue_mldsa_key_hardlinked_salt_out_errors(tmp_path: Path) -> None:
+    seed, _pub, mldsa_key = _keygen_hybrid(tmp_path, "issuer")
+    salt_out = tmp_path / "mldsa-salt-link"
+    try:
+        os.link(mldsa_key, salt_out)
+    except OSError:
+        pytest.skip("hard links unsupported on this filesystem")
+    payload_path = _write_payload(tmp_path, attest_version="0.2")
+    salt = _write_salt_file(tmp_path, "buyer.salt", b"s" * 16)
+
+    rc = cli.main(
+        [
+            "issue",
+            "--payload",
+            str(payload_path),
+            "--seed",
+            str(seed),
+            "--mldsa-key",
+            str(mldsa_key),
+            "--attest-version",
+            "0.2",
+            "--kid",
+            KID,
+            "--salt",
+            str(salt),
+            "--salt-out",
+            str(salt_out),
+            "--out",
+            str(tmp_path / "receipt.json"),
+        ]
+    )
+
+    assert rc == 2
+    assert json.loads(mldsa_key.read_text(encoding="utf-8"))["alg"] == pq.ML_DSA_65_ALG
+
+
 def test_keygen_mldsa_out_aliased_with_pub_out_errors(tmp_path: Path, capsys: CapSys) -> None:
     shared = tmp_path / "issuer.pub"
 
@@ -1535,6 +1572,20 @@ def test_keygen_mldsa_out_aliased_with_pub_out_errors(tmp_path: Path, capsys: Ca
 
     assert rc == 2
     assert capsys.readouterr().err != ""
+
+
+def test_keygen_seed_out_hardlinked_pub_out_errors(tmp_path: Path) -> None:
+    seed_out = tmp_path / "issuer.seed"
+    seed_out.write_text("existing seed", encoding="utf-8")
+    pub_out = tmp_path / "issuer.pub"
+    try:
+        os.link(seed_out, pub_out)
+    except OSError:
+        pytest.skip("hard links unsupported on this filesystem")
+
+    rc = cli.main(["keygen", "--seed-out", str(seed_out), "--pub-out", str(pub_out)])
+
+    assert rc == 2
 
 
 def test_manifest_init_mldsa_key_aliased_with_out_errors(tmp_path: Path, capsys: CapSys) -> None:
