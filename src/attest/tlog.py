@@ -34,6 +34,7 @@ from typing import Any
 from attest import canon
 
 _HASH_LEN = 32  # SHA-256 digest length in bytes
+_MAX_JCS_INTEGER = 2**53 - 1
 _LEAF_PREFIX = b"\x00"  # RFC 6962 §2.1: MTH({d(0)}) = SHA-256(0x00 || d(0))
 _NODE_PREFIX = b"\x01"  # RFC 6962 §2.1: MTH(D[n]) = SHA-256(0x01 || left || right)
 
@@ -180,7 +181,12 @@ def verify_inclusion(
     `False` rather than raising — `leaf`/`index`/`proof`/`root` all arrive
     from an untrusted log server.
     """
-    if not isinstance(leaf, bytes) or not isinstance(root, bytes):
+    if (
+        not isinstance(leaf, bytes)
+        or len(leaf) != _HASH_LEN
+        or not isinstance(root, bytes)
+        or len(root) != _HASH_LEN
+    ):
         return False
     if not isinstance(index, int) or isinstance(index, bool):
         return False
@@ -223,7 +229,12 @@ def verify_consistency(
         return False
     if not isinstance(size2, int) or isinstance(size2, bool):
         return False
-    if not isinstance(root1, bytes) or not isinstance(root2, bytes):
+    if (
+        not isinstance(root1, bytes)
+        or len(root1) != _HASH_LEN
+        or not isinstance(root2, bytes)
+        or len(root2) != _HASH_LEN
+    ):
         return False
     if size1 < 0 or size2 < 0 or size1 > size2:
         return False
@@ -293,6 +304,8 @@ def verify_consistency(
 
 
 def _require_fields(entry: dict[str, Any], expected: frozenset[str]) -> None:
+    if any(not isinstance(key, str) for key in entry):
+        raise TlogError("entry field names must be strings")
     actual = frozenset(entry.keys())
     if actual != expected:
         missing = sorted(expected - actual)
@@ -302,20 +315,26 @@ def _require_fields(entry: dict[str, Any], expected: frozenset[str]) -> None:
 
 def _require_issuer(entry: dict[str, Any]) -> None:
     issuer = entry.get("issuer")
-    if not isinstance(issuer, str) or not _ISSUER_RE.match(issuer):
+    if not isinstance(issuer, str) or not _ISSUER_RE.fullmatch(issuer):
         raise TlogError(f"issuer must be a lowercase DNS name: {issuer!r}")
 
 
 def _require_hex64(entry: dict[str, Any], field: str) -> None:
     value = entry.get(field)
-    if not isinstance(value, str) or not _HEX64_RE.match(value):
+    if not isinstance(value, str) or not _HEX64_RE.fullmatch(value):
         raise TlogError(f"{field} must be 64 lowercase hex characters: {value!r}")
 
 
 def _require_manifest_version(entry: dict[str, Any]) -> None:
     version = entry.get("manifest_version")
-    if not isinstance(version, int) or isinstance(version, bool) or version < 1:
-        raise TlogError(f"manifest_version must be an int >= 1: {version!r}")
+    if (
+        not isinstance(version, int)
+        or isinstance(version, bool)
+        or not 1 <= version <= _MAX_JCS_INTEGER
+    ):
+        raise TlogError(
+            f"manifest_version must be an int in [1, {_MAX_JCS_INTEGER}]: {version!r}"
+        )
 
 
 def encode_entry(entry: dict[str, Any]) -> bytes:
