@@ -2,11 +2,21 @@
 
 **The store dies, the receipt survives.**
 
-attest is an open standard and reference implementation for cryptographically-signed
-purchase receipts, for *any* digital purchase — games, music, film and TV, books.
-The store signs a receipt once; the buyer holds it forever; anyone can verify it
-offline. No wallet, no blockchain, no server that has to stay alive for the proof
-to still work.
+When a digital store shuts down or delists a title, buyers lose twice. The loud
+loss is access: the game, book, or film stops working, and everyone talks about
+that. The quiet loss is evidence: the only record that you ever paid lived in
+the seller's database, so the proof of purchase dies at the same moment as
+everything it could have proven — a refund, a dispute, a class action, a
+preservation project's eligibility check. You go from "customer" to "nobody in
+particular" the instant the server goes dark.
+
+attest closes that second gap. It is an open standard and reference
+implementation for signed purchase receipts the *buyer* holds: the store signs
+a receipt once at checkout, the buyer keeps the file like a paper receipt, and
+anyone can verify it offline, forever — even after the store is gone. It covers
+any digital purchase: games, e-books, film and TV, music, software, courses.
+No account, no wallet, no blockchain, no server that has to stay alive for the
+proof to still work.
 
 **Try it in your browser:** <https://svm-98.github.io/attest/> — drop a `.attest`
 bundle (or the built-in sample) and watch it verify entirely client-side; the
@@ -22,11 +32,25 @@ customers' digital anime libraries in 2024; Kindle removed book export in
 February 2025; Sony ends PlayStation disc production for new games in
 January 2028, pushing more purchases into pure platform dependency. None of this is
 hypothetical or gaming-specific — it is what "buy" already means for every kind of
-digital media, and regulators are starting to notice: California's AB 2426 and
-Maryland's [HB 208](https://mgaleg.maryland.gov/mgawebsite/Legislation/Details/hb0208?ys=2025RS) both require disclosure that a digital "purchase" is a license,
-and the EU's end-of-life industry code of conduct is due by the end of 2026. What's
-missing is not more disclosure law — it's an open technical standard for a purchase
-record the buyer actually holds, independent of whether the seller survives.
+digital media.
+
+Policy is waking up to half of the problem. California's AB 2426 and Maryland's
+[HB 208](https://mgaleg.maryland.gov/mgawebsite/Legislation/Details/hb0208?ys=2025RS)
+require disclosure that a digital "purchase" is a license; the EU's Digital
+Content Directive (2019/770) already grants consumers remedies when digital
+content fails to conform; and in June 2026 the European Commission — answering
+the 1.29-million-signature Stop Killing Games initiative — committed to an
+industry code of conduct on video game end-of-life by the end of 2026. All of
+those efforts are about access and disclosure. None of them puts proof of
+purchase on the table — yet a right without evidence is unenforceable. Once the
+seller's records are the only proof and the seller is gone, there is nothing
+left to base a remedy on.
+
+What's missing is not more disclosure law — it's an open technical standard for
+a purchase record the buyer actually holds, independent of whether the seller
+survives. That evidence layer is what attest is. Deliberately, it is *only*
+that: attest does not keep content alive (see below), it makes sure that
+whatever rights a buyer has can still be exercised after the store is gone.
 
 ## How it works, for humans
 
@@ -64,8 +88,8 @@ won't adopt voluntarily, the lever is regulation and market pressure, not forger
 ## Status
 
 Spec v0.1 is complete, with two independent implementations — a Python reference
-implementation and a TypeScript verifier — that agree on all 18 conformance
-vectors (23 leaf cases spanning format/crypto and lifecycle/policy behavior), plus
+implementation and a TypeScript verifier — that agree on all 27 conformance
+vectors (52 leaf cases spanning format/crypto and lifecycle/policy behavior), plus
 an end-to-end demo that deletes a store's entire infrastructure mid-lifecycle and
 proves the receipt still verifies.
 
@@ -128,6 +152,11 @@ in later stages.
 
 Non-normative, and deliberately undated — these are directions, not commitments:
 
+- **Authorized preservation escrow.** A path where a rights holder deposits a
+  build or copy with a preservation institution and licenses buyers to retrieve
+  it once official distribution ends — with the receipt as the eligibility
+  check. Strictly rights-holder-authorized: attest will never host, index, or
+  distribute content on its own.
 - **Evidence capture for non-cooperating stores.** A research track into
   TLS-session-proof techniques (the zkTLS/TLSNotary class) that could let a buyer
   capture their own evidence of a purchase from a store that never signs anything,
@@ -155,7 +184,7 @@ registration — real trademark enforcement would require actually registering t
 mark, which has not happened.
 
 **Contributing.** See [`CONTRIBUTING.md`](CONTRIBUTING.md). Implementation pull
-requests must pass all 23 conformance vector leaves and keep both the Python and
+requests must pass all 52 conformance vector leaves and keep both the Python and
 TypeScript suites green.
 
 **Contact.** Use GitHub Issues for technical bugs, GitHub Discussions for
