@@ -1941,6 +1941,37 @@ def gen_26_hybrid() -> None:
     )
 
 
+def gen_27_valid_to_absent() -> None:
+    entry = manifests.key_entry(ISSUER_KID, ISSUER_KP.pub, KEY_VALID_FROM, None)
+    del entry["valid_to"]  # omit the field entirely (not null) — the divergence case
+    manifest = manifests.build_key_manifest(
+        ISSUER_ID, 1, MANIFEST_ISSUED_AT, [entry], ISSUER_KP, ISSUER_KID
+    )
+    assert manifests.verify_key_manifest(manifest)  # self-consistent without valid_to
+    payload = issue.build_payload(**_base_payload_kwargs())
+    _assert_schema_valid(payload)
+    envelope = issue.issue(payload, ISSUER_KP, ISSUER_KID)
+    trust = _trust_material((ISSUER_ID, manifest, "tls"))
+    expected = {
+        "signature": "valid",
+        "schema": "valid",
+        "revocation": "unknown",
+        "binding": "not_checked",
+        "trust": "verified",
+        "ok": True,
+        "errors": [],
+        "warnings": [],
+    }
+    write_vector(
+        "27-valid-to-absent",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected,
+    )
+
+
 def main() -> None:
     _clear_leaf_dirs(VECTORS_DIR)
     VECTORS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1971,6 +2002,7 @@ def main() -> None:
     gen_24_canonical_roundtrip()
     gen_25_schema_parity()
     gen_26_hybrid()
+    gen_27_valid_to_absent()
     leaf_count = sum(1 for _ in VECTORS_DIR.rglob("expected.json"))
     print(f"generated {leaf_count} vector cases under {VECTORS_DIR}")
 

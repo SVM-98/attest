@@ -6,6 +6,10 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- The TypeScript verifier treats an absent key-entry `valid_to` as open-ended, matching the Python reference; spec §7.1 now clarifies `valid_to` is optional.
+
 ### Added
 
 - v0.2 hybrid Ed25519+ML-DSA-65 signature profile (`attest_version: "0.2"`):
