@@ -5,8 +5,8 @@ import * as V from './helpers/vectors.js'
 const leaves = V.findLeafDirs()
 
 describe('conformance corpus through the site adapter', () => {
-  it('discovers the full vector suite (>= 43 leaves)', () => {
-    expect(leaves.length).toBeGreaterThanOrEqual(43)
+  it('discovers the full vector suite (>= 51 leaves)', () => {
+    expect(leaves.length).toBeGreaterThanOrEqual(51)
   })
 
   it.each(leaves.map((d) => [V.vectorId(d), d] as const))('%s', (_id, dir) => {

@@ -1,0 +1,12 @@
+{
+  "binding": "not_checked",
+  "errors_contains": [
+    "has no ML-DSA-65 public key"
+  ],
+  "ok": false,
+  "revocation": "unknown",
+  "schema": "not_checked",
+  "signature": "invalid",
+  "trust": "verified",
+  "warnings": []
+}
