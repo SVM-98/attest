@@ -13,9 +13,11 @@ import re
 from datetime import UTC, datetime
 from typing import Any
 
-from attest import canon, commitment, keys, ulid, validate
+from attest import canon, commitment, keys, pq, ulid, validate
 
-_ALG = "Ed25519"  # hard-coded — never selected from any field, see §3
+ALG_ED25519 = "Ed25519"  # hard-coded — never selected from any field, see §3
+ALG_ML_DSA_65 = "ML-DSA-65"
+_ATTEST_VERSIONS = ("0.1", "0.2")
 # kid structure per spec: <issuer-domain>/keys/<label>#<name>
 _KID_RE = re.compile(r"^[^/]+/keys/[^/#]+#[^/#]+$")
 
@@ -34,7 +36,7 @@ class IssueError(ValueError):
 
 def issue(
     payload: dict[str, Any],
-    signing_kp: keys.SigningKeyPair,
+    signing_kp: keys.SigningKeyPair | pq.HybridSigningKeys,
     kid: str,
     *,
     salt: bytes | None = None,
@@ -44,6 +46,11 @@ def issue(
 
     Order of checks (per spec): schema validity, then kid-domain match
     against `payload["issuer"]["id"]`. Only then is anything signed.
+
+    `attest_version` "0.1" requires a plain `keys.SigningKeyPair` (single
+    Ed25519 signature); "0.2" requires `pq.HybridSigningKeys` (two ordered
+    signatures, Ed25519 then ML-DSA-65, same kid, over the same canonical
+    payload bytes).
     """
     violations = validate.validate_payload(payload)
     if violations:
@@ -64,12 +71,29 @@ def issue(
         # binding permanently unprovable (2026-07-13 review, finding 15).
         raise IssueError("buyer-binding salt must be exactly 16 bytes")
 
+    attest_version = payload["attest_version"]
+    is_hybrid = isinstance(signing_kp, pq.HybridSigningKeys)
+    if attest_version == "0.1" and is_hybrid:
+        raise IssueError("attest_version 0.1 requires an Ed25519-only signing key")
+    if attest_version == "0.2" and not is_hybrid:
+        raise IssueError("attest_version 0.2 requires hybrid signing keys")
+
     payload_bytes = canon.canonical_bytes(payload)
-    sig = keys.sign(payload_bytes, signing_kp)
+    signatures: list[dict[str, Any]]
+    if isinstance(signing_kp, pq.HybridSigningKeys):
+        ed_sig = keys.sign(payload_bytes, signing_kp.ed)
+        mldsa_sig = pq.sign(payload_bytes, signing_kp.mldsa)
+        signatures = [
+            {"kid": kid, "alg": ALG_ED25519, "sig": keys.b64u(ed_sig)},
+            {"kid": kid, "alg": ALG_ML_DSA_65, "sig": keys.b64u(mldsa_sig)},
+        ]
+    else:
+        sig = keys.sign(payload_bytes, signing_kp)
+        signatures = [{"kid": kid, "alg": ALG_ED25519, "sig": keys.b64u(sig)}]
 
     envelope: dict[str, Any] = {
         "payload": payload,
-        "signatures": [{"kid": kid, "alg": _ALG, "sig": keys.b64u(sig)}],
+        "signatures": signatures,
     }
 
     delivery: dict[str, Any] = {}
@@ -118,6 +142,7 @@ def build_payload(
     issued_at: str | None = None,
     supersedes: str | None = None,
     receipt_id: str | None = None,
+    attest_version: str = "0.1",
 ) -> dict[str, Any]:
     """Assemble a §3.1 payload.
 
@@ -129,6 +154,10 @@ def build_payload(
     `mirror_policy_sha256`, `revocation_window_days`, `jurisdiction_flags`)
     are omitted entirely when not supplied, rather than set to `None`.
     """
+    if attest_version not in _ATTEST_VERSIONS:
+        raise IssueError(
+            f"unknown attest_version {attest_version!r}: expected one of {_ATTEST_VERSIONS!r}"
+        )
     commitment_bytes = commitment.compute(buyer_identifier, buyer_identifier_type, buyer_salt)
     buyer: dict[str, Any] = {
         "commitment": keys.b64u(commitment_bytes),
@@ -172,7 +201,7 @@ def build_payload(
         survivability["mirror_policy_sha256"] = mirror_policy_sha256
 
     return {
-        "attest_version": "0.1",
+        "attest_version": attest_version,
         "receipt_id": receipt_id if receipt_id is not None else ulid.generate(),
         "issued_at": issued_at if issued_at is not None else _now_iso(),
         "supersedes": supersedes,
