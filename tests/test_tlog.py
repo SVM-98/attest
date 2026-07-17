@@ -10,11 +10,12 @@ to exercise every size pair; the KATs pin the hashing scheme itself.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 
 import pytest
 
-from attest import tlog
+from attest import keys, pq, tlog
 
 LEAVES = [bytes([i]) for i in range(7)]  # b"\x00", b"\x01", ... b"\x06"
 
@@ -361,3 +362,298 @@ def test_encode_entry_rejects_core_hash_with_trailing_newline() -> None:
     entry["core_sha256"] = "b" * 64 + "\n"
     with pytest.raises(tlog.TlogError):
         tlog.encode_entry(entry)
+
+
+# --------------------------------------------------------------------------
+# Hybrid signed-note checkpoints: parse_checkpoint / verify_checkpoint /
+# sign_checkpoint.
+# --------------------------------------------------------------------------
+
+ORIGIN = "log.attest.example/2026"
+LOG_NAME = "attest-log-1"
+ROOT = hashlib.sha256(b"checkpoint-test-root").digest()
+
+
+def _hybrid_keys() -> pq.HybridSigningKeys:
+    return pq.HybridSigningKeys(ed=keys.generate(), mldsa=pq.generate())
+
+
+def _log_key(hk: pq.HybridSigningKeys, origin: str = ORIGIN, name: str = LOG_NAME) -> tlog.LogKey:
+    return tlog.LogKey(origin=origin, name=name, ed25519_pub=hk.ed.pub, mldsa_pub=hk.mldsa.pub)
+
+
+def _signed_checkpoint(
+    tree_size: int = 5, root: bytes = ROOT, origin: str = ORIGIN, name: str = LOG_NAME
+) -> tuple[str, pq.HybridSigningKeys]:
+    hk = _hybrid_keys()
+    text = tlog.sign_checkpoint(origin, tree_size, root, hk, name)
+    return text, hk
+
+
+def _corrupt_line(text: str, index: int, new_line: str) -> str:
+    lines = text.split("\n")
+    lines[index] = new_line
+    return "\n".join(lines)
+
+
+# --- parse_checkpoint: structural validation only -------------------------
+
+
+def test_parse_checkpoint_round_trip() -> None:
+    text, _hk = _signed_checkpoint(tree_size=7, root=ROOT, origin=ORIGIN)
+    checkpoint = tlog.parse_checkpoint(text)
+    assert checkpoint.origin == ORIGIN
+    assert checkpoint.tree_size == 7
+    assert checkpoint.root == ROOT
+    expected_note = f"{ORIGIN}\n7\n{base64.b64encode(ROOT).decode('ascii')}\n\n"
+    assert checkpoint.note_bytes == expected_note.encode("utf-8")
+
+
+def test_parse_checkpoint_accepts_zero_signature_lines() -> None:
+    text = f"{ORIGIN}\n3\n{base64.b64encode(ROOT).decode('ascii')}\n\n"
+    checkpoint = tlog.parse_checkpoint(text)
+    assert checkpoint.tree_size == 3
+
+
+def test_parse_checkpoint_rejects_missing_blank_line() -> None:
+    text = f"{ORIGIN}\n3\n{base64.b64encode(ROOT).decode('ascii')}\nnot-blank\n"
+    with pytest.raises(tlog.TlogError):
+        tlog.parse_checkpoint(text)
+
+
+def test_parse_checkpoint_rejects_two_line_body() -> None:
+    # Root line entirely missing: only origin + size before the blank line.
+    text = f"{ORIGIN}\n3\n\n"
+    with pytest.raises(tlog.TlogError):
+        tlog.parse_checkpoint(text)
+
+
+def test_parse_checkpoint_rejects_non_decimal_size() -> None:
+    text = f"{ORIGIN}\nfive\n{base64.b64encode(ROOT).decode('ascii')}\n\n"
+    with pytest.raises(tlog.TlogError):
+        tlog.parse_checkpoint(text)
+
+
+def test_parse_checkpoint_rejects_negative_size() -> None:
+    text = f"{ORIGIN}\n-3\n{base64.b64encode(ROOT).decode('ascii')}\n\n"
+    with pytest.raises(tlog.TlogError):
+        tlog.parse_checkpoint(text)
+
+
+def test_parse_checkpoint_rejects_oversized_decimal_size() -> None:
+    # A 5000-digit tree size must fail closed as TlogError, not leak the
+    # bare ValueError CPython's int() raises past its digit-string limit
+    # (3.11+ default 4300 digits) -- and must not pay the O(n^2) parse cost.
+    huge_size = "9" * 5000
+    text = f"{ORIGIN}\n{huge_size}\n{base64.b64encode(ROOT).decode('ascii')}\n\n"
+    with pytest.raises(tlog.TlogError):
+        tlog.parse_checkpoint(text)
+
+
+def test_parse_checkpoint_rejects_non_ascii_digit_size() -> None:
+    # str.isdigit() accepts non-decimal Unicode digit-value characters
+    # (e.g. superscript "²") that int() then rejects -- must fail
+    # closed as TlogError, not leak a bare ValueError.
+    text = f"{ORIGIN}\n²²²\n{base64.b64encode(ROOT).decode('ascii')}\n\n"
+    with pytest.raises(tlog.TlogError):
+        tlog.parse_checkpoint(text)
+
+
+def test_parse_checkpoint_rejects_root_not_32_bytes() -> None:
+    short_root_b64 = base64.b64encode(bytes(31)).decode("ascii")
+    text = f"{ORIGIN}\n3\n{short_root_b64}\n\n"
+    with pytest.raises(tlog.TlogError):
+        tlog.parse_checkpoint(text)
+
+
+def test_parse_checkpoint_rejects_bad_base64_root() -> None:
+    text = f"{ORIGIN}\n3\nnot-valid-base64!!\n\n"
+    with pytest.raises(tlog.TlogError):
+        tlog.parse_checkpoint(text)
+
+
+def test_parse_checkpoint_rejects_missing_trailing_newline() -> None:
+    text = f"{ORIGIN}\n3\n{base64.b64encode(ROOT).decode('ascii')}\n\n"
+    with pytest.raises(tlog.TlogError):
+        tlog.parse_checkpoint(text[:-1])
+
+
+def test_parse_checkpoint_rejects_malformed_signature_line() -> None:
+    text = f"{ORIGIN}\n3\n{base64.b64encode(ROOT).decode('ascii')}\n\nnot-a-signature-line\n"
+    with pytest.raises(tlog.TlogError):
+        tlog.parse_checkpoint(text)
+
+
+def test_parse_checkpoint_rejects_signature_line_with_wrong_dash() -> None:
+    # Plain hyphen instead of U+2014 em dash: must be rejected, not tolerated.
+    text = (
+        f"{ORIGIN}\n3\n{base64.b64encode(ROOT).decode('ascii')}\n\n"
+        f"- {LOG_NAME} {base64.b64encode(bytes(68)).decode('ascii')}\n"
+    )
+    with pytest.raises(tlog.TlogError):
+        tlog.parse_checkpoint(text)
+
+
+def test_parse_checkpoint_rejects_non_str_input() -> None:
+    with pytest.raises(tlog.TlogError):
+        tlog.parse_checkpoint(b"not-a-str")  # type: ignore[arg-type]
+
+
+# --- verify_checkpoint: hybrid AND + origin binding ------------------------
+
+
+def test_verify_checkpoint_both_legs_good_passes() -> None:
+    text, hk = _signed_checkpoint()
+    log_key = _log_key(hk)
+    checkpoint = tlog.verify_checkpoint(text, log_key, ORIGIN)
+    assert checkpoint.tree_size == 5
+    assert checkpoint.root == ROOT
+
+
+def test_verify_checkpoint_ed_only_fails() -> None:
+    text, hk = _signed_checkpoint()
+    log_key = _log_key(hk)
+    # Drop the last (ML-DSA) signature line, keep the Ed25519-only one.
+    lines = text.split("\n")
+    truncated = "\n".join(lines[:-2]) + "\n"  # drop mldsa sig line + trailing ""
+    with pytest.raises(tlog.TlogError):
+        tlog.verify_checkpoint(truncated, log_key, ORIGIN)
+
+
+def test_verify_checkpoint_mldsa_only_fails() -> None:
+    text, hk = _signed_checkpoint()
+    log_key = _log_key(hk)
+    lines = text.split("\n")
+    # lines layout: [origin, size, root, "", ed_sig, mldsa_sig, ""]
+    without_ed = lines[:4] + lines[5:]
+    with pytest.raises(tlog.TlogError):
+        tlog.verify_checkpoint("\n".join(without_ed), log_key, ORIGIN)
+
+
+def test_verify_checkpoint_wrong_expected_origin_fails() -> None:
+    text, hk = _signed_checkpoint()
+    log_key = _log_key(hk)
+    with pytest.raises(tlog.TlogError):
+        tlog.verify_checkpoint(text, log_key, "different-origin/2026")
+
+
+def test_verify_checkpoint_wrong_log_key_origin_fails() -> None:
+    text, hk = _signed_checkpoint()
+    log_key = _log_key(hk, origin="different-origin/2026")
+    with pytest.raises(tlog.TlogError):
+        tlog.verify_checkpoint(text, log_key, ORIGIN)
+
+
+def test_verify_checkpoint_tampered_body_fails_both_legs() -> None:
+    text, hk = _signed_checkpoint(tree_size=5)
+    log_key = _log_key(hk)
+    tampered = _corrupt_line(text, 1, "6")  # change signed tree_size 5 -> 6
+    with pytest.raises(tlog.TlogError):
+        tlog.verify_checkpoint(tampered, log_key, ORIGIN)
+
+
+def test_verify_checkpoint_signature_by_different_name_ignored_fails() -> None:
+    text, hk = _signed_checkpoint(name="attest-log-1")
+    log_key = _log_key(hk, name="attest-log-2")  # verifier expects a different name
+    with pytest.raises(tlog.TlogError):
+        tlog.verify_checkpoint(text, log_key, ORIGIN)
+
+
+def test_verify_checkpoint_wrong_key_hash_prefix_does_not_count() -> None:
+    text, hk = _signed_checkpoint()
+    log_key = _log_key(hk)
+    lines = text.split("\n")
+    # Corrupt the Ed25519 signature line's key-hash prefix (first 4 bytes of
+    # the blob) so it no longer matches SHA256(name||"\n"||ed_pub)[:4], while
+    # leaving the ML-DSA leg intact -- must still fail (no valid ed leg).
+    dash, name, blob_b64 = lines[4].split(" ", 2)
+    blob = bytearray(base64.b64decode(blob_b64))
+    blob[0] ^= 0xFF
+    lines[4] = f"{dash} {name} {base64.b64encode(bytes(blob)).decode('ascii')}"
+    with pytest.raises(tlog.TlogError):
+        tlog.verify_checkpoint("\n".join(lines), log_key, ORIGIN)
+
+
+def test_verify_checkpoint_no_signature_lines_fails() -> None:
+    text = f"{ORIGIN}\n5\n{base64.b64encode(ROOT).decode('ascii')}\n\n"
+    hk = _hybrid_keys()
+    log_key = _log_key(hk)
+    with pytest.raises(tlog.TlogError):
+        tlog.verify_checkpoint(text, log_key, ORIGIN)
+
+
+def test_verify_checkpoint_rejects_short_log_key_ed25519_pub() -> None:
+    text, hk = _signed_checkpoint()
+    log_key = tlog.LogKey(
+        origin=ORIGIN, name=LOG_NAME, ed25519_pub=b"short", mldsa_pub=hk.mldsa.pub
+    )
+    with pytest.raises(tlog.TlogError):
+        tlog.verify_checkpoint(text, log_key, ORIGIN)
+
+
+def test_verify_checkpoint_rejects_short_log_key_mldsa_pub() -> None:
+    text, hk = _signed_checkpoint()
+    log_key = tlog.LogKey(origin=ORIGIN, name=LOG_NAME, ed25519_pub=hk.ed.pub, mldsa_pub=b"short")
+    with pytest.raises(tlog.TlogError):
+        tlog.verify_checkpoint(text, log_key, ORIGIN)
+
+
+# --- sign_checkpoint: builder side -----------------------------------------
+
+
+def test_sign_checkpoint_round_trips_through_verify() -> None:
+    hk = _hybrid_keys()
+    text = tlog.sign_checkpoint(ORIGIN, 42, ROOT, hk, LOG_NAME)
+    log_key = _log_key(hk)
+    checkpoint = tlog.verify_checkpoint(text, log_key, ORIGIN)
+    assert checkpoint.origin == ORIGIN
+    assert checkpoint.tree_size == 42
+    assert checkpoint.root == ROOT
+
+
+def test_sign_checkpoint_output_ends_with_two_signature_lines() -> None:
+    hk = _hybrid_keys()
+    text = tlog.sign_checkpoint(ORIGIN, 1, ROOT, hk, LOG_NAME)
+    lines = text.split("\n")
+    assert lines[-1] == ""
+    assert lines[-2].startswith("— " + LOG_NAME + " ")
+    assert lines[-3].startswith("— " + LOG_NAME + " ")
+
+
+def test_sign_checkpoint_rejects_wrong_length_root() -> None:
+    hk = _hybrid_keys()
+    with pytest.raises(ValueError):
+        tlog.sign_checkpoint(ORIGIN, 1, b"short", hk, LOG_NAME)
+
+
+def test_sign_checkpoint_rejects_newline_in_origin() -> None:
+    hk = _hybrid_keys()
+    with pytest.raises(ValueError):
+        tlog.sign_checkpoint("bad\norigin", 1, ROOT, hk, LOG_NAME)
+
+
+def test_sign_checkpoint_rejects_whitespace_in_name() -> None:
+    hk = _hybrid_keys()
+    with pytest.raises(ValueError):
+        tlog.sign_checkpoint(ORIGIN, 1, ROOT, hk, "bad name")
+
+
+# --- key-hash prefix: hand-pinned KAT ---------------------------------------
+
+
+def test_key_hash_prefix_matches_hand_computed_sha256() -> None:
+    # Hand-computed, independent of attest.tlog: seed = bytes([7])*32 ->
+    # Ed25519 pub via PyNaCl directly, then SHA256(name + "\n" + pub)[:4].
+    # Never derived through tlog's own _key_hash to avoid a tautological KAT.
+    seed = bytes([7]) * 32
+    ed_kp = keys.from_seed(seed)
+    expected_prefix = bytes.fromhex("08c7be7d")
+    assert hashlib.sha256(b"test-log\n" + ed_kp.pub).digest()[:4] == expected_prefix
+
+    text = tlog.sign_checkpoint(
+        ORIGIN, 1, ROOT, pq.HybridSigningKeys(ed=ed_kp, mldsa=pq.generate()), "test-log"
+    )
+    ed_line = text.split("\n")[4]
+    _dash, _name, blob_b64 = ed_line.split(" ", 2)
+    blob = base64.b64decode(blob_b64)
+    assert blob[:4] == expected_prefix
