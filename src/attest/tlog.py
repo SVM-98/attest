@@ -59,7 +59,7 @@ _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class TlogError(ValueError):
-    """A log entry does not conform to one of the closed entry schemas."""
+    """A transparency-log artifact does not conform to its required format."""
 
 
 def leaf_hash(data: bytes) -> bytes:
@@ -340,7 +340,9 @@ def _require_manifest_version(entry: dict[str, Any]) -> None:
         or isinstance(version, bool)
         or not 1 <= version <= _MAX_JCS_INTEGER
     ):
-        raise TlogError(f"manifest_version must be an int in [1, {_MAX_JCS_INTEGER}]: {version!r}")
+        raise TlogError(
+            f"manifest_version must be an int in [1, {_MAX_JCS_INTEGER}]: {version!r}"
+        )
 
 
 def encode_entry(entry: dict[str, Any]) -> bytes:
@@ -383,8 +385,10 @@ def encode_entry(entry: dict[str, Any]) -> bytes:
 # Hybrid signed-note checkpoints (C2SP tlog-checkpoint profile, hybrid AND).
 # --------------------------------------------------------------------------
 
-# C2SP signed-note signature line: em dash U+2014, one space, name (no
-# spaces), one space, standard base64 (with padding) of the signature blob.
+# C2SP signed-note signature line: em dash U+2014, one space, name, one
+# space, standard base64 (with padding) of the signature blob. Name grammar
+# is checked separately so its C2SP Unicode-space/control-character rules are
+# shared by parsing, verification, and signing.
 _SIG_LINE_RE = re.compile(r"\A— ([^ ]+) ([A-Za-z0-9+/]+={0,2})\Z")
 # Strict ASCII decimal only: `str.isdigit()` also accepts non-decimal
 # Unicode digit-value characters (e.g. superscript "²") that `int()` then
@@ -393,21 +397,30 @@ _DECIMAL_RE = re.compile(r"\A[0-9]+\Z")
 _KEY_HASH_LEN = 4  # C2SP signed-note key-hash prefix length, bytes
 _ED25519_PUB_LEN = 32
 _ED25519_SIG_LEN = 64
-# 19 decimal digits covers any 64-bit tree size with headroom; capping the
-# digit count before `int()` sees it avoids both a bare (non-TlogError)
+# C2SP signed-note type byte 0x01 identifies Ed25519. 0x06 is provisional for
+# ML-DSA-65, pending C2SP registration; it is currently unassigned and does
+# not collide with the C2SP signed-note registry.
+_ED25519_SIG_TYPE = b"\x01"
+_ML_DSA_65_SIG_TYPE = b"\x06"
+_MAX_TREE_SIZE = 2**64 - 1
+# A uint64 can have at most 20 decimal digits. Capping before `int()` sees it
+# avoids both a bare (non-TlogError)
 # ValueError from CPython's int-string-conversion digit limit (3.11+,
 # default 4300 digits) and the O(n^2) parse cost a huge digit string would
 # otherwise incur on untrusted input.
-_MAX_TREE_SIZE_DIGITS = 19
+_MAX_TREE_SIZE_DIGITS = 20
+# C2SP recommends a signature limit while requiring acceptance of at least
+# 16. Sixty-four leaves room for witness cosignatures without unbounded work.
+_MAX_NOTE_SIGNATURES = 64
 
 
 @dataclass(frozen=True)
 class Checkpoint:
-    """A parsed C2SP-style signed-note transparency-log checkpoint body.
+    """A parsed C2SP signed-note transparency-log checkpoint body.
 
     `note_bytes` is exactly the bytes a note signature is computed over:
-    the three header lines (origin, tree size, base64 root) plus the blank
-    line separating them from the signature lines — nothing else.
+    the three header lines (origin, tree size, base64 root) through their
+    final newline, excluding the blank line separating them from signatures.
     """
 
     origin: str
@@ -430,9 +443,95 @@ class LogKey:
     mldsa_pub: bytes
 
 
-def _key_hash(name: str, pub: bytes) -> bytes:
-    """C2SP signed-note key hash: first 4 bytes of `SHA-256(name || "\\n" || pub)`."""
-    return hashlib.sha256(name.encode("utf-8") + b"\n" + pub).digest()[:_KEY_HASH_LEN]
+def _key_hash(name: str, signature_type: bytes, pub: bytes) -> bytes:
+    """C2SP key ID: `SHA-256(name || "\\n" || type || pub)[:4]`."""
+    return hashlib.sha256(name.encode() + b"\n" + signature_type + pub).digest()[:_KEY_HASH_LEN]
+
+
+def _validate_origin(origin: object, field: str = "origin") -> str:
+    """Require the one-line, printable origin used in a checkpoint header."""
+    if not isinstance(origin, str) or not origin or not origin.isprintable():
+        raise TlogError(f"{field} must be a non-empty printable str")
+    try:
+        origin.encode()
+    except UnicodeEncodeError as exc:
+        raise TlogError(f"{field} must be valid UTF-8") from exc
+    return origin
+
+
+def _validate_key_name(name: object, field: str = "name") -> str:
+    """Require the C2SP signed-note key-name grammar."""
+    if (
+        not isinstance(name, str)
+        or not name
+        or "+" in name
+        or any(character.isspace() for character in name)
+        or not name.isprintable()
+    ):
+        raise TlogError(f"{field} must be non-empty and contain no spaces, '+' or controls")
+    try:
+        name.encode()
+    except UnicodeEncodeError as exc:
+        raise TlogError(f"{field} must be valid UTF-8") from exc
+    return name
+
+
+def _validate_bytes(value: object, field: str, length: int) -> bytes:
+    """Require an exactly-sized byte string without leaking `len()` errors."""
+    if not isinstance(value, bytes) or len(value) != length:
+        raise TlogError(f"{field} must be {length} bytes")
+    return value
+
+
+def _parse_tree_size(size_str: str) -> int:
+    """Parse an ASCII-decimal uint64 tree size without an int-conversion DoS."""
+    if not _DECIMAL_RE.fullmatch(size_str):
+        raise TlogError(f"tree size must be ASCII decimal digits: {size_str!r}")
+    if len(size_str) > 1 and size_str.startswith("0"):
+        raise TlogError(f"tree size must not contain leading zeros: {size_str!r}")
+    if len(size_str) > _MAX_TREE_SIZE_DIGITS:
+        raise TlogError(f"tree size has too many digits ({len(size_str)}): {size_str!r}")
+    try:
+        tree_size = int(size_str)
+    except ValueError as exc:  # defensive: the preceding grammar makes this unreachable
+        raise TlogError(f"tree size is not a valid integer: {size_str!r}") from exc
+    if tree_size > _MAX_TREE_SIZE:
+        raise TlogError(f"tree size must be a uint64: {size_str!r}")
+    return tree_size
+
+
+def _note_bytes(header: list[str]) -> bytes:
+    """Encode C2SP note text: header lines including, not after, final LF."""
+    try:
+        return ("\n".join(header) + "\n").encode()
+    except UnicodeEncodeError as exc:
+        raise TlogError("checkpoint text must be valid UTF-8") from exc
+
+
+def _validate_log_key(log_key: object) -> LogKey:
+    """Validate every pinned-key field before cryptographic verification."""
+    if not isinstance(log_key, LogKey):
+        raise TlogError("log_key must be a LogKey")
+    _validate_origin(log_key.origin, "log_key.origin")
+    _validate_key_name(log_key.name, "log_key.name")
+    _validate_bytes(log_key.ed25519_pub, "log_key.ed25519_pub", _ED25519_PUB_LEN)
+    _validate_bytes(log_key.mldsa_pub, "log_key.mldsa_pub", pq.ML_DSA_65_PK_LEN)
+    return log_key
+
+
+def _validate_signing_keys(signing_keys: object) -> pq.HybridSigningKeys:
+    """Validate builder key material so malformed inputs only raise TlogError."""
+    if not isinstance(signing_keys, pq.HybridSigningKeys):
+        raise TlogError("signing_keys must be HybridSigningKeys")
+    if not isinstance(signing_keys.ed, keys.SigningKeyPair):
+        raise TlogError("signing_keys.ed must be SigningKeyPair")
+    if not isinstance(signing_keys.mldsa, pq.MLDSAKeyPair):
+        raise TlogError("signing_keys.mldsa must be MLDSAKeyPair")
+    _validate_bytes(signing_keys.ed.seed, "signing_keys.ed.seed", _ED25519_PUB_LEN)
+    _validate_bytes(signing_keys.ed.pub, "signing_keys.ed.pub", _ED25519_PUB_LEN)
+    _validate_bytes(signing_keys.mldsa.sk, "signing_keys.mldsa.sk", pq.ML_DSA_65_SK_LEN)
+    _validate_bytes(signing_keys.mldsa.pub, "signing_keys.mldsa.pub", pq.ML_DSA_65_PK_LEN)
+    return signing_keys
 
 
 def _split_note(text: str) -> tuple[list[str], list[str]]:
@@ -467,12 +566,17 @@ def _parse_signature_lines(lines: list[str]) -> list[tuple[str, bytes]]:
     isn't the one the caller wants is NOT filtered here: `verify_checkpoint`
     does that filtering over the parsed `(name, blob)` pairs.
     """
+    if not lines:
+        raise TlogError("checkpoint must contain at least one signature line")
+    if len(lines) > _MAX_NOTE_SIGNATURES:
+        raise TlogError(f"checkpoint has too many signature lines (max {_MAX_NOTE_SIGNATURES})")
     parsed = []
     for line in lines:
         m = _SIG_LINE_RE.fullmatch(line)
         if m is None:
             raise TlogError(f"malformed checkpoint signature line: {line!r}")
         name, blob_b64 = m.group(1), m.group(2)
+        _validate_key_name(name, "signature key name")
         try:
             blob = base64.b64decode(blob_b64, validate=True)
         except ValueError as exc:
@@ -488,11 +592,8 @@ def _parse(text: str) -> tuple[Checkpoint, list[tuple[str, bytes]]]:
     other's half of the note."""
     header, sig_lines = _split_note(text)
     origin, size_str, root_b64 = header
-    if not _DECIMAL_RE.fullmatch(size_str):
-        raise TlogError(f"tree size must be decimal digits: {size_str!r}")
-    if len(size_str) > _MAX_TREE_SIZE_DIGITS:
-        raise TlogError(f"tree size has too many digits ({len(size_str)}): {size_str!r}")
-    tree_size = int(size_str)
+    origin = _validate_origin(origin)
+    tree_size = _parse_tree_size(size_str)
     try:
         root = base64.b64decode(root_b64, validate=True)
     except ValueError as exc:
@@ -500,7 +601,7 @@ def _parse(text: str) -> tuple[Checkpoint, list[tuple[str, bytes]]]:
     if len(root) != _HASH_LEN:
         raise TlogError(f"root must decode to {_HASH_LEN} bytes, got {len(root)}")
     signatures = _parse_signature_lines(sig_lines)
-    note_bytes = ("\n".join(header) + "\n\n").encode("utf-8")
+    note_bytes = _note_bytes(header)
     checkpoint = Checkpoint(origin=origin, tree_size=tree_size, root=root, note_bytes=note_bytes)
     return checkpoint, signatures
 
@@ -508,13 +609,14 @@ def _parse(text: str) -> tuple[Checkpoint, list[tuple[str, bytes]]]:
 def parse_checkpoint(text: str) -> Checkpoint:
     """Parse a C2SP signed-note checkpoint body: line 1 origin, line 2
     decimal tree size, line 3 base64 std-encoded 32-byte root, a blank
-    line, then zero or more `— <name> <base64(blob)>` signature lines.
+    line, then one or more `— <name> <base64(blob)>` signature lines.
 
     Structural/shape validation only — no signature is checked here, see
     `verify_checkpoint`. Raises `TlogError` on any malformation: wrong
     header line count, missing blank line, non-decimal tree size, a root
-    that isn't 32 bytes once base64-decoded, a malformed signature line, or
-    a missing trailing newline.
+    that isn't 32 bytes once base64-decoded, a malformed signature line,
+    missing signatures, invalid C2SP origin/key-name grammar, or a missing
+    trailing newline.
     """
     checkpoint, _signatures = _parse(text)
     return checkpoint
@@ -531,7 +633,7 @@ def verify_checkpoint(text: str, log_key: LogKey, expected_origin: str) -> Check
     both `expected_origin` and `log_key.origin`.
 
     Each candidate signature line's 4-byte key-hash prefix
-    (`SHA-256(name || "\\n" || pub)[:4]`) is checked against the expected
+    (`SHA-256(name || "\\n" || signature-type || pub)[:4]`) is checked against the expected
     prefix for that leg before its signature is verified — a wrong prefix
     means "signed by a different key" and that line simply doesn't count
     toward either leg; scanning continues over the remaining lines.
@@ -540,10 +642,8 @@ def verify_checkpoint(text: str, log_key: LogKey, expected_origin: str) -> Check
     mismatch, or missing/invalid signature leg, each with a message naming
     the failed condition.
     """
-    if len(log_key.ed25519_pub) != _ED25519_PUB_LEN:
-        raise TlogError(f"log_key.ed25519_pub must be {_ED25519_PUB_LEN} bytes")
-    if len(log_key.mldsa_pub) != pq.ML_DSA_65_PK_LEN:
-        raise TlogError(f"log_key.mldsa_pub must be {pq.ML_DSA_65_PK_LEN} bytes")
+    log_key = _validate_log_key(log_key)
+    expected_origin = _validate_origin(expected_origin, "expected_origin")
 
     checkpoint, signatures = _parse(text)
     if checkpoint.origin != expected_origin:
@@ -555,8 +655,8 @@ def verify_checkpoint(text: str, log_key: LogKey, expected_origin: str) -> Check
             f"checkpoint origin {checkpoint.origin!r} != log_key.origin {log_key.origin!r}"
         )
 
-    ed_prefix = _key_hash(log_key.name, log_key.ed25519_pub)
-    mldsa_prefix = _key_hash(log_key.name, log_key.mldsa_pub)
+    ed_prefix = _key_hash(log_key.name, _ED25519_SIG_TYPE, log_key.ed25519_pub)
+    mldsa_prefix = _key_hash(log_key.name, _ML_DSA_65_SIG_TYPE, log_key.mldsa_pub)
     ed_ok = False
     mldsa_ok = False
     for name, blob in signatures:
@@ -571,6 +671,8 @@ def verify_checkpoint(text: str, log_key: LogKey, expected_origin: str) -> Check
         ):
             if pq.verify_strict(checkpoint.note_bytes, blob[_KEY_HASH_LEN:], log_key.mldsa_pub):
                 mldsa_ok = True
+        if ed_ok and mldsa_ok:
+            break
 
     if not (ed_ok and mldsa_ok):
         raise TlogError(
@@ -582,9 +684,7 @@ def verify_checkpoint(text: str, log_key: LogKey, expected_origin: str) -> Check
 def sign_checkpoint(
     origin: str, tree_size: int, root: bytes, signing_keys: pq.HybridSigningKeys, name: str
 ) -> str:
-    """Build and hybrid-sign a checkpoint note (builder/offline-signer side:
-    trusted input, so this raises `ValueError` on invalid arguments rather
-    than failing closed — same discipline as `build_tree`/`inclusion_proof`).
+    """Build and hybrid-sign a C2SP checkpoint note (builder/offline signer).
 
     Deviates from a flat `(ed25519_seed, mldsa_sk)` parameter pair: computing
     each leg's key-hash prefix needs that leg's PUBLIC key too, and FIPS 204
@@ -593,18 +693,25 @@ def sign_checkpoint(
     bundle type that already carries both legs' `(secret, public)` pairs,
     matching how `manifests.py`'s `_sign_manifest` takes the same type.
     """
-    if len(root) != _HASH_LEN:
-        raise ValueError(f"root must be {_HASH_LEN} bytes, got {len(root)}")
-    if not isinstance(tree_size, int) or isinstance(tree_size, bool) or tree_size < 0:
-        raise ValueError(f"tree_size must be a non-negative int: {tree_size!r}")
-    if "\n" in origin:
-        raise ValueError("origin must not contain a newline")
-    if not name or " " in name or "\n" in name:
-        raise ValueError("name must not be empty or contain whitespace")
+    origin = _validate_origin(origin)
+    name = _validate_key_name(name)
+    root = _validate_bytes(root, "root", _HASH_LEN)
+    if (
+        not isinstance(tree_size, int)
+        or isinstance(tree_size, bool)
+        or not 0 <= tree_size <= _MAX_TREE_SIZE
+    ):
+        raise TlogError(f"tree_size must be a uint64: {tree_size!r}")
+    signing_keys = _validate_signing_keys(signing_keys)
 
-    note_bytes = f"{origin}\n{tree_size}\n{base64.b64encode(root).decode('ascii')}\n\n".encode()
-    ed_blob = _key_hash(name, signing_keys.ed.pub) + keys.sign(note_bytes, signing_keys.ed)
-    mldsa_blob = _key_hash(name, signing_keys.mldsa.pub) + pq.sign(note_bytes, signing_keys.mldsa)
+    header = [origin, str(tree_size), base64.b64encode(root).decode("ascii")]
+    note_bytes = _note_bytes(header)
+    ed_blob = _key_hash(name, _ED25519_SIG_TYPE, signing_keys.ed.pub) + keys.sign(
+        note_bytes, signing_keys.ed
+    )
+    mldsa_blob = _key_hash(name, _ML_DSA_65_SIG_TYPE, signing_keys.mldsa.pub) + pq.sign(
+        note_bytes, signing_keys.mldsa
+    )
     ed_line = f"— {name} {base64.b64encode(ed_blob).decode('ascii')}\n"
     mldsa_line = f"— {name} {base64.b64encode(mldsa_blob).decode('ascii')}\n"
-    return note_bytes.decode("utf-8") + ed_line + mldsa_line
+    return note_bytes.decode() + "\n" + ed_line + mldsa_line
