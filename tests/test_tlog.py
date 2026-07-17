@@ -1,12 +1,11 @@
 """RFC 6962 Merkle tree primitives + closed transparency-log entry schemas.
 
-Known-answer tests (KATs) for the empty/1-leaf/2-leaf/3-leaf roots are
+Known-answer tests (KATs) for the empty/1-leaf/2-leaf/3-leaf/7-leaf roots are
 hand-pinned `bytes.fromhex` literals, derived by hand from the RFC 6962
 §2.1 construction (shown in the comments below) — never computed through
-`attest.tlog` itself. Larger trees (7 leaves) and consistency proofs are
-checked via round-trip properties against the module's own builder/verify
-pair, which is the only practical way to exercise every index/size-pair
-combination; the KATs are what pins the hashing scheme itself.
+`attest.tlog` itself. Consistency proofs are checked via round-trip properties
+against the module's own builder/verify pair, which is the only practical way
+to exercise every size pair; the KATs pin the hashing scheme itself.
 """
 
 from __future__ import annotations
@@ -57,6 +56,19 @@ def test_three_leaf_tree_root() -> None:
     #                     left = sha256(0x01||h0||h1), root = sha256(0x01||left||h2).
     expected = bytes.fromhex("3b6cccd7e3e023ff393006f030315ee7ad9eb111b022b41fba7e5b7a3973f688")
     assert tlog.build_tree(LEAVES[:3]) == expected
+
+
+def test_seven_leaf_tree_root() -> None:
+    # Independently computed with hashlib.sha256, never attest.tlog: h0 through h6
+    # are hashlib.sha256(b"\x00" + bytes([i])).digest() for i in range(7), then:
+    # n01 = hashlib.sha256(b"\x01" + h0 + h1).digest()
+    # n23 = hashlib.sha256(b"\x01" + h2 + h3).digest()
+    # left = hashlib.sha256(b"\x01" + n01 + n23).digest()
+    # n45 = hashlib.sha256(b"\x01" + h4 + h5).digest()
+    # right = hashlib.sha256(b"\x01" + n45 + h6).digest()
+    # root = hashlib.sha256(b"\x01" + left + right).digest()
+    expected = bytes.fromhex("3560191803028444b232018ac047fdb561c09c23a7a6876c85e08b5e4d48e9f3")
+    assert tlog.build_tree(LEAVES) == expected
 
 
 def test_leaf_hash_matches_rfc_prefix_scheme() -> None:
@@ -127,6 +139,13 @@ def test_inclusion_fails_closed_on_malformed_shapes() -> None:
     assert not tlog.verify_inclusion(leaf, "0", len(LEAVES), proof, root)  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize("malformed_digest", [b"x", b"x" * 33])
+def test_inclusion_rejects_short_or_long_leaf_and_root(
+    malformed_digest: bytes,
+) -> None:
+    assert not tlog.verify_inclusion(malformed_digest, 0, 1, [], malformed_digest)
+
+
 # --------------------------------------------------------------------------
 # Consistency proof: round-trip for every (size1, size2 <= 7) pair.
 # --------------------------------------------------------------------------
@@ -162,6 +181,12 @@ def test_consistency_fails_closed_on_malformed_shapes() -> None:
     assert not tlog.verify_consistency(3, root1, 7, root2, [*proof, bytes(32)])  # oversized
     assert not tlog.verify_consistency(3, root1, 7, root2, [b"short"])  # not 32 bytes
     assert not tlog.verify_consistency("3", root1, 7, root2, proof)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("malformed_digest", [b"x", b"x" * 33])
+def test_consistency_rejects_short_or_long_roots(malformed_digest: bytes) -> None:
+    assert not tlog.verify_consistency(1, malformed_digest, 1, malformed_digest, [])
+    assert not tlog.verify_consistency(0, malformed_digest, 1, malformed_digest, [])
 
 
 def test_consistency_empty_old_tree_is_vacuously_true() -> None:
@@ -242,6 +267,14 @@ def test_encode_entry_rejects_extra_member() -> None:
         tlog.encode_entry(entry)
 
 
+def test_encode_entry_rejects_mixed_type_extra_keys() -> None:
+    entry = _valid_receipt_entry()
+    entry[1] = "nope"  # type: ignore[index]
+    entry["extra_field"] = "nope"
+    with pytest.raises(tlog.TlogError):
+        tlog.encode_entry(entry)
+
+
 def test_encode_entry_rejects_missing_member() -> None:
     entry = _valid_receipt_entry()
     del entry["issuer"]
@@ -270,6 +303,19 @@ def test_encode_entry_rejects_manifest_version_below_one() -> None:
         tlog.encode_entry(entry)
 
 
+def test_encode_entry_accepts_largest_jcs_manifest_version() -> None:
+    entry = _valid_key_manifest_entry()
+    entry["manifest_version"] = 2**53 - 1
+    assert tlog.encode_entry(entry)
+
+
+def test_encode_entry_rejects_manifest_version_above_jcs_limit() -> None:
+    entry = _valid_key_manifest_entry()
+    entry["manifest_version"] = 2**53
+    with pytest.raises(tlog.TlogError):
+        tlog.encode_entry(entry)
+
+
 def test_encode_entry_rejects_bool_manifest_version() -> None:
     entry = _valid_key_manifest_entry()
     entry["manifest_version"] = True
@@ -284,6 +330,13 @@ def test_encode_entry_rejects_uppercase_issuer() -> None:
         tlog.encode_entry(entry)
 
 
+def test_encode_entry_rejects_issuer_with_trailing_newline() -> None:
+    entry = _valid_receipt_entry()
+    entry["issuer"] = "shop.example.com\n"
+    with pytest.raises(tlog.TlogError):
+        tlog.encode_entry(entry)
+
+
 def test_encode_entry_rejects_non_dict_entry() -> None:
     with pytest.raises(tlog.TlogError):
         tlog.encode_entry([])  # type: ignore[arg-type]
@@ -292,5 +345,19 @@ def test_encode_entry_rejects_non_dict_entry() -> None:
 def test_encode_entry_rejects_short_hex() -> None:
     entry = _valid_receipt_entry()
     entry["core_sha256"] = "b" * 63
+    with pytest.raises(tlog.TlogError):
+        tlog.encode_entry(entry)
+
+
+def test_encode_entry_rejects_manifest_hash_with_trailing_newline() -> None:
+    entry = _valid_key_manifest_entry()
+    entry["manifest_sha256"] = "a" * 64 + "\n"
+    with pytest.raises(tlog.TlogError):
+        tlog.encode_entry(entry)
+
+
+def test_encode_entry_rejects_core_hash_with_trailing_newline() -> None:
+    entry = _valid_receipt_entry()
+    entry["core_sha256"] = "b" * 64 + "\n"
     with pytest.raises(tlog.TlogError):
         tlog.encode_entry(entry)
