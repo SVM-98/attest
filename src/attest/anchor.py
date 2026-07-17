@@ -7,17 +7,19 @@ timestamped into a Bitcoin block header pinned in its own trust store
 still count as post-quantum-surviving evidence once a future
 cryptographically-relevant quantum computer (CRQC) horizon is reached.
 
-- `verify_anchor` walks each proof in an untrusted anchor-evidence bundle:
-  an `ots` proof replays a small hash op-chain (`sha256`/`append`/`prepend`)
-  starting from `SHA256(checkpoint.note_bytes)` and checks it lands on a
-  Bitcoin merkle root pinned, by header hash, in `policy.pinned_headers`; an
-  `rfc3161` proof is accepted only as opaque classical corroboration (never
-  parsed) and can never set an anchor time. This function NEVER raises on
-  malformed evidence — `evidence` arrives from an untrusted bundle, so any
-  shape violation (wrong types, missing fields, bad hex, unknown ops, an
-  oversized proof/op list) degrades to a warning and that proof simply
-  contributes nothing, rather than aborting verification of the rest of the
-  bundle or leaking a bare Python exception.
+- `verify_anchor` first parses the required full signed-note text in
+  `evidence["checkpoint"]` and binds its `note_bytes` to the trusted
+  `checkpoint` argument. It then walks each proof: an `ots` proof replays a
+  non-empty hash op-chain (`sha256`/`append`/`prepend`) starting from
+  `SHA256(checkpoint.note_bytes)` and checks it lands on a Bitcoin merkle root
+  pinned, by header hash, in `policy.pinned_headers`; an `rfc3161` proof is
+  accepted only as opaque classical corroboration (never parsed) and can
+  never set an anchor time. This function NEVER raises on malformed evidence
+  — `evidence` arrives from an untrusted bundle, so any shape violation
+  (wrong types, missing fields, bad hex, unknown ops, an oversized proof/op
+  list) degrades to a warning and that proof simply contributes nothing,
+  rather than aborting verification of the rest of the bundle or leaking a
+  bare Python exception.
 - `checkpoint` and `policy` are the trusted, verifier-config side of the
   call (mirrors `tlog.verify_checkpoint`'s `log_key`/`expected_origin`
   arguments): a non-`tlog.Checkpoint` `checkpoint` or a malformed `AnchorPolicy`
@@ -111,12 +113,23 @@ class AnchorVerdict:
     warnings: list[str]
 
 
-def _trunc(value: object, limit: int = 80) -> str:
-    """Bound an untrusted value's repr before it goes into a warning message
-    — evidence is attacker-controlled, and warnings must not become an
-    amplification vector for a hostile-sized field."""
-    text = repr(value)
-    return text if len(text) <= limit else text[: limit - 3] + "..."
+def _trunc(value: object, limit: int = 60) -> str:
+    """Safely render an untrusted value for a bounded warning message.
+
+    Never call ``repr`` on arbitrary evidence values: rendering a hostile
+    integer or a user-defined object can itself raise or allocate an
+    unbounded temporary. Strings are sliced *before* rendering; only small
+    integers and the two scalar singletons are rendered directly.
+    """
+    if type(value) is str:
+        text = repr(value[:limit])
+        return text if len(text) <= limit else text[: limit - 3] + "..."
+    if value is None or type(value) is bool:
+        return repr(value)
+    if type(value) is int and value.bit_length() <= 256:
+        return repr(value)
+    type_name = type(value).__name__
+    return f"<{type_name[: limit - 2]}>"
 
 
 def _validate_policy(policy: object) -> AnchorPolicy:
@@ -192,6 +205,8 @@ def _verify_ots_proof(
     ops = proof.get("ops")
     if not isinstance(ops, list):
         return False, 0, "ots proof 'ops' must be a list"
+    if not ops:
+        return False, 0, "ots proof has empty op-chain"
     if len(ops) > _MAX_OPS_PER_PROOF:
         return False, 0, f"ots proof has more than {_MAX_OPS_PER_PROOF} ops"
 
@@ -218,13 +233,13 @@ def _verify_ots_proof(
             accumulator = hashlib.sha256(accumulator).digest()
         else:
             if len(op) != 2:
-                return False, 0, f"ots {opcode!r} op needs exactly one hex operand"
+                return False, 0, f"ots {_trunc(opcode)} op needs exactly one hex operand"
             operand = _op_hex(op[1])
             if operand is None:
                 return (
                     False,
                     0,
-                    f"ots {opcode!r} operand must be bounded, even-length lowercase hex",
+                    f"ots {_trunc(opcode)} operand must be bounded, even-length lowercase hex",
                 )
             accumulator = accumulator + operand if opcode == "append" else operand + accumulator
 
@@ -234,8 +249,10 @@ def _verify_ots_proof(
     pinned = policy.pinned_headers.get(header_hash)
     if pinned is None:
         return False, 0, "header_hash is not in policy.pinned_headers"
-    if pinned.merkle_root != proof.get("header_merkle_root") or pinned.time != header_time:
-        return False, 0, "pinned header merkle_root/time does not match proof"
+    if pinned.merkle_root != proof.get("header_merkle_root"):
+        return False, 0, "pinned header merkle_root does not match proof"
+    if pinned.time != header_time:
+        return False, 0, "pinned header time does not match proof"
 
     return True, pinned.time, None
 
@@ -247,8 +264,9 @@ def verify_anchor(
 
     `evidence` is untrusted (comes from wherever the bundle was fetched) and
     this function NEVER raises because of it: any malformation — not a
-    dict, `proofs` not a list, an oversized proof/op list, a non-dict proof,
-    bad hex, an unknown op, a header not pinned — degrades to an
+    dict, missing/non-string/unparseable/mismatched `checkpoint`, `proofs`
+    not a list, an oversized proof/op list, a non-dict proof, bad hex, an
+    unknown op, a header not pinned — degrades to an
     `AnchorVerdict(anchored=False, ...)` with a warning naming the problem,
     and per-proof malformations simply drop that one proof rather than
     aborting the whole bundle (forward-compat: an unrecognized `kind` must
@@ -265,6 +283,30 @@ def verify_anchor(
     warnings: list[str] = []
     if not isinstance(evidence, dict):
         warnings.append(f"evidence must be an object, got {type(evidence).__name__}")
+        return AnchorVerdict(
+            anchored=False, anchored_before=None, pq_surviving=False, warnings=warnings
+        )
+
+    if "checkpoint" not in evidence:
+        warnings.append("evidence.checkpoint is required")
+        return AnchorVerdict(
+            anchored=False, anchored_before=None, pq_surviving=False, warnings=warnings
+        )
+    checkpoint_text = evidence["checkpoint"]
+    if not isinstance(checkpoint_text, str):
+        warnings.append("evidence.checkpoint must be a str")
+        return AnchorVerdict(
+            anchored=False, anchored_before=None, pq_surviving=False, warnings=warnings
+        )
+    try:
+        evidence_checkpoint = tlog.parse_checkpoint(checkpoint_text)
+    except tlog.TlogError:
+        warnings.append("evidence.checkpoint is not a valid signed checkpoint")
+        return AnchorVerdict(
+            anchored=False, anchored_before=None, pq_surviving=False, warnings=warnings
+        )
+    if evidence_checkpoint.note_bytes != checkpoint.note_bytes:
+        warnings.append("evidence.checkpoint does not match checkpoint argument")
         return AnchorVerdict(
             anchored=False, anchored_before=None, pq_surviving=False, warnings=warnings
         )
