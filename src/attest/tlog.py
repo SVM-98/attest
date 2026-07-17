@@ -340,9 +340,7 @@ def _require_manifest_version(entry: dict[str, Any]) -> None:
         or isinstance(version, bool)
         or not 1 <= version <= _MAX_JCS_INTEGER
     ):
-        raise TlogError(
-            f"manifest_version must be an int in [1, {_MAX_JCS_INTEGER}]: {version!r}"
-        )
+        raise TlogError(f"manifest_version must be an int in [1, {_MAX_JCS_INTEGER}]: {version!r}")
 
 
 def encode_entry(entry: dict[str, Any]) -> bytes:
@@ -397,11 +395,14 @@ _DECIMAL_RE = re.compile(r"\A[0-9]+\Z")
 _KEY_HASH_LEN = 4  # C2SP signed-note key-hash prefix length, bytes
 _ED25519_PUB_LEN = 32
 _ED25519_SIG_LEN = 64
-# C2SP signed-note type byte 0x01 identifies Ed25519. 0x06 is provisional for
-# ML-DSA-65, pending C2SP registration; it is currently unassigned and does
-# not collide with the C2SP signed-note registry.
+# C2SP signed-note type byte 0x01 identifies Ed25519. ML-DSA-65 has no
+# assigned identifier byte, so it uses the registry's own extension
+# mechanism: 0xff ("signature types without an identifier byte assigned by
+# this specification") followed by a longer identifier unlikely to collide.
+# Collision-proof by construction — no future single-byte assignment (0x06
+# went to ML-DSA-44 cosignatures) can clash with an 0xff-prefixed type.
 _ED25519_SIG_TYPE = b"\x01"
-_ML_DSA_65_SIG_TYPE = b"\x06"
+_ML_DSA_65_SIG_TYPE = b"\xff" + b"attest-ml-dsa-65"
 _MAX_TREE_SIZE = 2**64 - 1
 # A uint64 can have at most 20 decimal digits. Capping before `int()` sees it
 # avoids both a bare (non-TlogError)

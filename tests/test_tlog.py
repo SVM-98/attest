@@ -464,10 +464,7 @@ def test_parse_checkpoint_rejects_leading_zero_size() -> None:
 
 
 def test_parse_checkpoint_accepts_uint64_max_size() -> None:
-    text = (
-        f"{ORIGIN}\n{2**64 - 1}\n{base64.b64encode(ROOT).decode('ascii')}\n\n"
-        f"— {LOG_NAME} AA==\n"
-    )
+    text = f"{ORIGIN}\n{2**64 - 1}\n{base64.b64encode(ROOT).decode('ascii')}\n\n— {LOG_NAME} AA==\n"
     assert tlog.parse_checkpoint(text).tree_size == 2**64 - 1
 
 
@@ -780,18 +777,23 @@ def test_sign_checkpoint_rejects_lone_surrogate_origin() -> None:
 
 def test_key_hash_prefix_matches_hand_computed_sha256() -> None:
     # Hand-computed, independent of attest.tlog: C2SP's key-ID input is
-    # name + "\n" + signature-type byte + public key. The ML-DSA-65 public
-    # key is fixed-length fixture material because this KAT covers the hash
-    # format, not ML-DSA key validity. Never derive either literal via
-    # tlog._key_hash, avoiding a tautological KAT.
+    # name + "\n" + signature-type bytes + public key. Ed25519 uses the
+    # assigned byte 0x01; ML-DSA-65 has no assigned byte and uses the C2SP
+    # 0xff extension mechanism (0xff + a longer identifier). The ML-DSA-65
+    # public key is fixed-length fixture material because this KAT covers
+    # the hash format, not ML-DSA key validity. Never derive either literal
+    # via tlog._key_hash, avoiding a tautological KAT.
     seed = bytes([7]) * 32
     ed_kp = keys.from_seed(seed)
     mldsa_pub = bytes(range(256)) * 7 + bytes(160)
     expected_ed_prefix = bytes.fromhex("fa60fb40")
-    expected_mldsa_prefix = bytes.fromhex("624976e8")
+    expected_mldsa_prefix = bytes.fromhex("5aded660")
     assert len(mldsa_pub) == pq.ML_DSA_65_PK_LEN
     assert hashlib.sha256(b"test-log\n\x01" + ed_kp.pub).digest()[:4] == expected_ed_prefix
-    assert hashlib.sha256(b"test-log\n\x06" + mldsa_pub).digest()[:4] == expected_mldsa_prefix
+    assert (
+        hashlib.sha256(b"test-log\n\xffattest-ml-dsa-65" + mldsa_pub).digest()[:4]
+        == expected_mldsa_prefix
+    )
 
     hk = pq.HybridSigningKeys(ed=ed_kp, mldsa=pq.generate())
     text = tlog.sign_checkpoint(ORIGIN, 1, ROOT, hk, "test-log")
@@ -799,9 +801,10 @@ def test_key_hash_prefix_matches_hand_computed_sha256() -> None:
     mldsa_line = text.split("\n")[5]
     _dash, _name, blob_b64 = ed_line.split(" ", 2)
     _dash, _name, mldsa_blob_b64 = mldsa_line.split(" ", 2)
-    assert base64.b64decode(blob_b64)[:4] == hashlib.sha256(
-        b"test-log\n\x01" + hk.ed.pub
-    ).digest()[:4]
-    assert base64.b64decode(mldsa_blob_b64)[:4] == hashlib.sha256(
-        b"test-log\n\x06" + hk.mldsa.pub
-    ).digest()[:4]
+    assert (
+        base64.b64decode(blob_b64)[:4] == hashlib.sha256(b"test-log\n\x01" + hk.ed.pub).digest()[:4]
+    )
+    assert (
+        base64.b64decode(mldsa_blob_b64)[:4]
+        == hashlib.sha256(b"test-log\n\xffattest-ml-dsa-65" + hk.mldsa.pub).digest()[:4]
+    )
