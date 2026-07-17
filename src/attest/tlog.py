@@ -417,6 +417,9 @@ _MAX_NOTE_SIGNATURES = 64
 # 3313 bytes -> 4420 base64 chars; 8192 is generous headroom. Checked
 # BEFORE base64-decoding so a hostile line cannot force a large allocation.
 _MAX_SIG_B64_LEN = 8192
+# A 32-byte root encodes to ceil(32 / 3) * 4 = exactly 44 base64 chars.
+# Checked BEFORE base64-decoding so a hostile root cannot force a large allocation.
+_MAX_ROOT_B64_LEN = 44
 
 
 def _trunc_repr(value: str, limit: int = 80) -> str:
@@ -610,6 +613,8 @@ def _parse(text: str) -> tuple[Checkpoint, list[tuple[str, bytes]]]:
     origin, size_str, root_b64 = header
     origin = _validate_origin(origin)
     tree_size = _parse_tree_size(size_str)
+    if len(root_b64) > _MAX_ROOT_B64_LEN:
+        raise TlogError(f"root exceeds {_MAX_ROOT_B64_LEN} base64 chars")
     try:
         root = base64.b64decode(root_b64, validate=True)
     except ValueError as exc:

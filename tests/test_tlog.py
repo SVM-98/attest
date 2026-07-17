@@ -697,7 +697,7 @@ def test_verify_checkpoint_stops_after_hybrid_pair(monkeypatch: pytest.MonkeyPat
     text, hk = _signed_checkpoint()
     lines = text.split("\n")
     lines.insert(-1, lines[5])  # an attacker-appended duplicate ML-DSA signature
-    mldsa_verify = tlog.pq.verify_strict
+    mldsa_verify = pq.verify_strict
     calls = 0
 
     def count_mldsa_verify(payload: bytes, signature: bytes, public_key: bytes) -> bool:
@@ -705,7 +705,7 @@ def test_verify_checkpoint_stops_after_hybrid_pair(monkeypatch: pytest.MonkeyPat
         calls += 1
         return mldsa_verify(payload, signature, public_key)
 
-    monkeypatch.setattr(tlog.pq, "verify_strict", count_mldsa_verify)
+    monkeypatch.setattr(pq, "verify_strict", count_mldsa_verify)
     tlog.verify_checkpoint("\n".join(lines), _log_key(hk), ORIGIN)
     assert calls == 1
 
@@ -831,4 +831,15 @@ def test_parse_checkpoint_rejects_oversized_signature_blob_before_decoding() -> 
     with pytest.raises(tlog.TlogError) as exc_info:
         tlog.parse_checkpoint(text)
     assert "exceeds" in str(exc_info.value)
+    assert len(str(exc_info.value)) < 200
+
+
+def test_parse_checkpoint_rejects_oversized_root_before_decoding() -> None:
+    # Base64 length is checked BEFORE b64decode so a hostile multi-megabyte
+    # root never gets decoded into a large allocation.
+    huge_b64 = "A" * 100_000
+    text = f"{ORIGIN}\n3\n{huge_b64}\n\n— {LOG_NAME} AA==\n"
+    with pytest.raises(tlog.TlogError) as exc_info:
+        tlog.parse_checkpoint(text)
+    assert str(tlog._MAX_ROOT_B64_LEN) in str(exc_info.value)
     assert len(str(exc_info.value)) < 200
