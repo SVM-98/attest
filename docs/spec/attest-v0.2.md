@@ -67,11 +67,11 @@ This is **AND-verified, fail-closed in both directions**: a hybrid signer's mani
 
 | Quantity | Raw bytes | b64u (no padding) |
 | --- | --- | --- |
-| Public key (`pub_ml_dsa_65`) | 1952 | 2604 |
+| Public key (`pub_ml_dsa_65`) | 1952 | 2603 |
 | Secret key (not on the wire) | 4032 | — |
 | Signature (`sig`, `sig_ml_dsa_65`) | 3309 | 4412 |
 
-A hybrid receipt grows to roughly 7–8 KB total (envelope + manifest, b64u overhead included) — larger than a v0.1 receipt (a few hundred bytes) but still an acceptable size for a signed receipt document, not a constrained protocol frame.
+A hybrid receipt and its manifest total roughly 13–14 KB (about 6 KB for the envelope plus 8 KB for the manifest, b64u overhead included) — larger than a v0.1 receipt (a few hundred bytes) but still an acceptable size for a signed receipt document, not a constrained protocol frame.
 
 ## 3. Verification algorithm — v0.2 hybrid path
 
@@ -80,15 +80,18 @@ A v0.2-capable verifier executes v0.1 §11's algorithm with the hybrid path subs
 The reference implementation (`src/attest/verify.py`) executes these checks in exactly this order:
 
 1. **Signature count.** `signatures` MUST have length exactly 2. Otherwise: `hybrid envelope requires exactly two signatures`.
-2. **Alg and order.** Entry 0's `alg` MUST equal `"Ed25519"` and entry 1's `alg` MUST equal `"ML-DSA-65"`. Otherwise: `hybrid envelope requires algs Ed25519 and ML-DSA-65 in order`.
-3. **Shared kid.** Both entries' `kid` MUST be identical strings. Otherwise: `hybrid envelope signatures must share a single kid`.
-4. **Issuer binding** (shared with v0.1 §11 step 2, unchanged): resolve the manifest for `payload.issuer.id`; the shared `kid`'s DNS-domain prefix and the manifest's own `issuer` field MUST both equal `payload.issuer.id`.
-5. **Key checks** (shared with v0.1 §11 step 3, unchanged): the key entry MUST be present in the resolved manifest, MUST NOT be `status == "compromised"` (unconditional, v0.1 §7.3), and `payload.issued_at` MUST fall within the key's `[valid_from, valid_to]` window; a `"retired"` key still verifies, with a warning.
-6. **Hybrid key-entry requirement.** The resolved key entry MUST carry `pub_ml_dsa_65`. Otherwise: `key entry for kid {kid!r} has no ML-DSA-65 public key`.
-7. **Ed25519 leg.** `Ed25519.verify(JCS(payload), sig_0, pub)` under the v0.1 §10 pinned ruleset, over the same canonical bytes computed once for both legs. Otherwise: `signature verification failed`.
-8. **ML-DSA-65 leg.** `ML-DSA-65.verify(JCS(payload), sig_1, pub_ml_dsa_65)`. Otherwise: `ML-DSA-65 signature verification failed`.
+2. **Signature-block structure.** Both entries MUST be objects. Otherwise: `malformed signature block`.
+3. **Alg and order.** Entry 0's `alg` MUST equal `"Ed25519"` and entry 1's `alg` MUST equal `"ML-DSA-65"`. Otherwise: `hybrid envelope requires algs Ed25519 and ML-DSA-65 in order`.
+4. **Shared kid.** Both entries' `kid` values MUST be identical. Otherwise: `hybrid envelope signatures must share a single kid`.
+5. **Kid type.** The shared `kid` MUST be a string. Otherwise: `malformed signature block: 'kid' must be a string`.
+6. **Signature type.** Both entries' `sig` values MUST be strings. Otherwise: `malformed signature block: 'sig' must be a string`.
+7. **Issuer binding** (shared with v0.1 §11 step 2, unchanged): resolve the manifest for `payload.issuer.id`; the shared `kid`'s DNS-domain prefix and the manifest's own `issuer` field MUST both equal `payload.issuer.id`.
+8. **Key checks** (shared with v0.1 §11 step 3, unchanged): the key entry MUST be present in the resolved manifest, MUST NOT be `status == "compromised"` (unconditional, v0.1 §7.3), and `payload.issued_at` MUST fall within the key's `[valid_from, valid_to]` window; a `"retired"` key still verifies, with a warning.
+9. **Hybrid key-entry requirement.** The resolved key entry MUST carry `pub_ml_dsa_65`. Otherwise: `key entry for kid {kid!r} has no ML-DSA-65 public key`.
+10. **Ed25519 leg.** `Ed25519.verify(JCS(payload), sig_0, pub)` under the v0.1 §10 pinned ruleset, over the same canonical bytes computed once for both legs. Otherwise: `signature verification failed`.
+11. **ML-DSA-65 leg.** `ML-DSA-65.verify(JCS(payload), sig_1, pub_ml_dsa_65)`. Otherwise: `ML-DSA-65 signature verification failed`.
 
-Only if both legs (steps 7 and 8) verify does the algorithm continue to v0.1 §11 steps 5–7 (schema, revocation, binding) unchanged.
+Only if both legs (steps 10 and 11) verify does the algorithm continue to v0.1 §11 steps 5–7 (schema, revocation, binding) unchanged.
 
 ### 3.1 Error-literal table (verbatim)
 
@@ -97,8 +100,11 @@ A conforming implementation SHOULD surface these exact strings (or a superset co
 | Literal (verbatim) | Emitted when |
 | --- | --- |
 | `hybrid envelope requires exactly two signatures` | `signatures` length ≠ 2. |
+| `malformed signature block` | either signature entry is not an object. |
 | `hybrid envelope requires algs Ed25519 and ML-DSA-65 in order` | entry 0/1 `alg` is not exactly `["Ed25519", "ML-DSA-65"]` in that order (includes a duplicated `alg`). |
 | `hybrid envelope signatures must share a single kid` | the two entries' `kid` values differ. |
+| `malformed signature block: 'kid' must be a string` | the shared `kid` is not a string. |
+| `malformed signature block: 'sig' must be a string` | either signature entry's `sig` is not a string. |
 | `key entry for kid {kid!r} has no ML-DSA-65 public key` | the resolved manifest key entry lacks `pub_ml_dsa_65`. |
 | `signature verification failed` | the Ed25519 leg fails to verify (unchanged literal from v0.1). |
 | `ML-DSA-65 signature verification failed` | the ML-DSA-65 leg fails to verify. |
@@ -162,7 +168,7 @@ Key manifest — one key entry carrying both public keys, and a manifest signatu
 }
 ```
 
-Against this manifest, both signature legs of the envelope above verify (§3 steps 7–8), yielding `signature: "valid"`, `schema: "valid"`, `trust: "verified"`, `ok: true` — the same layered `VerificationResult` shape v0.1 §11.1 defines, unchanged.
+Against this manifest, both signature legs of the envelope above verify (§3 steps 10–11), yielding `signature: "valid"`, `schema: "valid"`, `trust: "verified"`, `ok: true` — the same layered `VerificationResult` shape v0.1 §11.1 defines, unchanged.
 
 ## 6. Conformance
 
