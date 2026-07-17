@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import { ed25519 } from '@noble/curves/ed25519'
+import { ml_dsa65 } from '@noble/post-quantum/ml-dsa.js'
 import { loadsStrict, canonicalBytes, JsonObject } from '../src/canon.js'
-import { b64uEncode } from '../src/b64u.js'
+import { b64uEncode, b64uDecode } from '../src/b64u.js'
 import {
   findKey,
   verifyKeyManifest,
@@ -253,6 +254,79 @@ describe('manifests', () => {
 
     it('a single-manifest chain is trivially continuous', () => {
       expect(chainContinuous([parse(v1)])).toBe(true)
+    })
+  })
+
+  // v0.2 hybrid (Ed25519 + ML-DSA-65) manifest-signature AND rule — mirrors
+  // tests/test_manifests_hybrid.py's four manifest-signature cases one-for-one.
+  describe('hybrid manifest signature (AND rule)', () => {
+    const HYBRID_KID = `${ISSUER}/keys/test#hybrid-1`
+    const hybridEdSeed = Uint8Array.from({ length: 32 }, () => 11)
+    const hybridEdPub = ed25519.getPublicKey(hybridEdSeed)
+    const { publicKey: hybridMldsaPub, secretKey: hybridMldsaSecret } = ml_dsa65.keygen(
+      Uint8Array.from({ length: 32 }, () => 12),
+    )
+
+    // Returns a plain (JS-number) manifest object, matching `signManifest`
+    // above — callers parse() it (bigint `manifest_version`) at the point of
+    // use, so it stays JSON.stringify-able for tamper mutations in between.
+    function signHybridManifest(body: Record<string, unknown>, kid: string): Record<string, unknown> {
+      const b = parse(body)
+      const bytes = canonicalBytes(b)
+      const edSig = ed25519.sign(bytes, hybridEdSeed)
+      const mldsaSig = ml_dsa65.sign(bytes, hybridMldsaSecret)
+      return { ...body, manifest_signature: { kid, sig: b64uEncode(edSig), sig_ml_dsa_65: b64uEncode(mldsaSig) } }
+    }
+
+    function hybridManifestBody() {
+      return {
+        issuer: ISSUER,
+        manifest_version: 1,
+        issued_at: '2026-01-01T00:00:00Z',
+        keys: [
+          {
+            kid: HYBRID_KID,
+            pub: b64uEncode(hybridEdPub),
+            valid_from: '2026-01-01T00:00:00Z',
+            valid_to: null,
+            status: 'active',
+            pub_ml_dsa_65: b64uEncode(hybridMldsaPub),
+          },
+        ],
+      }
+    }
+
+    it('a hybrid manifest with both legs verifies', () => {
+      const manifest = signHybridManifest(hybridManifestBody(), HYBRID_KID)
+      expect(verifyKeyManifest(parse(manifest))).toBe(true)
+    })
+
+    it('a hybrid manifest missing the ML-DSA-65 leg is invalid', () => {
+      const manifest = signHybridManifest(hybridManifestBody(), HYBRID_KID) as any
+      delete manifest.manifest_signature.sig_ml_dsa_65
+      expect(verifyKeyManifest(parse(manifest))).toBe(false)
+    })
+
+    it('a non-hybrid manifest with a stray ML-DSA-65 leg is invalid', () => {
+      const body = {
+        issuer: ISSUER,
+        manifest_version: 1,
+        issued_at: '2026-01-01T00:00:00Z',
+        keys: [{ kid: HYBRID_KID, pub: b64uEncode(hybridEdPub), valid_from: '2026-01-01T00:00:00Z', valid_to: null, status: 'active' }],
+      }
+      const edSig = ed25519.sign(canonicalBytes(parse(body)), hybridEdSeed)
+      const nonHybrid = { ...body, manifest_signature: { kid: HYBRID_KID, sig: b64uEncode(edSig) } } as any
+      expect(verifyKeyManifest(parse(nonHybrid))).toBe(true)
+      nonHybrid.manifest_signature.sig_ml_dsa_65 = b64uEncode(new Uint8Array(3309))
+      expect(verifyKeyManifest(parse(nonHybrid))).toBe(false)
+    })
+
+    it('a hybrid manifest with a tampered ML-DSA-65 leg is invalid', () => {
+      const manifest = signHybridManifest(hybridManifestBody(), HYBRID_KID) as any
+      const raw = b64uDecode(manifest.manifest_signature.sig_ml_dsa_65)
+      raw[0] = raw[0]! ^ 0xff
+      manifest.manifest_signature.sig_ml_dsa_65 = b64uEncode(raw)
+      expect(verifyKeyManifest(parse(manifest))).toBe(false)
     })
   })
 
