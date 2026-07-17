@@ -46,6 +46,20 @@ def _no_horizon_policy() -> anchor.AnchorPolicy:
     return anchor.AnchorPolicy(pinned_headers={}, crqc_horizon=None)
 
 
+class _GetRaisesDict(dict[str, Any]):
+    """Hostile evidence mapping whose ordinary accessor is not safe."""
+
+    def get(self, key: object, default: object = None) -> object:
+        raise KeyError(key)
+
+
+class _EqualityRaisesString(str):
+    """Schema-valid evidence value whose comparison is hostile."""
+
+    def __eq__(self, other: object) -> bool:
+        raise RuntimeError("hostile equality")
+
+
 class _Bundle:
     """A working 3-leaf log fixture: entry-under-test at index 1, signed
     checkpoint at tree_size=3, and its inclusion proof — everything
@@ -218,10 +232,12 @@ def test_evaluate_transparency_flags_tree_size_mismatch_against_checkpoint() -> 
     assert result.warnings == ["tree_size_mismatch"]
 
 
-def test_evaluate_transparency_flags_inclusion_proof_wrong_shape() -> None:
+def test_evaluate_transparency_flags_non_list_inclusion_proof() -> None:
     bundle = _Bundle()
     evidence = bundle.evidence()
-    evidence["inclusion_proof"] = "not-a-list"
+    # A tuple of otherwise-valid proof entries would reach the successful
+    # path if the explicit list guard were deleted.
+    evidence["inclusion_proof"] = tuple(evidence["inclusion_proof"])
     result = _evaluate(bundle, evidence)
     assert result.warnings == ["inclusion_proof_invalid"]
 
@@ -308,6 +324,32 @@ def test_evaluate_transparency_detects_equivocation_on_inconsistent_prior() -> N
     assert result.warnings == ["log_equivocation_detected"]
 
 
+def test_evaluate_transparency_equivocation_survives_configured_horizon() -> None:
+    bundle = _Bundle()
+    other_entries = _entries(2, salt="fork-prefix")
+    other_leaves = [tlog.encode_entry(entry) for entry in other_entries]
+    prior_root = tlog.build_tree(other_leaves)
+    extended_leaves = [*other_leaves, bundle.leaves[2]]
+    prior_text = tlog.sign_checkpoint(ORIGIN, 2, prior_root, bundle.hk, LOG_NAME)
+
+    evidence = bundle.evidence()
+    evidence["prior_checkpoint"] = prior_text
+    evidence["consistency_proof"] = [
+        proof.hex() for proof in tlog.consistency_proof(extended_leaves, 2)
+    ]
+    note_bytes = tlog.parse_checkpoint(bundle.checkpoint_text).note_bytes
+    anchors_evidence, policy_base, header_time = _working_ots_evidence(note_bytes)
+    evidence["anchors"] = anchors_evidence
+    policy = anchor.AnchorPolicy(
+        pinned_headers=policy_base.pinned_headers, crqc_horizon=header_time - 1
+    )
+
+    result = _evaluate(bundle, evidence, policy=policy)
+    assert result.transparency == transparency.TRANSPARENCY_EQUIVOCATION_DETECTED
+    assert result.corroboration == transparency.CORROBORATION_NONE
+    assert result.warnings == ["log_equivocation_detected"]
+
+
 def test_evaluate_transparency_does_not_treat_unverifiable_prior_as_equivocation() -> None:
     # A prior checkpoint with a bad signature is NOT proof of equivocation —
     # fail-safe, not a hard verdict.
@@ -347,6 +389,21 @@ def test_evaluate_transparency_flags_malformed_consistency_proof_shape() -> None
     assert result.warnings == ["consistency_proof_invalid"]
 
 
+def test_evaluate_transparency_flags_non_list_consistency_proof() -> None:
+    bundle = _Bundle()
+    prior_root = tlog.build_tree(bundle.leaves[:2])
+    prior_text = tlog.sign_checkpoint(ORIGIN, 2, prior_root, bundle.hk, LOG_NAME)
+    evidence = bundle.evidence()
+    evidence["prior_checkpoint"] = prior_text
+    # As above, this tuple contains a valid proof and would verify if the
+    # list-only boundary guard were removed.
+    evidence["consistency_proof"] = tuple(
+        proof.hex() for proof in tlog.consistency_proof(bundle.leaves, 2)
+    )
+    result = _evaluate(bundle, evidence)
+    assert result.warnings == ["consistency_proof_invalid"]
+
+
 def test_evaluate_transparency_caps_oversized_consistency_proof_list() -> None:
     # Load-bearing, not just defense-in-depth: without this cap, an oversized
     # proof reaches tlog.verify_consistency, which returns False on it (unlike
@@ -370,6 +427,29 @@ def test_evaluate_transparency_flags_prior_checkpoint_wrong_type() -> None:
     evidence["prior_checkpoint"] = 42
     result = _evaluate(bundle, evidence)
     assert result.warnings == ["prior_checkpoint_invalid"]
+
+
+def test_evaluate_transparency_flags_explicit_none_prior_checkpoint() -> None:
+    bundle = _Bundle()
+    evidence = bundle.evidence()
+    evidence["prior_checkpoint"] = None
+    result = _evaluate(bundle, evidence)
+    assert result.transparency == transparency.TRANSPARENCY_NOT_CHECKED
+    assert result.corroboration == transparency.CORROBORATION_NONE
+    assert result.warnings == ["prior_checkpoint_invalid"]
+
+
+def test_evaluate_transparency_flags_explicit_none_consistency_proof() -> None:
+    bundle = _Bundle()
+    prior_root = tlog.build_tree(bundle.leaves[:2])
+    prior_text = tlog.sign_checkpoint(ORIGIN, 2, prior_root, bundle.hk, LOG_NAME)
+    evidence = bundle.evidence()
+    evidence["prior_checkpoint"] = prior_text
+    evidence["consistency_proof"] = None
+    result = _evaluate(bundle, evidence)
+    assert result.transparency == transparency.TRANSPARENCY_NOT_CHECKED
+    assert result.corroboration == transparency.CORROBORATION_NONE
+    assert result.warnings == ["consistency_proof_invalid"]
 
 
 # --------------------------------------------------------------------------
@@ -421,6 +501,20 @@ def test_iso8601_kat_pins_the_helper_independent_of_the_brief_arithmetic() -> No
     assert transparency._iso8601(1700000000) == "2023-11-14T22:13:20Z"
 
 
+def test_iso8601_renders_the_max_supported_pinned_header_time() -> None:
+    assert transparency._iso8601(anchor._MAX_RENDERABLE_UNIX_TIME) == "9999-12-31T23:59:59Z"
+
+
+def test_evaluate_transparency_flags_explicit_none_anchors() -> None:
+    bundle = _Bundle()
+    evidence = bundle.evidence()
+    evidence["anchors"] = None
+    result = _evaluate(bundle, evidence)
+    assert result.transparency == transparency.TRANSPARENCY_NOT_CHECKED
+    assert result.corroboration == transparency.CORROBORATION_NONE
+    assert result.warnings == ["anchors_invalid"]
+
+
 def test_evaluate_transparency_caps_to_not_checked_when_post_horizon_unanchored() -> None:
     # Base standing alone (no PQ-surviving anchor) cannot survive a declared
     # CRQC horizon: checkpoint signatures alone don't count.
@@ -443,14 +537,14 @@ def test_evaluate_transparency_horizon_cap_applies_when_anchor_too_late() -> Non
     evidence["anchors"] = anchors_evidence
     result = _evaluate(bundle, evidence, policy=policy)
     assert result.transparency == transparency.TRANSPARENCY_NOT_CHECKED
-    assert "post_horizon_unanchored" in result.warnings
+    assert result.warnings == ["post_horizon_unanchored"]
 
 
 def test_evaluate_transparency_no_horizon_cap_when_crqc_horizon_none() -> None:
     bundle = _Bundle()
     result = _evaluate(bundle, bundle.evidence(), policy=_no_horizon_policy())
     assert result.transparency == transparency.TRANSPARENCY_LOGGED
-    assert "post_horizon_unanchored" not in result.warnings
+    assert result.warnings == []
 
 
 def test_evaluate_transparency_horizon_cap_overrides_prior_logged_anchor_state() -> None:
@@ -465,9 +559,10 @@ def test_evaluate_transparency_horizon_cap_overrides_prior_logged_anchor_state()
     policy = anchor.AnchorPolicy(pinned_headers={}, crqc_horizon=1700000000)
     result = _evaluate(bundle, evidence, policy=policy)
     assert result.transparency == transparency.TRANSPARENCY_NOT_CHECKED
-    assert "post_horizon_unanchored" in result.warnings
-    # The rfc3161 corroboration warning from anchor.py should still surface.
-    assert any("rfc3161" in w for w in result.warnings)
+    assert result.warnings == [
+        "rfc3161 token accepted as opaque classical evidence, carries no post-horizon weight",
+        "post_horizon_unanchored",
+    ]
 
 
 def test_evaluate_transparency_surfaces_anchor_warnings_on_failed_anchor_evidence() -> None:
@@ -476,7 +571,7 @@ def test_evaluate_transparency_surfaces_anchor_warnings_on_failed_anchor_evidenc
     evidence["anchors"] = {"checkpoint": bundle.checkpoint_text, "proofs": "not-a-list"}
     result = _evaluate(bundle, evidence)
     assert result.transparency == transparency.TRANSPARENCY_LOGGED  # anchors are non-fatal
-    assert "evidence.proofs must be a list, got str" in result.warnings
+    assert result.warnings == ["evidence.proofs must be a list, got str"]
 
 
 # --------------------------------------------------------------------------
@@ -499,6 +594,25 @@ def test_evaluate_transparency_never_raises_when_required_fields_missing() -> No
     assert result.warnings == ["entry_invalid"]
 
 
+def test_evaluate_transparency_confines_hostile_evidence_get() -> None:
+    bundle = _Bundle()
+    evidence = _GetRaisesDict(bundle.evidence())
+    result = _evaluate(bundle, evidence)
+    assert result.transparency == transparency.TRANSPARENCY_NOT_CHECKED
+    assert result.corroboration == transparency.CORROBORATION_NONE
+    assert result.warnings == ["evidence_evaluation_failed"]
+
+
+def test_evaluate_transparency_confines_hostile_evidence_equality() -> None:
+    bundle = _Bundle()
+    evidence = bundle.evidence()
+    evidence["entry"]["core_sha256"] = _EqualityRaisesString(evidence["entry"]["core_sha256"])
+    result = _evaluate(bundle, evidence)
+    assert result.transparency == transparency.TRANSPARENCY_NOT_CHECKED
+    assert result.corroboration == transparency.CORROBORATION_NONE
+    assert result.warnings == ["evidence_evaluation_failed"]
+
+
 # --------------------------------------------------------------------------
 # Trusted-arg validation: raises TransparencyError, never degrades.
 # --------------------------------------------------------------------------
@@ -518,10 +632,28 @@ def test_evaluate_transparency_raises_on_log_keys_list_with_non_logkey_element()
         )
 
 
+def test_evaluate_transparency_raises_on_malformed_log_key_field() -> None:
+    bundle = _Bundle()
+    malformed_key = tlog.LogKey(
+        origin=ORIGIN,
+        name=LOG_NAME,
+        ed25519_pub=b"too-short",
+        mldsa_pub=bundle.log_key.mldsa_pub,
+    )
+    with pytest.raises(transparency.TransparencyError):
+        _evaluate(bundle, bundle.evidence(), log_keys=[malformed_key])
+
+
 def test_evaluate_transparency_raises_on_non_str_expected_origin() -> None:
     bundle = _Bundle()
     with pytest.raises(transparency.TransparencyError):
         _evaluate(bundle, bundle.evidence(), expected_origin=cast(str, 123))
+
+
+def test_evaluate_transparency_raises_on_empty_expected_origin() -> None:
+    bundle = _Bundle()
+    with pytest.raises(transparency.TransparencyError):
+        _evaluate(bundle, bundle.evidence(), expected_origin="")
 
 
 def test_evaluate_transparency_raises_on_non_anchor_policy() -> None:
@@ -530,10 +662,25 @@ def test_evaluate_transparency_raises_on_non_anchor_policy() -> None:
         _evaluate(bundle, bundle.evidence(), policy=cast(anchor.AnchorPolicy, "not-a-policy"))
 
 
+def test_evaluate_transparency_raises_on_malformed_policy_pinned_headers() -> None:
+    bundle = _Bundle()
+    malformed_policy = anchor.AnchorPolicy(
+        pinned_headers=cast(dict[str, anchor.PinnedHeader], []), crqc_horizon=None
+    )
+    with pytest.raises(transparency.TransparencyError):
+        _evaluate(bundle, bundle.evidence(), policy=malformed_policy)
+
+
 def test_evaluate_transparency_raises_on_non_dict_expected_entry() -> None:
     bundle = _Bundle()
     with pytest.raises(transparency.TransparencyError):
         _evaluate(bundle, bundle.evidence(), expected_entry=cast(dict[str, Any], "not-a-dict"))
+
+
+def test_evaluate_transparency_raises_on_schema_invalid_expected_entry() -> None:
+    bundle = _Bundle()
+    with pytest.raises(transparency.TransparencyError):
+        _evaluate(bundle, bundle.evidence(), expected_entry={"type": "receipt"})
 
 
 # --------------------------------------------------------------------------
