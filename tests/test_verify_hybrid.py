@@ -141,4 +141,29 @@ def test_v01_receipt_still_verifies() -> None:
     result = verify.verify(_to_bytes(envelope), _trust_store(manifest))
     assert result.signature == "valid"
     assert result.errors == ()
-    assert result.ok is True
+
+
+def test_v02_uncanonicalizable_payload_is_invalid_not_raised() -> None:
+    """A payload that reaches canonicalization at verify time but that
+    `canon.canonical_bytes` rejects (integer outside the I-JSON safe range)
+    must return an invalid `VerificationResult`, never raise `CanonError`
+    out of `verify.verify` (adversarial review finding #1)."""
+    envelope = _hybrid_envelope()
+    envelope["payload"]["out_of_range_int"] = 2**53
+    result = verify.verify(_to_bytes(envelope), _trust_store(_hybrid_manifest()))
+    assert result.ok is False
+    assert result.signature == "invalid"
+    assert len(result.errors) == 1
+    assert result.errors[0].startswith("malformed signature material: ")
+
+
+def test_non_string_attest_version_is_invalid_not_raised() -> None:
+    """`attest_version` must fail closed when it is an unhashable value (e.g.
+    a JSON list), not raise `TypeError` from the `in` membership check
+    against `_SUPPORTED_ATTEST_VERSIONS` (adversarial review finding #3)."""
+    envelope = _hybrid_envelope()
+    envelope["payload"]["attest_version"] = ["0.2"]
+    result = verify.verify(_to_bytes(envelope), _trust_store(_hybrid_manifest()))
+    assert result.ok is False
+    assert result.signature == "invalid"
+    assert result.errors == ("unsupported attest_version: ['0.2']",)

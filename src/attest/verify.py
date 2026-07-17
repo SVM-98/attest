@@ -553,7 +553,7 @@ def verify(
     # length == 1 (v0.1) or exactly the hybrid pair (v0.2); alg checked against
     # the literal expected string(s) (read only to reject, never to select).
     attest_version = payload.get("attest_version")
-    if attest_version not in _SUPPORTED_ATTEST_VERSIONS:
+    if not isinstance(attest_version, str) or attest_version not in _SUPPORTED_ATTEST_VERSIONS:
         return _invalid(f"unsupported attest_version: {attest_version!r}")
 
     if attest_version == "0.2":
@@ -631,8 +631,8 @@ def verify(
         except (KeyError, TypeError, ValueError) as exc:
             return _invalid(f"malformed key material: {exc}")
 
-        canonical = canon.canonical_bytes(payload)
         try:
+            canonical = canon.canonical_bytes(payload)
             ed_ok = keys.verify_strict(canonical, ed_sig, ed_pub)
         except ValueError as exc:
             return _invalid(f"malformed signature material: {exc}")
