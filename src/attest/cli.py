@@ -177,6 +177,13 @@ def _cmd_keygen(args: argparse.Namespace) -> int:
         raise CliUsageError("--hybrid requires --mldsa-out")
     if not args.hybrid and args.mldsa_out is not None:
         raise CliUsageError("--mldsa-out requires --hybrid")
+    if args.mldsa_out is not None and (
+        args.mldsa_out.resolve() == args.seed_out.resolve()
+        or args.mldsa_out.resolve() == args.pub_out.resolve()
+    ):
+        # Same aliasing hazard as --seed-out/--pub-out above (2026-07-13 review,
+        # finding 18), extended to the new ML-DSA output (fix wave, Task 8).
+        raise CliUsageError("--mldsa-out must differ from --seed-out and --pub-out")
 
     kp = keys.generate()
     _write_secret_text(args.seed_out, keys.b64u(kp.seed))
@@ -206,6 +213,12 @@ def _cmd_keygen(args: argparse.Namespace) -> int:
 
 
 def _cmd_manifest_init(args: argparse.Namespace) -> int:
+    if args.mldsa_key is not None and args.mldsa_key.resolve() == args.out.resolve():
+        # Reading --mldsa-key then writing --out to the same path would clobber
+        # the freshly-read ML-DSA secret file (finding 18 policy, extended to the
+        # new hybrid input; the pre-existing --seed-vs---out aliasing is out of
+        # scope for this fix wave).
+        raise CliUsageError("--mldsa-key and --out must be different paths")
     kp = _load_seed_kp(args.seed)
     signing_kp: keys.SigningKeyPair | pq.HybridSigningKeys = kp
     if args.mldsa_key is not None:
@@ -225,6 +238,11 @@ def _cmd_manifest_init(args: argparse.Namespace) -> int:
 
 
 def _cmd_manifest_rotate(args: argparse.Namespace) -> int:
+    if args.mldsa_key is not None and args.mldsa_key.resolve() == args.out.resolve():
+        # Same input-vs-output aliasing hazard as manifest init/issue (finding 18
+        # policy, extended to the new hybrid input).
+        raise CliUsageError("--mldsa-key and --out must be different paths")
+
     existing = _read_json(args.manifest_in)
     if not isinstance(existing, dict) or "keys" not in existing:
         raise CliUsageError(f"{args.manifest_in} is not a key manifest")
@@ -247,10 +265,44 @@ def _cmd_manifest_rotate(args: argparse.Namespace) -> int:
             "--retire-kid/--compromise-kid"
         )
 
+    # The signature shape MUST follow the signing entry's own hybrid-ness, not
+    # whether the operator happened to pass --mldsa-key: `_verify_signature_block`
+    # requires the manifest_signature shape to match "pub_ml_dsa_65" in entry and
+    # verifies the ML-DSA leg against the ENTRY's bound pub, so a mismatch here
+    # produces a manifest that is cryptographically invalid at exit 0 (2026-07-13
+    # adversarial review, Task 8 fix wave, finding 1/critical).
+    signer_entry = manifests.find_key(existing, args.signing_kid)
+    mldsa_kp: pq.MLDSAKeyPair | None = None
+    if signer_entry is not None:
+        is_hybrid_signer = "pub_ml_dsa_65" in signer_entry
+        if is_hybrid_signer and args.mldsa_key is None:
+            raise CliUsageError(
+                f"signing key {args.signing_kid!r} is hybrid; --mldsa-key is required"
+            )
+        if not is_hybrid_signer and args.mldsa_key is not None:
+            raise CliUsageError(
+                f"signing key {args.signing_kid!r} is Ed25519-only; --mldsa-key is not allowed"
+            )
+        if is_hybrid_signer and args.mldsa_key is not None:
+            mldsa_kp = _load_mldsa_kp(args.mldsa_key)
+            try:
+                entry_mldsa_pub = keys.b64u_decode(signer_entry["pub_ml_dsa_65"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise CliUsageError(
+                    f"{args.manifest_in} has a malformed pub_ml_dsa_65 for "
+                    f"{args.signing_kid!r}: {exc}"
+                ) from exc
+            if mldsa_kp.pub != entry_mldsa_pub:
+                raise CliUsageError(
+                    "--mldsa-key does not match the signing key's ML-DSA-65 public "
+                    "key in the manifest"
+                )
+
     ed_signing_kp = _load_seed_kp(args.signing_seed)
     signing_kp: keys.SigningKeyPair | pq.HybridSigningKeys = ed_signing_kp
     if args.mldsa_key is not None:
-        mldsa_kp = _load_mldsa_kp(args.mldsa_key)
+        if mldsa_kp is None:
+            mldsa_kp = _load_mldsa_kp(args.mldsa_key)
         signing_kp = pq.HybridSigningKeys(ed=ed_signing_kp, mldsa=mldsa_kp)
 
     try:
@@ -318,6 +370,11 @@ def _cmd_issue(args: argparse.Namespace) -> int:
         raise CliUsageError("--attest-version 0.2 requires --mldsa-key")
     if args.attest_version == "0.1" and args.mldsa_key is not None:
         raise CliUsageError("--mldsa-key requires --attest-version 0.2")
+    if args.mldsa_key is not None and args.mldsa_key.resolve() == args.out.resolve():
+        # Same input-vs-output aliasing hazard as --salt/--salt-out above (finding
+        # 18 policy, extended to the new hybrid input; the pre-existing --seed-vs
+        # ---out aliasing is out of scope for this fix wave).
+        raise CliUsageError("--mldsa-key and --out must be different paths")
 
     payload = _read_json(args.payload)
     ed_signing_kp = _load_seed_kp(args.seed)
