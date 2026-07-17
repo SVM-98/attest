@@ -57,6 +57,11 @@ _HEX_RE = re.compile(r"^[0-9a-f]*$")
 # limits — see tlog.py's `_MAX_NOTE_SIGNATURES` for the same rationale.
 _MAX_PROOFS_PER_EVIDENCE = 64
 _MAX_OPS_PER_PROOF = 64
+# A legitimate full note is ~400KB worst case (64 signature lines, ML-DSA-65
+# blobs ~4.4KB base64 each) — cap the evidence checkpoint text BEFORE it
+# reaches `tlog.parse_checkpoint`, so a hostile multi-megabyte string cannot
+# force large parse-time allocations.
+_MAX_CHECKPOINT_TEXT_LEN = 500_000
 _MAX_OP_HEX_LEN = 2048  # hex chars (1024 bytes) per append/prepend operand
 
 _KNOWN_OTS_OPS = frozenset({"sha256", "append", "prepend"})
@@ -295,6 +300,11 @@ def verify_anchor(
     checkpoint_text = evidence["checkpoint"]
     if not isinstance(checkpoint_text, str):
         warnings.append("evidence.checkpoint must be a str")
+        return AnchorVerdict(
+            anchored=False, anchored_before=None, pq_surviving=False, warnings=warnings
+        )
+    if len(checkpoint_text) > _MAX_CHECKPOINT_TEXT_LEN:
+        warnings.append(f"evidence.checkpoint exceeds max length {_MAX_CHECKPOINT_TEXT_LEN}")
         return AnchorVerdict(
             anchored=False, anchored_before=None, pq_surviving=False, warnings=warnings
         )

@@ -413,6 +413,19 @@ _MAX_TREE_SIZE_DIGITS = 20
 # C2SP recommends a signature limit while requiring acceptance of at least
 # 16. Sixty-four leaves room for witness cosignatures without unbounded work.
 _MAX_NOTE_SIGNATURES = 64
+# Largest legitimate signature blob is 4 (key hash) + 3309 (ML-DSA-65) =
+# 3313 bytes -> 4420 base64 chars; 8192 is generous headroom. Checked
+# BEFORE base64-decoding so a hostile line cannot force a large allocation.
+_MAX_SIG_B64_LEN = 8192
+
+
+def _trunc_repr(value: str, limit: int = 80) -> str:
+    """Bound an untrusted string's repr for an error message — slice BEFORE
+    repr so a multi-megabyte hostile field is never fully rendered (repr of
+    control characters amplifies ~4x per byte)."""
+    if len(value) <= limit:
+        return repr(value)
+    return repr(value[:limit]) + "…"
 
 
 @dataclass(frozen=True)
@@ -487,17 +500,17 @@ def _validate_bytes(value: object, field: str, length: int) -> bytes:
 def _parse_tree_size(size_str: str) -> int:
     """Parse an ASCII-decimal uint64 tree size without an int-conversion DoS."""
     if not _DECIMAL_RE.fullmatch(size_str):
-        raise TlogError(f"tree size must be ASCII decimal digits: {size_str!r}")
+        raise TlogError(f"tree size must be ASCII decimal digits: {_trunc_repr(size_str)}")
     if len(size_str) > 1 and size_str.startswith("0"):
-        raise TlogError(f"tree size must not contain leading zeros: {size_str!r}")
+        raise TlogError(f"tree size must not contain leading zeros: {_trunc_repr(size_str)}")
     if len(size_str) > _MAX_TREE_SIZE_DIGITS:
-        raise TlogError(f"tree size has too many digits ({len(size_str)}): {size_str!r}")
+        raise TlogError(f"tree size has too many digits ({len(size_str)}): {_trunc_repr(size_str)}")
     try:
         tree_size = int(size_str)
     except ValueError as exc:  # defensive: the preceding grammar makes this unreachable
-        raise TlogError(f"tree size is not a valid integer: {size_str!r}") from exc
+        raise TlogError(f"tree size is not a valid integer: {_trunc_repr(size_str)}") from exc
     if tree_size > _MAX_TREE_SIZE:
-        raise TlogError(f"tree size must be a uint64: {size_str!r}")
+        raise TlogError(f"tree size must be a uint64: {_trunc_repr(size_str)}")
     return tree_size
 
 
@@ -575,13 +588,15 @@ def _parse_signature_lines(lines: list[str]) -> list[tuple[str, bytes]]:
     for line in lines:
         m = _SIG_LINE_RE.fullmatch(line)
         if m is None:
-            raise TlogError(f"malformed checkpoint signature line: {line!r}")
+            raise TlogError(f"malformed checkpoint signature line: {_trunc_repr(line)}")
         name, blob_b64 = m.group(1), m.group(2)
         _validate_key_name(name, "signature key name")
+        if len(blob_b64) > _MAX_SIG_B64_LEN:
+            raise TlogError(f"signature blob exceeds {_MAX_SIG_B64_LEN} base64 chars")
         try:
             blob = base64.b64decode(blob_b64, validate=True)
         except ValueError as exc:
-            raise TlogError(f"signature blob is not valid base64: {blob_b64!r}") from exc
+            raise TlogError(f"signature blob is not valid base64: {_trunc_repr(blob_b64)}") from exc
         parsed.append((name, blob))
     return parsed
 
@@ -598,7 +613,7 @@ def _parse(text: str) -> tuple[Checkpoint, list[tuple[str, bytes]]]:
     try:
         root = base64.b64decode(root_b64, validate=True)
     except ValueError as exc:
-        raise TlogError(f"root is not valid base64: {root_b64!r}") from exc
+        raise TlogError(f"root is not valid base64: {_trunc_repr(root_b64)}") from exc
     if len(root) != _HASH_LEN:
         raise TlogError(f"root must decode to {_HASH_LEN} bytes, got {len(root)}")
     signatures = _parse_signature_lines(sig_lines)

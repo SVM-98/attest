@@ -398,9 +398,7 @@ def test_verify_anchor_unknown_kind_is_ignored_not_fatal() -> None:
     assert "proof[0]: unknown proof kind 'future-kind', ignored" in verdict.warnings
 
 
-@pytest.mark.parametrize(
-    "hostile_kind", [10**5000, "x" * 100_000], ids=["huge-int", "huge-string"]
-)
+@pytest.mark.parametrize("hostile_kind", [10**5000, "x" * 100_000], ids=["huge-int", "huge-string"])
 def test_verify_anchor_safely_renders_hostile_unknown_kind(hostile_kind: object) -> None:
     verdict = anchor.verify_anchor(_evidence([{"kind": hostile_kind}]), _checkpoint(), _policy())
     assert verdict.anchored is False
@@ -596,9 +594,7 @@ def test_anchor_policy_rejects_mismatched_dict_key_and_header_hash_field() -> No
 
 def test_anchor_policy_rejects_non_pinned_header_value() -> None:
     policy = anchor.AnchorPolicy(
-        pinned_headers=cast(
-            dict[str, anchor.PinnedHeader], {HEADER_HASH: "not-a-pinned-header"}
-        ),
+        pinned_headers=cast(dict[str, anchor.PinnedHeader], {HEADER_HASH: "not-a-pinned-header"}),
         crqc_horizon=None,
     )
     with pytest.raises(anchor.AnchorError):
@@ -610,3 +606,17 @@ def test_anchor_policy_rejects_uppercase_pinned_header_merkle_root() -> None:
     policy = anchor.AnchorPolicy(pinned_headers={HEADER_HASH: pinned}, crqc_horizon=None)
     with pytest.raises(anchor.AnchorError):
         anchor.verify_anchor({"proofs": []}, _checkpoint(), policy)
+
+
+def test_verify_anchor_rejects_oversized_evidence_checkpoint_text() -> None:
+    # A multi-megabyte hostile checkpoint string must be rejected BEFORE it
+    # reaches tlog.parse_checkpoint (allocation-DoS guard), with a bounded
+    # warning and no exception.
+    text = "x" * (anchor._MAX_CHECKPOINT_TEXT_LEN + 1)
+    verdict = anchor.verify_anchor(
+        {"checkpoint": text, "proofs": [_ots_proof()]}, _checkpoint(), _policy()
+    )
+    assert verdict.anchored is False
+    assert verdict.warnings == [
+        f"evidence.checkpoint exceeds max length {anchor._MAX_CHECKPOINT_TEXT_LEN}"
+    ]
