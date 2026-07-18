@@ -2740,8 +2740,7 @@ def test_log_append_tile_failure_preserves_entries_and_retry_does_not_duplicate(
 
     monkeypatch.setattr(Path, "write_bytes", original_write_bytes)
     assert (
-        cli.main(["log", "append", "--dir", str(log_dir), "--entry-json", str(entry_b_path)])
-        == 0
+        cli.main(["log", "append", "--dir", str(log_dir), "--entry-json", str(entry_b_path)]) == 0
     )
     entries = [json.loads(line) for line in entries_path.read_text(encoding="utf-8").splitlines()]
     assert entries == [entry_a, entry_b]
@@ -2787,3 +2786,25 @@ def test_log_sign_checkpoint_replace_failure_preserves_existing_checkpoint_and_e
     assert "simulated checkpoint replace failure" in captured.err
     assert checkpoint_path.read_text(encoding="utf-8") == prior_checkpoint
     assert (log_dir / "entries.jsonl").read_text(encoding="utf-8") == prior_entries
+
+
+def test_log_state_files_are_published_with_umask_default_modes(tmp_path: Path) -> None:
+    """LOG state files are public artifacts meant for static hosting: routing
+    them through mkstemp/mkdtemp staging must not install owner-only modes."""
+    previous_umask = os.umask(0o022)
+    try:
+        log_dir = _log_init(tmp_path)
+        seed, _pub = _keygen(tmp_path, "issuer")
+        envelope_path = _issue(tmp_path, seed, _write_payload(tmp_path))
+        _log_append(tmp_path, log_dir, _receipt_entry(envelope_path))
+        ed_seed, _ed_pub, mldsa_out = _keygen_hybrid(tmp_path, "log-signer")
+        _log_sign_checkpoint(log_dir, ed_seed, mldsa_out)
+    finally:
+        os.umask(previous_umask)
+
+    for state_file in ("entries.jsonl", "checkpoint.candidate", "checkpoint"):
+        assert stat.S_IMODE((log_dir / state_file).stat().st_mode) == 0o644, state_file
+    tile_dir = log_dir / "tile" / "0"
+    assert stat.S_IMODE(tile_dir.stat().st_mode) == 0o755
+    for tile in tile_dir.iterdir():
+        assert stat.S_IMODE(tile.stat().st_mode) == 0o644, tile.name
