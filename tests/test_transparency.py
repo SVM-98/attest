@@ -13,11 +13,13 @@ from __future__ import annotations
 
 import datetime
 import hashlib
+import json
 from typing import Any, cast
 
 import pytest
 
-from attest import anchor, keys, pq, tlog, transparency
+from attest import anchor, canon, issue, keys, manifests, pq, tlog, transparency, verify
+from tests.helpers import make_payload
 
 ORIGIN = "log.attest.example/2026"
 LOG_NAME = "attest-log-1"
@@ -722,3 +724,403 @@ def test_corroboration_witnessed_never_returned_across_representative_scenarios(
 
     for result in (base, consistent, anchored, capped):
         assert result.corroboration != transparency.CORROBORATION_WITNESSED
+
+
+# --------------------------------------------------------------------------
+# Task 5: verify() integration — transparency/corroboration/manifest_freshness.
+#
+# End-to-end through `verify()`, not just `evaluate_transparency` directly:
+# these tests build real receipts (via `issue.issue`) and real key manifests
+# (via `manifests.build_key_manifest`/`rotate_key_manifest`), then exercise
+# the new `transparency`/`log_keys`/`anchor_policy` kwargs and the three new
+# result components together with the pre-existing ones — the property under
+# test is specifically that corroboration is a side-channel that can never
+# change `signature`/`schema`/`trust`/`ok`.
+# --------------------------------------------------------------------------
+
+_RECEIPT_ISSUER = "store.example.com"
+_RECEIPT_KID = f"{_RECEIPT_ISSUER}/keys/test#ed25519-1"
+_RECEIPT_KP = keys.from_seed(bytes([77]) * 32)
+
+
+def _receipt_manifest(
+    kid: str = _RECEIPT_KID,
+    kp: keys.SigningKeyPair = _RECEIPT_KP,
+    status: str = "active",
+    manifest_version: int = 1,
+) -> dict[str, Any]:
+    entries = [manifests.key_entry(kid, kp.pub, "2026-01-01T00:00:00Z", None, status)]
+    return manifests.build_key_manifest(
+        _RECEIPT_ISSUER, manifest_version, "2026-01-01T00:00:00Z", entries, kp, kid
+    )
+
+
+def _receipt_envelope(
+    kid: str = _RECEIPT_KID, kp: keys.SigningKeyPair = _RECEIPT_KP
+) -> dict[str, Any]:
+    payload = make_payload(issuer={"id": _RECEIPT_ISSUER, "display_name": "Example Games Store"})
+    return issue.issue(payload, kp, kid)
+
+
+def _receipt_trust_store(
+    manifest: dict[str, Any],
+    provenance: str = "tls",
+    chains: dict[str, list[dict[str, Any]]] | None = None,
+) -> verify.TrustStore:
+    return verify.TrustStore(
+        manifests={_RECEIPT_ISSUER: manifest},
+        provenance={_RECEIPT_ISSUER: provenance},
+        chains=chains or {},
+    )
+
+
+def _envelope_bytes(envelope: dict[str, Any]) -> bytes:
+    return json.dumps(envelope).encode("utf-8")
+
+
+def _manifest_sha256(manifest: dict[str, Any]) -> str:
+    return hashlib.sha256(canon.canonical_bytes(manifest)).hexdigest()
+
+
+def _single_entry_evidence(
+    entry: dict[str, Any], hk: pq.HybridSigningKeys, origin: str = ORIGIN, name: str = LOG_NAME
+) -> tuple[dict[str, Any], tlog.LogKey, int]:
+    """A minimal one-leaf log holding exactly `entry` — trivial (empty)
+    inclusion proof, `tree_size=1`. Returns `(evidence, log_key, tree_size)`."""
+    leaf_bytes = tlog.encode_entry(entry)
+    root = tlog.build_tree([leaf_bytes])
+    checkpoint_text = tlog.sign_checkpoint(origin, 1, root, hk, name)
+    evidence = {
+        "entry": dict(entry),
+        "leaf_index": 0,
+        "tree_size": 1,
+        "inclusion_proof": [],
+        "checkpoint": checkpoint_text,
+    }
+    return evidence, _log_key(hk, origin, name), 1
+
+
+def _bundle_with_entry(entry: dict[str, Any]) -> _Bundle:
+    """A 3-leaf `_Bundle` whose entry-under-test (index 1) is `entry`
+    instead of the generic fixture entry — reused for the equivocation
+    construction, which needs a real 3-leaf tree to fork against."""
+    bundle = _Bundle()
+    bundle.entries[1] = entry
+    bundle.leaves = [tlog.encode_entry(e) for e in bundle.entries]
+    bundle.root = tlog.build_tree(bundle.leaves)
+    bundle.proof = tlog.inclusion_proof(bundle.leaves, 1)
+    bundle.checkpoint_text = tlog.sign_checkpoint(ORIGIN, 3, bundle.root, bundle.hk, LOG_NAME)
+    bundle.entry = entry
+    return bundle
+
+
+def test_verify_transparency_defaults_to_not_checked_when_evidence_absent() -> None:
+    envelope = _receipt_envelope()
+    result = verify.verify(_envelope_bytes(envelope), _receipt_trust_store(_receipt_manifest()))
+    assert result.transparency == transparency.TRANSPARENCY_NOT_CHECKED
+    assert result.corroboration == transparency.CORROBORATION_NONE
+    assert result.manifest_freshness == "not_checked"
+    assert result.signature == "valid"
+    assert result.ok is True
+
+
+def test_verify_valid_receipt_claim_reports_logged() -> None:
+    envelope = _receipt_envelope()
+    core_hash = tlog.receipt_core_hash(envelope)
+    entry = {"type": "receipt", "issuer": _RECEIPT_ISSUER, "core_sha256": core_hash}
+    evidence, log_key, _tree_size = _single_entry_evidence(entry, _hybrid_keys())
+
+    result = verify.verify(
+        _envelope_bytes(envelope),
+        _receipt_trust_store(_receipt_manifest()),
+        transparency=evidence,
+        log_keys=[log_key],
+        anchor_policy=_no_horizon_policy(),
+    )
+    assert result.transparency == transparency.TRANSPARENCY_LOGGED
+    assert result.corroboration == transparency.CORROBORATION_LOGGED
+    assert result.manifest_freshness == "not_checked"  # a receipt claim, not a key-manifest claim
+    assert result.signature == "valid"
+    assert result.ok is True
+    assert result.warnings == ()
+
+
+def test_verify_valid_key_manifest_claim_reports_logged_and_freshness() -> None:
+    manifest = _receipt_manifest()
+    envelope = _receipt_envelope()
+    entry = {
+        "type": "key-manifest",
+        "issuer": _RECEIPT_ISSUER,
+        "manifest_version": 1,
+        "manifest_sha256": _manifest_sha256(manifest),
+    }
+    evidence, log_key, tree_size = _single_entry_evidence(entry, _hybrid_keys())
+
+    result = verify.verify(
+        _envelope_bytes(envelope),
+        _receipt_trust_store(manifest),
+        transparency=evidence,
+        log_keys=[log_key],
+        anchor_policy=_no_horizon_policy(),
+    )
+    assert result.transparency == transparency.TRANSPARENCY_LOGGED
+    assert result.corroboration == transparency.CORROBORATION_LOGGED
+    assert result.manifest_freshness == f"verified_as_of:{tree_size}"
+    assert result.signature == "valid"
+    assert result.ok is True
+
+
+def test_verify_payload_only_precommit_hash_is_rejected_as_entry_mismatch() -> None:
+    # Vector 28l's property: an old v1-style hash over JCS(payload) ALONE
+    # (no signature bytes) must NOT be accepted as receipt existence proof.
+    envelope = _receipt_envelope()
+    payload_only_hash = hashlib.sha256(canon.canonical_bytes(envelope["payload"])).hexdigest()
+    entry = {"type": "receipt", "issuer": _RECEIPT_ISSUER, "core_sha256": payload_only_hash}
+    evidence, log_key, _tree_size = _single_entry_evidence(entry, _hybrid_keys())
+
+    result = verify.verify(
+        _envelope_bytes(envelope),
+        _receipt_trust_store(_receipt_manifest()),
+        transparency=evidence,
+        log_keys=[log_key],
+        anchor_policy=_no_horizon_policy(),
+    )
+    assert result.transparency == transparency.TRANSPARENCY_NOT_CHECKED
+    assert result.corroboration == transparency.CORROBORATION_NONE
+    assert "transparency_entry_mismatch" in result.warnings
+    assert result.signature == "valid"  # the receipt itself is unaffected
+    assert result.ok is True
+
+
+def test_verify_compromised_key_receipt_stays_invalid_despite_logged_transparency() -> None:
+    # design fix 6 / vector 28i's property: corroboration must never rescue
+    # an otherwise-rejected receipt — fail-closed stays intact even though
+    # the transparency evidence genuinely, verifiably stands.
+    envelope = _receipt_envelope()
+    compromised_manifest = _receipt_manifest(status="compromised")
+    core_hash = tlog.receipt_core_hash(envelope)
+    entry = {"type": "receipt", "issuer": _RECEIPT_ISSUER, "core_sha256": core_hash}
+    evidence, log_key, _tree_size = _single_entry_evidence(entry, _hybrid_keys())
+
+    result = verify.verify(
+        _envelope_bytes(envelope),
+        _receipt_trust_store(compromised_manifest),
+        transparency=evidence,
+        log_keys=[log_key],
+        anchor_policy=_no_horizon_policy(),
+    )
+    assert result.signature == "invalid"
+    assert result.ok is False
+    assert any("compromised" in e for e in result.errors)
+    assert result.transparency == transparency.TRANSPARENCY_LOGGED
+    assert result.corroboration == transparency.CORROBORATION_LOGGED
+
+
+def test_verify_manifest_v5_without_rotation_chain_caps_corroboration_to_none() -> None:
+    manifest = _receipt_manifest(manifest_version=1)
+    signing_kp, signing_kid = _RECEIPT_KP, _RECEIPT_KID
+    for version in range(2, 6):
+        new_kp = keys.generate()
+        new_kid = f"{_RECEIPT_ISSUER}/keys/test#ed25519-{version}"
+        new_entry = manifests.key_entry(new_kid, new_kp.pub, "2026-01-01T00:00:00Z")
+        manifest = manifests.rotate_key_manifest(
+            manifest, signing_kp, signing_kid, "2026-01-01T00:00:00Z", new_entry=new_entry
+        )
+        signing_kp, signing_kid = new_kp, new_kid
+    assert manifest["manifest_version"] == 5
+
+    envelope = _receipt_envelope(kid=signing_kid, kp=signing_kp)
+    # No `chains` entry supplied at all — the rotation chain back to v1 is omitted.
+    trust_store = _receipt_trust_store(manifest)
+    entry = {
+        "type": "key-manifest",
+        "issuer": _RECEIPT_ISSUER,
+        "manifest_version": 5,
+        "manifest_sha256": _manifest_sha256(manifest),
+    }
+    evidence, log_key, _tree_size = _single_entry_evidence(entry, _hybrid_keys())
+
+    result = verify.verify(
+        _envelope_bytes(envelope),
+        trust_store,
+        transparency=evidence,
+        log_keys=[log_key],
+        anchor_policy=_no_horizon_policy(),
+    )
+    assert result.transparency == transparency.TRANSPARENCY_LOGGED
+    assert result.corroboration == transparency.CORROBORATION_NONE
+    assert "corroboration_requires_rotation_chain" in result.warnings
+    assert result.signature == "valid"
+    assert result.ok is True
+
+
+def test_verify_manifest_v5_with_verified_rotation_chain_keeps_corroboration_logged() -> None:
+    # Counterpart of the above: an unbroken, continuous chain back to v1
+    # held in the trust store must NOT trigger the rotation-chain cap.
+    manifest_v1 = _receipt_manifest(manifest_version=1)
+    chain = [manifest_v1]
+    manifest = manifest_v1
+    signing_kp, signing_kid = _RECEIPT_KP, _RECEIPT_KID
+    for version in range(2, 6):
+        new_kp = keys.generate()
+        new_kid = f"{_RECEIPT_ISSUER}/keys/test#ed25519-{version}"
+        new_entry = manifests.key_entry(new_kid, new_kp.pub, "2026-01-01T00:00:00Z")
+        manifest = manifests.rotate_key_manifest(
+            manifest, signing_kp, signing_kid, "2026-01-01T00:00:00Z", new_entry=new_entry
+        )
+        chain.append(manifest)
+        signing_kp, signing_kid = new_kp, new_kid
+    assert manifest["manifest_version"] == 5
+
+    envelope = _receipt_envelope(kid=signing_kid, kp=signing_kp)
+    trust_store = _receipt_trust_store(manifest, chains={_RECEIPT_ISSUER: chain})
+    entry = {
+        "type": "key-manifest",
+        "issuer": _RECEIPT_ISSUER,
+        "manifest_version": 5,
+        "manifest_sha256": _manifest_sha256(manifest),
+    }
+    evidence, log_key, tree_size = _single_entry_evidence(entry, _hybrid_keys())
+
+    result = verify.verify(
+        _envelope_bytes(envelope),
+        trust_store,
+        transparency=evidence,
+        log_keys=[log_key],
+        anchor_policy=_no_horizon_policy(),
+    )
+    assert result.transparency == transparency.TRANSPARENCY_LOGGED
+    assert result.corroboration == transparency.CORROBORATION_LOGGED
+    assert result.manifest_freshness == f"verified_as_of:{tree_size}"
+    assert "corroboration_requires_rotation_chain" not in result.warnings
+
+
+def test_verify_equivocation_detected_warns_but_leaves_ok_unaffected() -> None:
+    envelope = _receipt_envelope()
+    core_hash = tlog.receipt_core_hash(envelope)
+    receipt_entry = {"type": "receipt", "issuer": _RECEIPT_ISSUER, "core_sha256": core_hash}
+    bundle = _bundle_with_entry(receipt_entry)
+
+    # Same fork construction as test_evaluate_transparency_detects_equivocation_
+    # on_inconsistent_prior: a REAL extension proof for a different tree,
+    # presented against the bundle's actual (unrelated) current root.
+    other_entries = _entries(2, salt="fork-prefix")
+    other_leaves = [tlog.encode_entry(e) for e in other_entries]
+    prior_root = tlog.build_tree(other_leaves)
+    extended_leaves = [*other_leaves, bundle.leaves[2]]
+    real_extension_proof = tlog.consistency_proof(extended_leaves, 2)
+    prior_text = tlog.sign_checkpoint(ORIGIN, 2, prior_root, bundle.hk, LOG_NAME)
+
+    evidence = bundle.evidence()
+    evidence["prior_checkpoint"] = prior_text
+    evidence["consistency_proof"] = [p.hex() for p in real_extension_proof]
+
+    result = verify.verify(
+        _envelope_bytes(envelope),
+        _receipt_trust_store(_receipt_manifest()),
+        transparency=evidence,
+        log_keys=bundle.log_keys(),
+        anchor_policy=_no_horizon_policy(),
+    )
+    assert result.transparency == transparency.TRANSPARENCY_EQUIVOCATION_DETECTED
+    assert result.corroboration == transparency.CORROBORATION_NONE
+    assert "log_equivocation_detected" in result.warnings
+    assert result.signature == "valid"
+    assert result.ok is True  # equivocation is informational — never an error
+
+
+def test_verify_transparency_evidence_without_config_warns_config_missing() -> None:
+    envelope = _receipt_envelope()
+    core_hash = tlog.receipt_core_hash(envelope)
+    entry = {"type": "receipt", "issuer": _RECEIPT_ISSUER, "core_sha256": core_hash}
+    evidence, _log_key_unused, _tree_size = _single_entry_evidence(entry, _hybrid_keys())
+
+    result = verify.verify(
+        _envelope_bytes(envelope), _receipt_trust_store(_receipt_manifest()), transparency=evidence
+    )
+    assert result.transparency == transparency.TRANSPARENCY_NOT_CHECKED
+    assert result.corroboration == transparency.CORROBORATION_NONE
+    assert "transparency_config_missing" in result.warnings
+    assert result.signature == "valid"
+    assert result.ok is True
+
+
+def test_verify_unrecognized_claim_type_reports_not_checked() -> None:
+    envelope = _receipt_envelope()
+    entry = {"type": "receipt", "issuer": _RECEIPT_ISSUER, "core_sha256": "a" * 64}
+    evidence, log_key, _tree_size = _single_entry_evidence(entry, _hybrid_keys())
+    evidence["entry"]["type"] = "unknown-claim-type"
+    # tlog.encode_entry only accepts "key-manifest"/"receipt", so a bogus type
+    # also fails the log's own closed-schema check — a distinct path from a
+    # mismatched hash, still landing on not_checked either way.
+
+    result = verify.verify(
+        _envelope_bytes(envelope),
+        _receipt_trust_store(_receipt_manifest()),
+        transparency=evidence,
+        log_keys=[log_key],
+        anchor_policy=_no_horizon_policy(),
+    )
+    assert result.transparency == transparency.TRANSPARENCY_NOT_CHECKED
+    assert result.corroboration == transparency.CORROBORATION_NONE
+
+
+def test_verify_raises_transparency_error_on_log_keys_with_disagreeing_origins() -> None:
+    envelope = _receipt_envelope()
+    core_hash = tlog.receipt_core_hash(envelope)
+    entry = {"type": "receipt", "issuer": _RECEIPT_ISSUER, "core_sha256": core_hash}
+    evidence, log_key, _tree_size = _single_entry_evidence(entry, _hybrid_keys())
+    other_key = _log_key(_hybrid_keys(), origin="different-log/2026")
+
+    with pytest.raises(transparency.TransparencyError):
+        verify.verify(
+            _envelope_bytes(envelope),
+            _receipt_trust_store(_receipt_manifest()),
+            transparency=evidence,
+            log_keys=[log_key, other_key],
+            anchor_policy=_no_horizon_policy(),
+        )
+
+
+def test_verify_confines_hostile_transparency_evidence_get() -> None:
+    # Hardening boundary: verify()'s OWN new code (`_resolve_transparency_
+    # claim`) touches `transparency_evidence.get(...)` before ever calling
+    # `evaluate_transparency` — a hostile mapping there must degrade, never
+    # crash `verify()` itself (mirrors transparency.py's own confinement,
+    # which this test does NOT exercise — this one is specifically about the
+    # integration's own evidence-touching code, not the evaluator's).
+    envelope = _receipt_envelope()
+    core_hash = tlog.receipt_core_hash(envelope)
+    entry = {"type": "receipt", "issuer": _RECEIPT_ISSUER, "core_sha256": core_hash}
+    base_evidence, log_key, _tree_size = _single_entry_evidence(entry, _hybrid_keys())
+    hostile_evidence = _GetRaisesDict(base_evidence)
+
+    result = verify.verify(
+        _envelope_bytes(envelope),
+        _receipt_trust_store(_receipt_manifest()),
+        transparency=hostile_evidence,
+        log_keys=[log_key],
+        anchor_policy=_no_horizon_policy(),
+    )
+    assert result.transparency == transparency.TRANSPARENCY_NOT_CHECKED
+    assert result.corroboration == transparency.CORROBORATION_NONE
+    assert "transparency_claim_unresolvable" in result.warnings
+    assert result.signature == "valid"
+    assert result.ok is True
+
+
+def test_verify_existing_callers_are_unaffected_by_new_keyword_only_params() -> None:
+    # Zero-behavior-change guarantee: a caller that never passes the three
+    # new kwargs sees exactly the pre-Task-5 result shape/values, just with
+    # the three new components at their documented defaults.
+    envelope = issue.issue(make_payload(), _RECEIPT_KP, _RECEIPT_KID)
+    result = verify.verify(_envelope_bytes(envelope), _receipt_trust_store(_receipt_manifest()))
+    assert result.signature == "valid"
+    assert result.schema == "valid"
+    assert result.revocation == "unknown"
+    assert result.binding == "not_checked"
+    assert result.trust == "verified"
+    assert result.transparency == "not_checked"
+    assert result.corroboration == "none"
+    assert result.manifest_freshness == "not_checked"
+    assert result.ok is True
