@@ -37,7 +37,7 @@ Actor names are the canonical ones fixed in `attest-threat-model.md` §2 and are
 
 | Date | Change |
 | --- | --- |
-| 2026-07-18 | Initial publication: §1 status and scope, §2 data inventory, §3 what each observer learns. |
+| 2026-07-18 | Initial publication: §1 status and scope, §2 data inventory, §3 what each observer learns, §4 pseudonymity and unlinkability limits, §5 log privacy, §6 GDPR annex, §7 testable claims. |
 
 ## 2. Data inventory
 
@@ -340,3 +340,187 @@ This covers the intended recipient of a bundle a `buyer` shared, a later recipie
 - **Correlation.** Per-receipt salts confine only commitment-path exposure: a salt disclosed here is useless for recomputing another receipt's commitment (v0.1 §8.1, TM-19). That does not confine correlation across the rest of the receipt set. A reused `buyer.pubkey`, `supersedes` lineage, customer or order identifiers in `work.identifiers` or other open/additional fields, per-buyer artifact values, and per-sale legal documents can still join receipts; a recipient that accumulates disclosures also extends the commitment-path set by one each time.
 - **Identification.** This is where the exposure concentrates. Holding the salt alongside the receipt's `commitment` and `identifier_type`, the recipient can mount an offline dictionary attack against the identifier without any further cooperation: scrypt at the specification's fixed parameters **raises** the cost of that attack, it does not eliminate it, and the parameters MUST NOT be tuned upward per-issuer (v0.1 §8.1, TM-18). Against `identifier_type: "email"` — the guest-checkout case, drawn from exactly the guessable population v0.1 §8.1 names as its reason for choosing scrypt — a successful recovery yields not just this purchase but a globally-scoped identifier that links the `buyer` across issuers. This exposure exists whether or not a binding proof is ever requested, because `disclose` emits the salt regardless.
 - **Disclosure.** If the `buyer` then proves binding by the commitment path, they hand over the identifier itself, and doing so is a **replayable bearer proof**: the recipient can re-present the same `(identifier, salt)` pair to claim buyer status for that receipt afterwards, and the disclosure permanently burns that receipt's binding secrecy toward that verifier (v0.1 §8.1, TM-19). The non-replayable alternative exists and is RECOMMENDED wherever a client app can hold a key — a challenge-response over a fresh nonce of at least 16 bytes, bound to `receipt_id`, which proves possession without handing over anything reusable (v0.1 §8.2). Two limits keep this from being a general answer. `buyer.pubkey` is `null` by default for client-less flows (v0.1 §5.3), so the replayable path is the common one rather than the exceptional one. And the protections v0.1 §8.1 attaches to a disclosed identifier are obligations on the recipient — a `verifier` MUST treat it as personal data not to be retained beyond the verification, and issuers SHOULD offer re-issue via `supersedes` afterwards — neither of which the `buyer` can enforce or verify once the identifier has left their hands.
+
+## 4. Pseudonymity and unlinkability limits
+
+§2 classified what each field carries and §3 asked what each party learns from a whole artifact. This section answers the narrower question those two leave open: how far the pseudonymity actually reaches. It states the properties that hold together with the exact bound on each, and then the properties a reader might reasonably expect from a "pseudonymous" receipt that the format does not provide. Nothing here is a new mechanism, and no classification from §2 is restated — the citations carry it.
+
+### 4.1 What holds, and exactly how far
+
+**No plaintext buyer identity in the specified field set.** The `buyer` object's specified properties are `commitment`, `identifier_type`, and `pubkey` (§2.3), and a `verifier` executing v0.1 §11 without a disclosure never sees a plaintext identifier: `binding` stays `not_checked`, and `binding` is not a component of `ok` (v0.1 §11.1, §3.2). Verification and identification are separate operations by default. *The bound:* this describes the field set the schema specifies, never what a conforming receipt contains (§2.16).
+
+**Per-receipt salting confines the commitment path.** The 16-byte salt is generated fresh for every receipt (v0.1 §8.1), so the same identifier commits to an unrelated value in each one and a leaked salt exposes one receipt rather than a library (§2.3, §3.1, TM-18). *The bound:* the sentence names exactly one path. §4.2 states what it does not confine.
+
+**A store-scoped identifier by default.** `issuer-account` is RECOMMENDED precisely because disclosing it links nothing outside the one store (v0.1 §5.3, §2.3). *The bound:* RECOMMENDED, not REQUIRED. `email` is defined for guest checkout, the deployment alone chooses between them, and `identifier_type` discloses which population was chosen to every party holding the receipt.
+
+**Per-receipt sharing, and offline verification.** `attest disclose <receipt_id>` MUST emit one receipt rather than a library (v0.1 §13), and offline verification MUST work from a local trust store with no issuer endpoint reachable (v0.1 §7.4) — which is why an offline verifier emits no network traffic in either direction (§3.2). *The bound:* the disclosure unit is one whole receipt, never part of one, and it emits that receipt's salt regardless of whether a binding proof is ever requested (§3.6); the zero-traffic property holds only while the trust store, revocation view, and any transparency evidence are already local.
+
+### 4.2 Per-receipt salts do not unlink a receipt set
+
+**The per-receipt salt is a commitment-path control and nothing wider.** Two receipts issued to the same `buyer` carry unrelated `commitment` values, and that is the entire effect. Every other stable value in the pair is exactly what it was, so a party holding both can still join them — by any of the following, none of which any conformance requirement prevents or any `verifier` can detect:
+
+- a `buyer.pubkey` reused across receipts. Keys SHOULD be per-receipt and a `verifier` MUST NOT treat key equality as proof of buyer identity (v0.1 §8.2), but that rule bounds a verdict, not the format: an implementation that reuses one key makes the field a stable correlator, and nothing detects it (§2.3);
+- a non-null `supersedes`, which asserts the join rather than leaving it to be inferred (§2.1);
+- an order number, customer number, or account handle placed in `work.identifiers`, whose keys and values are both unconstrained beyond being strings, or in any other open string (§2.4);
+- a per-buyer `filename`, `size_bytes`, or `sha256` from a watermarked or personalized build (§2.4);
+- a per-sale license text, mirror policy, or end-of-life commitment, correlated through its hash binding without the document being present, and a per-buyer `terms_uri`, `mirror_policy_uri`, or `eol_commitment_uri`, which carries a plaintext handle into the issuer's own records and is signed into every copy (§2.5, §2.6);
+- the `kid`, which groups every receipt signed within one key period (§2.7);
+- in a bundle, the `manifests/<issuer>.json` and `proofs/<ULID>.json` member names, which disclose issuers and receipt identifiers from an archive listing alone (§2.14, §2.13).
+
+A shareable bundle is the extreme case, handing the whole set to one holder at once (§3.5), but these joins are available to any party that accumulates two receipts by any route — including a `verifier` receiving per-receipt disclosures one at a time (§3.6). **Unlinkability across a set of receipts is therefore not a property the format provides.** What it provides is that the commitment values themselves do not supply the join.
+
+One further inference the format does not bound: `issuer.id`, `work.title`, and `issued_at` together narrow a receipt's subject to the people who bought that work from that issuer in that second, and §4.3's millisecond timestamp narrows it further. How small that set is depends on the issuer's sales volume, which is a deployment property no mechanism here constrains.
+
+### 4.3 `receipt_id` discloses issuance time, at millisecond resolution
+
+`receipt_id` is a ULID whose leading characters encode a 48-bit millisecond timestamp (§2.1), while `issued_at` states time only to the second. Issuance time is therefore recoverable from the identifier alone, more precisely than from the field that exists to state it, and `supersedes` carries the same property — a lineage discloses two issuance times, not one. The identifier travels further than the receipt does: it is the only purchase reference in a revocation record (§2.10) and it is the whole of a `proofs/<ULID>.json` member name, readable from an archive listing before any file is opened (§2.13).
+
+**This is a documented limit rather than a defect.** ULIDs were chosen for sortability and coordination-free generation (v0.1 §5.1), and the timestamp prefix is what delivers both; v0.2 §14 relies on the same prefix constraint when it pins the `proofs/` grammar. The property is stated here because a reader who assumes a receipt discloses time only at `issued_at`'s resolution would be wrong.
+
+### 4.4 Pseudonymity is not anonymity toward the `issuer`
+
+attest minimizes what third parties learn; it does not hide the `buyer` from the party that constructed the receipt, and does not try (§3.1). The `issuer` computes the commitment from an identifier it holds and generates the salt itself, so it can recompute and recognize any commitment it ever issued. Every minimization lever the format offers is an issuance-time decision by that same party — the choice of `identifier_type`, the content of open strings, the presence of additional members — and no `verifier` can tell whether any of them was exercised (§3.1). Where a reader wants a property that holds *against the issuer*, this protocol does not supply one.
+
+### 4.5 A disclosed identifier does not come back
+
+Revealing `(identifier, salt)` is a replayable bearer proof that also hands over the identifier itself (v0.1 §8.1, §3.6, TM-19). scrypt at the specification's fixed parameters raises the cost of recovering an identifier from a leaked salt; it does not eliminate it, and the parameters MUST NOT be tuned per-issuer, so an `issuer` facing a guessable identifier population has no in-protocol response (§2.3, TM-18). Against `identifier_type: "email"` a recovery links the `buyer` across issuers rather than within one.
+
+The protocol's answers are real but partial. The non-replayable challenge-response path exists and is RECOMMENDED, yet `buyer.pubkey` is `null` by default for client-less flows, which makes the replayable path the common one (v0.1 §5.3, §8.2). Re-issue via `supersedes` after a disclosure is a SHOULD on the `issuer`, and the obligation not to retain a disclosed identifier is a MUST on the recipient — neither of which the `buyer` can enforce or observe once the identifier has left their hands (§3.6). A non-null `supersedes` may itself signal that the superseded receipt's binding secrecy was burned (§2.1).
+
+### 4.6 Every statement above is bounded by the open-object fact
+
+No payload object sets `additionalProperties: false`; `work.identifiers` constrains neither its keys nor its values beyond string-ness; and the referenced legal, mirror-policy, and end-of-life documents and the generated `README.html` are constrained in neither content nor length (§2, structural facts; §2.4; §2.16). A conforming receipt can therefore carry a name, an email address, a device identifier, or a payment reference in a place no defined member is dedicated to, verify fully green, and — where the member is nested inside `issuer`, `buyer`, `work`, `license`, or `survivability` — do so with no mandated warning at all (v0.1 §11.2, TM-21). **Every property in §4.1 is a property of the specified field set. None of them is a property the format enforces on the content of an arbitrary conforming receipt.**
+
+### 4.7 No redaction, and no retrofit
+
+A correlator that has been signed into a receipt cannot be removed from it: `payload` is immutable and is the sole signature input (v0.1 §6.3, §9), so deleting a field destroys the signature that gives the receipt its value. The single defined removal — stripping `delivery.salt` — works only because `delivery` sits outside the signed object (§2.7). Consequently a privacy defect introduced at issuance is permanent for that receipt, and the only in-protocol response is re-issue under a new `receipt_id` with `supersedes` pointing at the old one — which does not invalidate the superseded receipt absent buyer consent (v0.1 §5.1), does not reach copies already shared, and creates a lineage join of its own.
+
+## 5. Log privacy
+
+### 5.1 What "content-free" means here, precisely
+
+The Stage 2 log's entries are content-free in one specific sense, and the sense matters:
+
+> **A log entry carries no receipt payload, no fragment of one, and no buyer-derived value other than an opaque hash whose preimage includes the payload.**
+
+That is a claim about receipt and buyer content, and it is exactly the claim the entry schemas support. Exactly two entry types are defined; each is closed to exactly its required member set; unknown members are rejected outright rather than tolerated; and every member is a type literal, a lowercase DNS name, a version integer, or a 64-character lowercase-hex hash (v0.2 §8, §2.11). Attacker-chosen payload content has nowhere to live in that shape, which is what closes the entry-poisoning surface (TM-51).
+
+**It is not a claim that a log entry carries no potentially personal data at all**, and this document does not make that claim. Two residues are stated in the inventory and are restated here as the exceptions the definition above deliberately leaves outside itself:
+
+- **The `issuer` member.** Both entry types carry a DNS name, classified `potentially personal, user-controlled` because a sole trader's domain is personal data about that trader (§2.11, §2.2). In a `receipt` entry it is also the only member that is not a hash, so an entry stream discloses claimed per-issuer activity in submission order (§3.3). It is normatively a NON-AUTHENTICATED hint (v0.2 §8), and neither specification defines submitter authentication, quotas, or rate limits — a tracked gap carried by TM-51 — so anyone may submit an entry naming any issuer and the resulting picture is unverifiable in both directions.
+- **Checkpoint free text.** A checkpoint's `origin` and its signature `name` are non-empty printable ASCII with no further content constraint (v0.2 §9.3, §2.12), so they may carry a person's name, an email address, or any other identifier. They are chosen by the `log operator`, describe the log rather than any `buyer` or `issuer`, and travel inside every evidence bundle that carries a checkpoint whole (§2.13).
+
+Neither residue involves receipt content or buyer content. Both are free-text or naming members chosen by a party operating infrastructure, and a deploying `log operator` controls its own.
+
+### 5.2 What a published hash does and does not permit
+
+`core_sha256`'s preimage is domain-separated and includes a 32-byte scrypt commitment, a ULID with 80 bits of randomness, and the signature bytes themselves (v0.2 §12), so recovering a payload from the published hash is not a guessing problem an adversary can mount — it is preimage recovery against SHA-256 over a high-entropy input (§3.3). The receipt whose hash it is lives with the `buyer` (v0.1 §14) and, where the `issuer` kept a copy, with the `issuer` (§3.1); the log holds neither.
+
+The honest converse, stated in §2.11 and load-bearing here: a published hash permits **confirmation**. Any party that already holds a candidate receipt can recompute `core_sha256` and learn whether that exact receipt is logged. That is the mechanism the transparency layer exists to provide, it runs in the direction of a receipt one already has, and it is never a route from the log to a receipt one does not. `manifest_sha256` is weaker still in the same direction: it hashes a public issuer document that anyone may fetch and re-canonicalize, so confirming it requires nothing.
+
+### 5.3 Erasure and append-only
+
+An append-only structure cannot delete, and neither specification defines an entry-removal operation at any layer. The tension that would ordinarily create is resolved by construction rather than by argument, and the resolution has a precise scope:
+
+**For receipt and buyer data, the tension does not arise, because none is in the log.** Nothing a `buyer` supplied, and no fragment of a receipt payload, is ever admitted to an entry (§5.1). The buyer's own receipt is the buyer's copy, held by the buyer and exportable as a portable file set (v0.1 §14.1); the `issuer`'s issuance records are the issuer's own and were never in the log either (§3.1). There is consequently no receipt payload and no buyer content in the log for an erasure request to reach — not because deletion is refused, but because the data is not there. The one buyer-derived value that is present, a `receipt` entry's `core_sha256`, is an opaque hash whose preimage the log does not hold and cannot reconstruct (§5.2).
+
+**For the free-text and naming members of §5.1, the tension is real, bounded, and worth stating.** An `issuer` DNS name in an entry, and an `origin` or key `name` in a signed checkpoint, are append-only once written; a checkpoint's are additionally inside the signed note bytes, so altering them would break the signature that gives the checkpoint standing (v0.2 §9.1). What accumulates is a per-issuer activity record — how many entries claim a given issuer, and in what order — that cannot be withdrawn and, because submission is unauthenticated, cannot be attributed either. A deploying `log operator` controls what it writes into `origin` and `name`; nothing in the protocol constrains what a submitter writes into `issuer`.
+
+Two further bounds belong with this. Only artifacts that were actually submitted are in scope at all: an un-logged receipt or manifest receives no guarantee from the transparency layer and equally leaves no trace in it (v0.2 §15 item 2). And withdrawal of a whole log is a coercion case rather than a data-subject mechanism — standing already obtained is portable through mirrors and bundle-carried evidence, and nothing new is corroborated while the log is down (TM-58).
+
+### 5.4 Content-free entries, observable retrieval
+
+The content of an entry and the act of fetching one are separate exposures, and §5.1's definition speaks only to the first. What the party serving the static file set observes about requesters — and the tile-granularity bound on how much that discloses — is analyzed at §3.4 and is not restated. Two points from it carry into this section's conclusion: neither specification defines a private-retrieval mechanism, a batching rule, or cover traffic, so retrieval-side exposure is unaddressed rather than bounded; and the protocol's one effective countermeasure is offline evidence, since a `.attest` bundle MAY carry each receipt's `proofs/<ULID>.json` member and a verifier that uses it contacts no mirror at all (v0.2 §14, TM-58).
+
+## 6. GDPR annex
+
+This annex maps the mechanisms the two specifications define onto the vocabulary the GDPR uses, so that a deploying `issuer` starting its own assessment has the technical facts in one place. Every entry below states a property of the specified formats and cites where that property is established. None states a conclusion about any deployment, and the mapping is a starting point for an assessment rather than an output of one. Nothing is reclassified here; §2 remains the inventory and §5 the log analysis.
+
+### 6.1 The roles the data flows suggest
+
+The specifications name actors (`attest-threat-model.md` §2) but assign no data-protection role to any of them and define no controller-processor relationship. What follows is what each party's technical position is, which is the input to a role determination rather than the determination itself.
+
+| Party | Technical position under the specified flows | Established at |
+| --- | --- | --- |
+| `issuer` | Constructs the payload and chooses the content of every free-form field; holds the plaintext identifier by construction and generates the salt; decides `identifier_type`, whether to add members, and what the referenced documents say. Determines the content of its own issuance records. | §3.1, v0.1 §8.1 |
+| `buyer` | The person the commitment stands for, and — after delivery — the holder of a complete copy of the receipt, its manifests, its legal texts, and its salts, in a portable file set. | §2.14, §2.15, v0.1 §14 |
+| `verifier` | Receives whatever artifact it is handed and computes locally; nothing it produces discloses anything by itself. Where a disclosure was made, v0.1 §8.1 places a MUST on it: treat the disclosed identifier as personal data not to be retained beyond the verification. | §3.2, §3.6 |
+| `log operator` | Handles entries carrying no receipt payload and no buyer content, plus the `issuer` hints submitters write and the free text it writes itself. | §5.1, §3.3 |
+| `mirror operator` | Republishes exactly the log's file set and therefore holds exactly what the `log operator` holds, no more. | §3.4, v0.2 §7.2 |
+
+Two structural caveats apply to every row. A `verifier` and a `log operator` may be the same organization as the `issuer` or a wholly unrelated party, and the delegated-issuer path — a marketplace or merchant-of-record issuing on behalf of a named `work.publisher` (v0.1 §3) — puts two commercial parties behind one `issuer.id`, with no mechanism distinguishing them in any artifact (TM-06).
+
+### 6.2 Data minimisation (Art. 5(1)(c))
+
+The inventory in §2 is the technical answer to what a receipt contains; this subsection states only which parts of the minimisation question the format settles and which it leaves open.
+
+**What the formats settle.** No defined member carries a plaintext identity, an email address, payment data, a device identifier, an IP address, a postal or billing address, a date of birth, a residence jurisdiction, or behavioural data (§2.16); the identifier is replaced by a salted commitment (§2.3); the salt travels outside the signed object and MUST be stripped before an envelope is treated as shareable (§2.7, v0.1 §14.1); the sharing unit below a whole bundle is one receipt (v0.1 §13); and no transport, account system, or messaging to a `buyer` is defined at all (v0.1 §2), so the formats create no data flow beyond the artifacts themselves.
+
+**What the formats leave to the deployment.** Everything about content. The levers are the three named in §3.1 — the `identifier_type` choice, keeping open strings free of order and customer identifiers, and adding no unrecognized members — and they are pulled at issuance by the `issuer`, invisibly to every downstream party. §4.6 states the structural reason this cannot be otherwise: no object is closed, so minimisation in attest is a deployment discipline, never a format guarantee, and no `verifier` can audit whether it was applied.
+
+### 6.3 Storage limitation (Art. 5(1)(e)) and indefinite verifiability
+
+A receipt is designed so that its evidence verifies indefinitely — that is the promise v0.1 §2 makes and §7.4 implements, and it is the property that makes evidence survive an issuer's disappearance or a compelled denial (TM-43, TM-57). Read against a retention principle, that looks like a direct conflict. The technical facts that bear on it:
+
+- **The artifact whose persistence is designed for is the buyer's own copy, held by the buyer.** Export produces a file set the `buyer` holds (v0.1 §14); nothing requires it to sit on an issuer's system.
+- **The specifications impose no retention obligation on an `issuer` at all, and no deletion obligation either.** v0.1 §8.1 requires the salt to be generated per receipt and delivered, and is silent on whether the `issuer` keeps it afterwards (§3.1). No document requires an `issuer` to retain a copy of an issued receipt. An issuer's own retention is therefore unconstrained in both directions by these specifications.
+- **The log holds no receipt payload and no buyer content to retain**, and the one buyer-derived value it does hold is an opaque hash whose preimage it cannot reconstruct (§5.1, §5.3).
+
+The residue, stated plainly: a receipt cannot be pruned field by field, because immutability makes any removal fatal to the signature (§4.7); a shareable bundle carries no access control and no expiry, so copies already shared are outside every party's control (§3.5, TM-16); and the transparency layer is append-only by construction (§5.3). Indefinite verifiability and unbounded retention are not the same thing here — what is designed to persist is a buyer-held artifact — but the format supplies no mechanism that would cause any copy of a receipt to become unreadable over time, and does not claim to.
+
+### 6.4 DPIA support
+
+The left column is what the specifications already answer for any conforming deployment; the right is what a deploying `issuer` has to establish about its own deployment because no specification text determines it.
+
+| Assessment question | What the specifications already answer | What a deployment must establish for itself |
+| --- | --- | --- |
+| Categories of data in an issued receipt | The specified field set and its classification, artifact by artifact (§2) | What its own receipts actually carry in open strings, referenced documents, `README.html`, and any additional members (§2.16, §4.6) |
+| Recipients, and what each learns | What each observer can learn from the artifacts (§3), per-artifact disclosure (§2.14, §2.15) | Which parties it actually sends artifacts to, and over what channel — no transport is defined (v0.1 §2, TM-13) |
+| Re-identification risk from the commitment | scrypt parameters fixed and non-tunable; `issuer-account` RECOMMENDED; dictionary recovery raised, not eliminated (§2.3, §4.5, TM-18) | Whether its own identifier population is guessable, and whether guest checkout puts `email` values behind its commitments |
+| Correlation across a customer's receipts | Which values remain joinable regardless of salting (§4.2) | Whether it reuses `buyer.pubkey`, emits per-buyer builds, or binds per-sale documents and per-buyer URIs |
+| Retention | No retention or deletion obligation is imposed on any party (§6.3) | Its own retention of identifiers, salts, binding keys, and receipt copies |
+| Revocation-check exposure | A whole-feed fetch discloses nothing about one receipt; a per-receipt query discloses exactly which one; neither is specified (§2.10, §3.1) | Which pattern its own verification flow uses |
+| Transparency-log participation | Entries are content-free in §5.1's sense; submitter authentication is undefined (TM-51); un-logged artifacts get no coverage (v0.2 §15 item 2) | Whether to submit at all, and what it writes into an entry's `issuer` member |
+| Security of processing | Pinned Ed25519 and the hybrid AND-rule, hash-bound documents, fail-closed key and revocation handling, and a conformance corpus enabling independent implementations (v0.1 §10, v0.2 §2.3 and §13) | Endpoint security, transport, and key custody, all outside these specifications (`attest-threat-model.md` §7) |
+| Lawful basis, transfers, notices, DSR process | Nothing — the specifications define document formats and a verification algorithm, and no messaging surface to a `buyer` exists (§1, v0.1 §2) | Everything |
+
+### 6.5 What the protocol does and does not provide for data-subject requests
+
+- **Access.** Already satisfied by construction in the ordinary case: the `buyer` holds the complete artifact, in a portable file set, without asking anyone (v0.1 §14).
+- **Portability.** The same file set is the portable form; it is a defined export format rather than a per-deployment extract (v0.1 §14.1).
+- **Rectification.** Not possible in place. Immutability makes editing a signed receipt fatal to it (§4.7); the only in-protocol path is re-issue under a new `receipt_id` with `supersedes` set, which a `verifier` MUST treat as lineage metadata and never as an implicit revocation of the earlier receipt (v0.1 §5.1).
+- **Erasure.** Not a protocol operation. No format defines deletion of a receipt, a revocation record, a manifest, or a log entry. **Revocation is not an erasure mechanism:** a revocation record is a statement about a licence, it names a `receipt_id` and carries no buyer identifier, commitment, or salt (§2.10), and it removes nothing — a revoked receipt still exists, still verifies as a signature, and still carries every field it carried before (v0.1 §11.1, §12).
+- **Objection and restriction.** No protocol surface. attest defines no processing operation to object to and no mechanism to suspend one; both are properties of a deployment's own systems.
+
+## 7. Testable claims
+
+Each claim below is a factual statement about the current formats, paired with the source it is checkable against. **Check type** names that source and how the check runs:
+
+- **`schema`** — mechanically checkable against [`schema/attest-receipt.schema.json`](schema/attest-receipt.schema.json).
+- **`corpus`** — mechanically checkable against the conformance vectors under [`vectors/`](vectors/).
+- **`spec-text`** — checkable against the cited passage of `attest-v0.1.md`, `attest-v0.2.md`, or `attest-threat-model.md`.
+- **`manual`** — requires a human reading, because the ground truth is outside this repository.
+
+These claims are pinned to the specifications as they currently stand; under §1's update rule, a normative change that falsifies one invalidates that row and MUST update it in the same change cycle.
+
+| ID | Claim | Check type | Check detail |
+| --- | --- | --- | --- |
+| PC-01 | The signed payload schema defines no plaintext buyer-identity member. | schema | `properties.buyer.properties` has key set exactly `{commitment, identifier_type, pubkey}` and `properties.buyer.required` equals `["commitment", "identifier_type"]`; `commitment` and `pubkey` are pattern-constrained to 43 base64url characters and `identifier_type` to the enum `["issuer-account", "email"]`. |
+| PC-02 | The shareable `.attest` bundle format contains no salts and no private keys. | spec-text | v0.1 §14.1's required member list is exactly `receipts/*.attest.json` (with `delivery.salt` stripped from every envelope), `manifests/<issuer>.json`, `legal/<sha256>.txt`, an OPTIONAL `proofs/`, and `README.html`; `salts.json` and `keys/` are members of the separate `<name>.private.attest` defined in v0.1 §14.2. |
+| PC-03 | Log entries are content-free in the sense that no entry member carries receipt payload or buyer content. | spec-text | v0.2 §8 defines exactly two entry types — `key-manifest` (`type`, `issuer`, `manifest_version`, `manifest_sha256`) and `receipt` (`type`, `issuer`, `core_sha256`) — each closed to exactly that member set, with any other type or member set rejected outright; every member is a type literal, a DNS name, an integer, or a 64-character lowercase-hex hash. |
+| PC-04 | The buyer commitment is a salted scrypt commitment at parameters fixed by the specification version. | spec-text | v0.1 §8.1 fixes `commitment = scrypt(P, salt, N=32768, r=8, p=1, dkLen=32)` over the domain-separated normalized identifier `P`, requires `salt` to be exactly 16 raw bytes generated per receipt, and states the parameters MUST NOT be configurable per-issuer. |
+| PC-05 | Selective disclosure is per-receipt, and the disclosure includes that receipt's salt. | spec-text | v0.1 §13 requires `attest disclose <receipt_id>` to emit exactly one receipt plus its manifests plus its salt; v0.1 §6.3 and §9 make `payload` immutable and the sole signature input, so no sub-receipt granularity exists. |
+| PC-06 | `receipt_id` discloses issuance time at millisecond resolution, finer than `issued_at`'s one second. | manual | §4.3 of this document. The ULID timestamp-prefix semantics come from the ULID specification cited in v0.1's References, not from any artifact in this repository; v0.1 §9.1 fixes the encoding and v0.2 §14 describes the schema's first-character constraint as its timestamp-prefix constraint. |
+| PC-07 | A revocation record references a receipt, never a buyer identity: it carries no identifier, commitment, salt, or key member. | spec-text | v0.1 §12's field table defines exactly `receipt_id`, `status`, `revoked_at`, and `signature` (`{kid, sig}`); v0.2 §13 adds only an optional `sig_ml_dsa_65` leg to that signature block. |
+| PC-08 | No receipt payload in the conformance corpus carries a `buyer` member outside the schema's specified set. | corpus | Across every `payload.json`, `envelope.json`, and `envelope.raw.json` under `docs/spec/vectors/` — 114 payload objects, reading each file as UTF-8 with an optional BOM — `payload.buyer` has key set exactly `{commitment, identifier_type, pubkey}`, with zero exceptions. |
+| PC-09 | The plaintext identifiers present in the conformance corpus appear only as disclosure inputs, never inside a signed payload. | corpus | An `identifier` member appears under `docs/spec/vectors/` in exactly four files, every one of them named `disclosure.json` (`09-commitment/a-ascii-email`, `09-commitment/b-unicode-email`, `09-commitment/c-issuer-account`, `17-binding-proven/a-salt-disclosure`), and in no payload object. |
+| PC-10 | No object in the payload schema is closed against additional members. | schema | The keyword `additionalProperties` occurs exactly three times in the schema — at the root with value `true`, at `properties.work.properties.identifiers` with value `{"type": "string"}`, and at `properties.license.properties.jurisdiction_flags` with value `{"type": "boolean"}` — and never with the value `false`. |
+| PC-11 | `work.identifiers` constrains its values to strings and its keys not at all. | schema | `properties.work.properties.identifiers` equals `{"type": "object", "minProperties": 1, "additionalProperties": {"type": "string"}}`, and the keyword `propertyNames` appears nowhere in the schema. |
+| PC-12 | The payload schema names no member dedicated to payment data, a postal or billing address, a date of birth, a device identifier, or an IP address. | schema | The complete set of property names appearing anywhere in the schema is exactly: `artifact_series`, `artifacts`, `attest_version`, `buyer`, `commitment`, `display_name`, `drm`, `edition`, `end_of_life`, `eol_commitment_sha256`, `eol_commitment_uri`, `filename`, `grant`, `id`, `identifier_type`, `identifiers`, `issued_at`, `issuer`, `jurisdiction_flags`, `legal_text_sha256`, `license`, `mirror_policy_sha256`, `mirror_policy_uri`, `platform`, `pubkey`, `publisher`, `receipt_id`, `redownload_right`, `revocability`, `revocation_window_days`, `role`, `sha256`, `size_bytes`, `supersedes`, `survivability`, `terms_uri`, `title`, `transferable`, `work` — 39 names, none of them such a member. |
+| PC-13 | The buyer-commitment salt travels outside the signed payload, so removing it invalidates neither the signature nor a log entry. | spec-text | v0.1 §4.2 places `delivery` outside `payload` and declares it UNSIGNED and OPTIONAL; v0.1 §9 makes `JCS(payload)` the sole signature input; v0.2 §12 excludes `delivery` from `core_sha256` entirely. |
+| PC-14 | A checkpoint's `origin` and log-key `name` are unconstrained in content beyond being printable ASCII. | spec-text | v0.2 §9.3 constrains `origin` to non-empty ASCII `0x20`–`0x7e` and `LogKey.name` to non-empty ASCII `0x21`–`0x7e` excluding `+`, and imposes no further content constraint on either. |
+| PC-15 | A log entry's `issuer` member is a non-authenticated hint, and neither specification defines submitter authentication. | spec-text | v0.2 §8 states `issuer` in a `receipt` entry is a NON-AUTHENTICATED hint that a conforming verifier MUST NOT read as attribution; `attest-threat-model.md` §6.3 records unbounded log admission — no submitter authentication, admission quotas, or rate limits — as a tracked gap carried by TM-51. |
+| PC-16 | A bundle's transparency-evidence member names disclose receipt identifiers. | spec-text | v0.2 §14 requires a conforming bundle to contain `proofs/` members only in the shape `proofs/<ULID>.json`, where `<ULID>` is exactly the receipt's own `receipt_id`, and requires any other shape to be rejected. |
+| PC-17 | A receipt verifies fully without any buyer identifier being supplied. | spec-text | v0.1 §11.1 defines `ok` as `signature == "valid"` and `schema == "valid"` and `revocation != "revoked"` and no errors — `binding` is not a component — and v0.1 §11 step 7 performs binding only when a disclosure is supplied, leaving `binding: "not_checked"` otherwise. |
+| PC-18 | No conformance vector supplies a salt in an envelope, so the corpus exercises verification with no buyer-commitment secret present. | corpus | No `envelope.json` or `envelope.raw.json` under `docs/spec/vectors/` contains a top-level `delivery` member; the corpus's salts appear only in the four `disclosure.json` files of PC-09, as `salt_b64u`. |
+| PC-19 | Every revocation record in the conformance corpus carries only the specified member set. | corpus | Each of the five `revocation.json` files under `docs/spec/vectors/` (`15-revoked-policy`, `16-revocation-against-none-ignored`, `23-revocation-refund-window/a-inside-window`, `23-revocation-refund-window/b-after-window`, `28-transparency/m-hybrid-revocation-and-rule`) has key set exactly `{receipt_id, status, revoked_at, signature}`, with `signature` key set exactly `{kid, sig}`. |
