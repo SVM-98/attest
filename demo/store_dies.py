@@ -246,6 +246,8 @@ def run_demo(workspace: Path) -> dict[str, Any]:
         [
             "manifest",
             "artifacts",
+            "--in",
+            str(manifest_path),
             "--issuer",
             ISSUER,
             "--series",

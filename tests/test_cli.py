@@ -82,6 +82,25 @@ def _manifest_init(tmp_path: Path, seed: Path, out_name: str = "manifest.json") 
     return out
 
 
+def _write_artifacts(tmp_path: Path) -> Path:
+    artifacts_path = tmp_path / "artifacts.json"
+    artifacts_path.write_text(
+        json.dumps(
+            [
+                {
+                    "role": "installer",
+                    "platform": "windows-x86_64",
+                    "filename": "game.exe",
+                    "size_bytes": 123,
+                    "sha256": "a" * 64,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return artifacts_path
+
+
 def _write_payload(tmp_path: Path, name: str = "payload.json", **overrides: Any) -> Path:
     payload = make_payload(issuer={"id": ISSUER, "display_name": "Example Store"}, **overrides)
     path = tmp_path / name
@@ -741,29 +760,16 @@ def test_manifest_rotate_produces_version_2_signed_by_version_1_key(tmp_path: Pa
 
 def test_manifest_artifacts_builds_signed_artifact_manifest(tmp_path: Path) -> None:
     seed, _pub = _keygen(tmp_path, "issuer")
-    _manifest_init(tmp_path, seed)
-
-    artifacts_path = tmp_path / "artifacts.json"
-    artifacts_path.write_text(
-        json.dumps(
-            [
-                {
-                    "role": "installer",
-                    "platform": "windows-x86_64",
-                    "filename": "game.exe",
-                    "size_bytes": 123,
-                    "sha256": "a" * 64,
-                }
-            ]
-        ),
-        encoding="utf-8",
-    )
+    key_manifest_path = _manifest_init(tmp_path, seed)
+    artifacts_path = _write_artifacts(tmp_path)
     out = tmp_path / "artifact-manifest.json"
 
     rc = cli.main(
         [
             "manifest",
             "artifacts",
+            "--in",
+            str(key_manifest_path),
             "--issuer",
             ISSUER,
             "--series",
@@ -786,9 +792,165 @@ def test_manifest_artifacts_builds_signed_artifact_manifest(tmp_path: Path) -> N
 
     from attest import manifests
 
-    key_manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    key_manifest = json.loads(key_manifest_path.read_text(encoding="utf-8"))
     artifact_manifest = json.loads(out.read_text(encoding="utf-8"))
     assert manifests.verify_artifact_manifest(artifact_manifest, key_manifest)
+
+
+def test_manifest_artifacts_hybrid_roundtrips(tmp_path: Path) -> None:
+    from attest import manifests
+
+    seed, _pub, mldsa_key = _keygen_hybrid(tmp_path, "issuer")
+    key_manifest_path = _manifest_init_hybrid(tmp_path, seed, mldsa_key, "manifest.json")
+    out = tmp_path / "artifact-manifest.json"
+
+    rc = cli.main(
+        [
+            "manifest",
+            "artifacts",
+            "--in",
+            str(key_manifest_path),
+            "--issuer",
+            ISSUER,
+            "--series",
+            f"{ISSUER}/works/EXG-001",
+            "--version",
+            "1",
+            "--released-at",
+            VALID_FROM,
+            "--artifacts",
+            str(_write_artifacts(tmp_path)),
+            "--signing-kid",
+            KID,
+            "--signing-seed",
+            str(seed),
+            "--mldsa-key",
+            str(mldsa_key),
+            "--out",
+            str(out),
+        ]
+    )
+
+    assert rc == 0
+    key_manifest = json.loads(key_manifest_path.read_text(encoding="utf-8"))
+    artifact_manifest = json.loads(out.read_text(encoding="utf-8"))
+    assert "sig_ml_dsa_65" in artifact_manifest["manifest_signature"]
+    assert manifests.verify_artifact_manifest(artifact_manifest, key_manifest)
+
+
+def test_manifest_artifacts_hybrid_without_mldsa_key_errors(
+    tmp_path: Path, capsys: CapSys
+) -> None:
+    seed, _pub, mldsa_key = _keygen_hybrid(tmp_path, "issuer")
+    key_manifest_path = _manifest_init_hybrid(tmp_path, seed, mldsa_key, "manifest.json")
+    out = tmp_path / "artifact-manifest.json"
+
+    rc = cli.main(
+        [
+            "manifest",
+            "artifacts",
+            "--in",
+            str(key_manifest_path),
+            "--issuer",
+            ISSUER,
+            "--series",
+            f"{ISSUER}/works/EXG-001",
+            "--version",
+            "1",
+            "--released-at",
+            VALID_FROM,
+            "--artifacts",
+            str(_write_artifacts(tmp_path)),
+            "--signing-kid",
+            KID,
+            "--signing-seed",
+            str(seed),
+            "--out",
+            str(out),
+        ]
+    )
+
+    assert rc == 2
+    assert "is hybrid; --mldsa-key is required" in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_manifest_artifacts_ed_only_with_mldsa_key_errors(
+    tmp_path: Path, capsys: CapSys
+) -> None:
+    seed, _pub = _keygen(tmp_path, "issuer")
+    key_manifest_path = _manifest_init(tmp_path, seed)
+    _other_seed, _other_pub, mldsa_key = _keygen_hybrid(tmp_path, "other")
+    out = tmp_path / "artifact-manifest.json"
+
+    rc = cli.main(
+        [
+            "manifest",
+            "artifacts",
+            "--in",
+            str(key_manifest_path),
+            "--issuer",
+            ISSUER,
+            "--series",
+            f"{ISSUER}/works/EXG-001",
+            "--version",
+            "1",
+            "--released-at",
+            VALID_FROM,
+            "--artifacts",
+            str(_write_artifacts(tmp_path)),
+            "--signing-kid",
+            KID,
+            "--signing-seed",
+            str(seed),
+            "--mldsa-key",
+            str(mldsa_key),
+            "--out",
+            str(out),
+        ]
+    )
+
+    assert rc == 2
+    assert "is Ed25519-only; --mldsa-key is not allowed" in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_manifest_artifacts_wrong_mldsa_key_errors(tmp_path: Path, capsys: CapSys) -> None:
+    seed, _pub, mldsa_key = _keygen_hybrid(tmp_path, "issuer")
+    key_manifest_path = _manifest_init_hybrid(tmp_path, seed, mldsa_key, "manifest.json")
+    _other_seed, _other_pub, wrong_mldsa_key = _keygen_hybrid(tmp_path, "other")
+    out = tmp_path / "artifact-manifest.json"
+
+    rc = cli.main(
+        [
+            "manifest",
+            "artifacts",
+            "--in",
+            str(key_manifest_path),
+            "--issuer",
+            ISSUER,
+            "--series",
+            f"{ISSUER}/works/EXG-001",
+            "--version",
+            "1",
+            "--released-at",
+            VALID_FROM,
+            "--artifacts",
+            str(_write_artifacts(tmp_path)),
+            "--signing-kid",
+            KID,
+            "--signing-seed",
+            str(seed),
+            "--mldsa-key",
+            str(wrong_mldsa_key),
+            "--out",
+            str(out),
+        ]
+    )
+
+    assert rc == 2
+    assert "does not match the signing key's ML-DSA-65 public key" in capsys.readouterr().err
+    assert not out.exists()
 
 
 # --- usage / IO errors exit 2 -------------------------------------------------
