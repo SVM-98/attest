@@ -19,7 +19,7 @@ from typing import Any
 
 import pytest
 
-from attest import cli, keys, pq, revocation, tlog
+from attest import cli, keys, pq, revocation, tlog, verify
 from tests.helpers import make_payload
 
 ISSUER = "store.example.com"
@@ -2361,6 +2361,47 @@ def test_log_anchor_rejects_oversized_rfc3161_token_input(tmp_path: Path, capsys
 
     assert rc == 2
     assert "--rfc3161-token input exceeds" in captured.err
+
+
+def test_log_anchor_max_cap_rfc3161_token_stays_within_verifier_evidence_ceiling(
+    tmp_path: Path, capsys: CapSys
+) -> None:
+    """A token accepted at the cap must never yield anchored evidence the
+    verifier is forced to reject on its 10M-character total-evidence ceiling:
+    the cap must leave room for the base64 expansion PLUS checkpoint and JSON
+    overhead inside the same evidence object."""
+    log_dir = _log_init(tmp_path)
+    evidence_path = tmp_path / "evidence.json"
+    evidence_path.write_text(json.dumps(_minimal_anchor_evidence()), encoding="utf-8")
+    ots_proof_path = tmp_path / "ots-proof.json"
+    ots_proof_path.write_text("{}", encoding="utf-8")
+    max_cap_token = tmp_path / "max-cap-rfc3161.tsr"
+    with max_cap_token.open("wb") as file:
+        file.truncate(cli._MAX_STAGE2_INPUT_BYTES["rfc3161"])
+    out_path = tmp_path / "anchored.json"
+
+    capsys.readouterr()
+    rc = cli.main(
+        [
+            "log",
+            "anchor",
+            "--dir",
+            str(log_dir),
+            "--evidence",
+            str(evidence_path),
+            "--ots-proof",
+            str(ots_proof_path),
+            "--rfc3161-token",
+            str(max_cap_token),
+            "--out",
+            str(out_path),
+        ]
+    )
+    capsys.readouterr()
+
+    assert rc == 0
+    written = out_path.read_text(encoding="utf-8")
+    assert len(written) <= verify._MAX_TRANSPARENCY_EVIDENCE_LEN
 
 
 def test_log_append_rejects_oversized_entry_json_input(tmp_path: Path, capsys: CapSys) -> None:
