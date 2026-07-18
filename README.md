@@ -148,6 +148,13 @@ remain valid and verifiable forever, and this profile is Stage 1 of a larger
 v0.2 — issuer key transparency/anchoring and transfer records are forthcoming
 in later stages.
 
+[docs/spec/attest-threat-model.md](docs/spec/attest-threat-model.md) is the
+maintained threat model behind the two specifications above — a living
+normative companion that analyzes their mechanisms rather than imposing
+requirements of its own — and
+[docs/spec/attest-privacy.md](docs/spec/attest-privacy.md) is its
+privacy-considerations sibling.
+
 ## Roadmap / north star
 
 Non-normative, and deliberately undated — these are directions, not commitments:
