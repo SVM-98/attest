@@ -18,13 +18,25 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # minimal PC-01 row below -- kept in sync deliberately, the way the real
 # schema and privacy doc are meant to stay in sync.
 _BUYER_KEYS = ["commitment", "identifier_type", "pubkey"]
+_BUYER_REQUIRED = ["commitment", "identifier_type"]
+_BUYER_PATTERN = "^[A-Za-z0-9_-]{43}$"
 
 
-def _minimal_schema() -> dict[str, object]:
+def _minimal_schema(
+    buyer_required: list[str] | None = None,
+    commitment_pattern: str = _BUYER_PATTERN,
+) -> dict[str, object]:
+    if buyer_required is None:
+        buyer_required = _BUYER_REQUIRED
     return {
         "properties": {
             "buyer": {
-                "properties": {key: {"type": "string"} for key in _BUYER_KEYS},
+                "required": buyer_required,
+                "properties": {
+                    "commitment": {"type": "string", "pattern": commitment_pattern},
+                    "identifier_type": {"enum": ["issuer-account", "email"]},
+                    "pubkey": {"type": ["string", "null"], "pattern": _BUYER_PATTERN},
+                },
             },
         },
     }
@@ -90,7 +102,10 @@ def _minimal_pc_row() -> str:
     return (
         "| PC-01 | The signed payload schema defines no plaintext "
         "buyer-identity member. | schema | `properties.buyer.properties` "
-        f"has key set exactly `{{{keys}}}`. |"
+        f"has key set exactly `{{{keys}}}` and `properties.buyer.required` equals "
+        '`["commitment", "identifier_type"]`; `commitment` and `pubkey` are '
+        "pattern-constrained to 43 base64url characters and `identifier_type` to the "
+        'enum `["issuer-account", "email"]`. |'
     )
 
 
@@ -144,6 +159,20 @@ def test_gap_in_tm_sequence_is_an_error() -> None:
     assert any("gap" in e.lower() or "missing" in e.lower() for e in errors)
 
 
+def test_tm_ids_out_of_ascending_order_are_an_error() -> None:
+    entries = (
+        _tm_entry(1, "- **Verdict:** Mitigated — v0.1 §2.  Example.")
+        + _tm_entry(3, "- **Verdict:** Mitigated — v0.1 §2.  Example.")
+        + _tm_entry(2, "- **Verdict:** Mitigated — v0.1 §2.  Example.")
+    )
+    docs = _base_docs()
+    docs["threat_model"] = _minimal_threat_model(entries=entries)
+
+    errors = collect_errors(**docs)
+
+    assert any("ascending" in e.lower() and "TM-02" in e for e in errors)
+
+
 def test_entry_missing_verdict_line_is_an_error() -> None:
     entry = (
         "#### TM-01 — Example attack\n\n"
@@ -179,6 +208,19 @@ def test_dangling_spec_ref_is_an_error() -> None:
     assert any("§99" in e for e in errors)
 
 
+def test_dangling_spec_ref_after_and_is_an_error() -> None:
+    entries = _tm_entry(
+        1,
+        "- **Verdict:** Mitigated — v0.2 §2 and §99.  Nonexistent section.",
+    )
+    docs = _base_docs()
+    docs["threat_model"] = _minimal_threat_model(entries=entries)
+
+    errors = collect_errors(**docs)
+
+    assert any("§99" in e for e in errors)
+
+
 def test_matrix_row_citing_nonexistent_tm_is_an_error() -> None:
     matrix = "\n".join(
         f"| {section} — Example section | TM-01, TM-99 |" for section in REQUIRED_SECTIONS
@@ -200,6 +242,55 @@ def test_required_spec_section_absent_from_matrix_is_an_error() -> None:
     errors = collect_errors(**docs)
 
     assert any("v0.1 §2" in e for e in errors)
+
+
+def test_matrix_row_without_tm_citation_does_not_cover_section() -> None:
+    matrix = _minimal_matrix_rows().replace(
+        "| v0.1 §2 — Example section | TM-01 |",
+        "| v0.1 §2 — Example section | |",
+    )
+    docs = _base_docs()
+    docs["threat_model"] = _minimal_threat_model(matrix=matrix)
+
+    errors = collect_errors(**docs)
+
+    assert any("required section v0.1 §2" in e for e in errors)
+
+
+def test_matrix_rows_inside_a_fenced_block_do_not_cover_sections() -> None:
+    # An illustrative table in a code fence is not the traceability matrix. If it
+    # counted, the real matrix could be emptied without the guard noticing.
+    fenced = "```text\n" + _minimal_matrix_rows() + "```\n"
+    docs = _base_docs()
+    docs["threat_model"] = _minimal_threat_model(matrix=fenced)
+
+    errors = collect_errors(**docs)
+
+    assert any("required section v0.1 §2" in e for e in errors)
+
+
+def test_malformed_tm_citation_in_matrix_is_an_error() -> None:
+    # An en dash instead of a hyphen: reads as a citation, matches nothing.
+    matrix = _minimal_matrix_rows().replace(
+        "| v0.1 §2 — Example section | TM-01 |",
+        "| v0.1 §2 — Example section | TM–999 |",  # noqa: RUF001 - the en dash IS the defect
+    )
+    docs = _base_docs()
+    docs["threat_model"] = _minimal_threat_model(matrix=matrix)
+
+    errors = collect_errors(**docs)
+
+    assert any("malformed TM citation" in e for e in errors)
+
+
+def test_unsupported_spec_version_in_verdict_is_an_error() -> None:
+    entries = _tm_entry(1, "- **Verdict:** Mitigated — v0.3 §999.  Nonexistent version.")
+    docs = _base_docs()
+    docs["threat_model"] = _minimal_threat_model(entries=entries)
+
+    errors = collect_errors(**docs)
+
+    assert any("unsupported spec version v0.3" in e for e in errors)
 
 
 def test_pc_row_with_invalid_check_type_is_an_error() -> None:
@@ -227,6 +318,33 @@ def test_pc_01_pinned_buyer_set_diverging_from_schema_is_an_error() -> None:
     errors = collect_errors(**docs)
 
     assert any("PC-01" in e for e in errors)
+
+
+def test_pc_01_absent_from_privacy_doc_is_an_error() -> None:
+    docs = _base_docs()
+    docs["privacy"] = _minimal_privacy(pc_rows="")
+
+    errors = collect_errors(**docs)
+
+    assert any("PC-01" in e and "missing" in e.lower() for e in errors)
+
+
+def test_pc_01_required_pin_diverging_from_schema_is_an_error() -> None:
+    docs = _base_docs()
+    docs["schema"] = _minimal_schema(buyer_required=["commitment"])
+
+    errors = collect_errors(**docs)
+
+    assert any("PC-01" in e and "required" in e.lower() for e in errors)
+
+
+def test_pc_01_pattern_pin_diverging_from_schema_is_an_error() -> None:
+    docs = _base_docs()
+    docs["schema"] = _minimal_schema(commitment_pattern="^[A-Za-z0-9_-]{42}$")
+
+    errors = collect_errors(**docs)
+
+    assert any("PC-01" in e and "pattern" in e.lower() for e in errors)
 
 
 def test_well_formed_fixtures_are_clean() -> None:
