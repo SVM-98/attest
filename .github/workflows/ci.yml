@@ -23,6 +23,7 @@ jobs:
       - run: uv run --frozen pytest -q
       - run: uv run --frozen ruff check .
       - run: uv run --frozen mypy --strict src
+      - run: uv run --frozen python tools/check_spec_docs.py
 
   supply-chain:
     runs-on: ubuntu-latest
