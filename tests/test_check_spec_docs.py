@@ -10,7 +10,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from tools.check_spec_docs import REQUIRED_SECTIONS, collect_errors
+import pytest
+
+from tools import check_spec_docs
+from tools.check_spec_docs import REQUIRED_SECTIONS, collect_errors, main
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -367,3 +370,38 @@ def test_real_repo_docs_are_clean() -> None:
     errors = collect_errors(threat_model, privacy, spec_v01, spec_v02, schema)
 
     assert errors == []
+
+
+def test_main_exits_zero_on_the_real_docs() -> None:
+    # The CI gate is the process exit code, not the error list. Every other test
+    # calls collect_errors directly, so main() could return 0 unconditionally and
+    # they would all still pass.
+    assert main() == 0
+
+
+def test_main_exits_nonzero_when_a_document_drifts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    drifted = tmp_path / "attest-threat-model.md"
+    drifted.write_text(_minimal_threat_model(matrix="| v0.1 §2 — Example | TM-99 |\n"), "utf-8")
+    monkeypatch.setattr(check_spec_docs, "_THREAT_MODEL_PATH", drifted)
+    monkeypatch.setattr(
+        check_spec_docs, "_PRIVACY_PATH", _write(tmp_path, "p.md", _minimal_privacy())
+    )
+    monkeypatch.setattr(
+        check_spec_docs, "_SPEC_V01_PATH", _write(tmp_path, "v1.md", _minimal_spec_v01())
+    )
+    monkeypatch.setattr(
+        check_spec_docs, "_SPEC_V02_PATH", _write(tmp_path, "v2.md", _minimal_spec_v02())
+    )
+    monkeypatch.setattr(
+        check_spec_docs, "_SCHEMA_PATH", _write(tmp_path, "s.json", json.dumps(_minimal_schema()))
+    )
+
+    assert main() == 1
+
+
+def _write(directory: Path, name: str, content: str) -> Path:
+    path = directory / name
+    path.write_text(content, encoding="utf-8")
+    return path
