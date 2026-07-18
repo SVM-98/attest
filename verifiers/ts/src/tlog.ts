@@ -15,7 +15,7 @@ import { sha256 } from '@noble/hashes/sha2'
 import { JsonValue, canonicalBytes } from './canon.js'
 import { verifyStrict as verifyEd25519Strict } from './ed25519.js'
 import { verifyStrict as verifyMldsaStrict, ML_DSA_65_PK_LEN, ML_DSA_65_SIG_LEN } from './mldsa.js'
-import { ERR, codePointLength, isPythonPrintable, pyRepr, pyStage2StringRepr, pyTypeName, sliceCodePoints } from './messages.js'
+import { ERR, codePointLength, pyRepr, pyStage2StringRepr, pyTypeName, sliceCodePoints } from './messages.js'
 
 const HASH_LEN = 32 // SHA-256 digest length in bytes
 const MAX_JCS_INTEGER = 2 ** 53 - 1
@@ -37,30 +37,6 @@ export class TlogError extends Error {}
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return v !== null && typeof v === 'object' && !Array.isArray(v)
-}
-
-// TS strings are UTF-16; a lone surrogate (only reachable via a hostile
-// \uXXXX-style construction, not normal text) fails to round-trip to UTF-8 —
-// Python's `str.encode()` raises UnicodeEncodeError on the same input, so
-// both sides reject it, just via a pre-check here instead of a codec error.
-function hasLoneSurrogate(s: string): boolean {
-  for (let i = 0; i < s.length; i++) {
-    const cp = s.charCodeAt(i)
-    if (cp >= 0xd800 && cp <= 0xdbff) {
-      const lo = s.charCodeAt(i + 1)
-      if (lo >= 0xdc00 && lo <= 0xdfff) {
-        i++
-        continue
-      }
-      return true
-    }
-    if (cp >= 0xdc00 && cp <= 0xdfff) return true
-  }
-  return false
-}
-
-function isPrintable(s: string): boolean {
-  return isPythonPrintable(s)
 }
 
 export function leafHash(data: Uint8Array): Uint8Array {
@@ -400,10 +376,9 @@ export function keyHash(name: string, signatureType: Uint8Array, pub: Uint8Array
 }
 
 export function validateOrigin(origin: unknown, field = 'origin'): string {
-  if (typeof origin !== 'string' || origin.length === 0 || !isPrintable(origin)) {
-    throw new TlogError(`${field} must be a non-empty printable str`)
+  if (typeof origin !== 'string' || origin.length === 0 || !hasOnlyAsciiChars(origin, 0x20, 0x7e)) {
+    throw new TlogError(`${field} must be a non-empty printable ASCII str`)
   }
-  if (hasLoneSurrogate(origin)) throw new TlogError(`${field} must be valid UTF-8`)
   return origin
 }
 
@@ -412,13 +387,22 @@ function validateKeyName(name: unknown, field = 'name'): string {
     typeof name !== 'string' ||
     name.length === 0 ||
     name.includes('+') ||
-    /\s/.test(name) ||
-    !isPrintable(name)
+    !hasOnlyAsciiChars(name, 0x21, 0x7e)
   ) {
-    throw new TlogError(`${field} must be non-empty and contain no spaces, '+' or controls`)
+    throw new TlogError(`${field} must be non-empty printable ASCII without '+'`)
   }
-  if (hasLoneSurrogate(name)) throw new TlogError(`${field} must be valid UTF-8`)
   return name
+}
+
+/** Return true iff every UTF-16 code unit is inside the required ASCII range.
+ * This intentionally avoids Unicode properties: Stage-2 note grammar must
+ * have the same verdict on every host Unicode database. */
+function hasOnlyAsciiChars(value: string, min: number, max: number): boolean {
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i)
+    if (code < min || code > max) return false
+  }
+  return true
 }
 
 function validateBytes(value: unknown, field: string, length: number): Uint8Array {

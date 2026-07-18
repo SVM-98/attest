@@ -381,14 +381,22 @@ describe('parseCheckpoint (structural validation only)', () => {
     ['private-use', 'bad\ue000origin'],
     ['non-breaking space', 'bad\u00a0origin'],
     ['line separator', 'bad\u2028origin'],
-  ])('rejects a Python-nonprintable Unicode origin (%s)', (_category, origin) => {
+  ])('rejects Unicode-category origins under the ASCII grammar (%s)', (_category, origin) => {
     const text = `${origin}\n3\n${btoa(String.fromCharCode(...ROOT))}\n\n— ${LOG_NAME} AA==\n`
     expect(() => parseCheckpoint(text)).toThrow(TlogError)
   })
 
-  it.each(['plain space', '🎉', '漢'])('accepts a Python-printable Unicode origin (%s)', (origin) => {
+  it('accepts a printable ASCII origin containing a space', () => {
+    const origin = 'plain space'
     const text = `${origin}\n3\n${btoa(String.fromCharCode(...ROOT))}\n\n— ${LOG_NAME} AA==\n`
     expect(parseCheckpoint(text).origin).toBe(origin)
+  })
+
+  it.each(['🎉', '漢', '\u{2ebf0}'])('rejects a non-ASCII origin for version-independent grammar (%s)', (origin) => {
+    // Stage-2 note grammar is printable ASCII, not Unicode-category based:
+    // cross-core verdicts therefore never depend on a host Unicode database.
+    const text = `${origin}\n3\n${btoa(String.fromCharCode(...ROOT))}\n\n— ${LOG_NAME} AA==\n`
+    expect(() => parseCheckpoint(text)).toThrow(TlogError)
   })
 
   it('rejects a missing blank line', () => {
@@ -467,6 +475,9 @@ describe('parseCheckpoint (structural validation only)', () => {
     'bad\ue000name',
     'bad\u00a0name',
     'bad\u2028name',
+    '🎉',
+    '漢',
+    '\u{2ebf0}',
   ])('rejects an invalid C2SP signature name (%s)', (name) => {
     const text = `${ORIGIN}\n3\n${btoa(String.fromCharCode(...ROOT))}\n\n— ${name} AA==\n`
     expect(() => parseCheckpoint(text)).toThrow(TlogError)
@@ -508,11 +519,13 @@ describe('parseCheckpoint (structural validation only)', () => {
 
   it('counts checkpoint-text caps by Unicode code points, not UTF-16 units', () => {
     const suffix = `\n3\n${btoa(String.fromCharCode(...ROOT))}\n\n— ${LOG_NAME} AA==\n`
-    const withinCap = '🎉'.repeat(MAX_NOTE_TEXT_LEN_ / 2) + suffix
+    const withinCap = '🎉'.repeat(MAX_NOTE_TEXT_LEN_ - suffix.length) + suffix
     expect(withinCap.length).toBeGreaterThan(MAX_NOTE_TEXT_LEN_)
-    expect(parseCheckpoint(withinCap).origin).toBe('🎉'.repeat(MAX_NOTE_TEXT_LEN_ / 2))
+    // It reaches the ASCII-origin grammar, rather than being rejected by the
+    // cap: the cap still counts Python-style code points before validation.
+    expect(() => parseCheckpoint(withinCap)).toThrow('origin must be a non-empty printable ASCII str')
 
-    const beyondCap = '🎉'.repeat(MAX_NOTE_TEXT_LEN_) + suffix
+    const beyondCap = '🎉'.repeat(MAX_NOTE_TEXT_LEN_ - suffix.length + 1) + suffix
     expect(() => parseCheckpoint(beyondCap)).toThrow(`checkpoint text exceeds ${MAX_NOTE_TEXT_LEN_} chars`)
   })
 
@@ -543,7 +556,7 @@ describe('parseCheckpoint (structural validation only)', () => {
     const oversizedByOne = '🎉'.repeat(81)
     const text = `${ORIGIN}\n${oversizedByOne}\n${btoa(String.fromCharCode(...ROOT))}\n\n— ${LOG_NAME} AA==\n`
     expect(() => parseCheckpoint(text)).toThrow(
-      `tree size must be ASCII decimal digits: '${'🎉'.repeat(80)}'…`,
+      `tree size must be ASCII decimal digits: '${'\\U0001f389'.repeat(80)}'…`,
     )
   })
 

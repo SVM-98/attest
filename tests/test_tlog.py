@@ -432,6 +432,34 @@ def test_parse_checkpoint_rejects_empty_or_control_character_origin(origin: str)
         tlog.parse_checkpoint(text)
 
 
+@pytest.mark.parametrize(
+    ("category", "origin"),
+    [
+        ("zero-width format", "bad\u200borigin"),
+        ("private-use", "bad\ue000origin"),
+        ("non-breaking space", "bad\u00a0origin"),
+        ("line separator", "bad\u2028origin"),
+    ],
+)
+def test_parse_checkpoint_rejects_unicode_category_origin_under_ascii_grammar(
+    category: str, origin: str
+) -> None:
+    text = f"{origin}\n3\n{base64.b64encode(ROOT).decode('ascii')}\n\n— {LOG_NAME} AA==\n"
+    with pytest.raises(tlog.TlogError):
+        tlog.parse_checkpoint(text)
+
+
+@pytest.mark.parametrize("origin", ["🎉", "漢", "\U0002EBF0"])
+def test_parse_checkpoint_rejects_non_ascii_origin_for_version_independent_grammar(
+    origin: str,
+) -> None:
+    # Stage-2 note grammar is printable ASCII, not Unicode-category based:
+    # cross-core verdicts therefore never depend on a host Unicode database.
+    text = f"{origin}\n3\n{base64.b64encode(ROOT).decode('ascii')}\n\n— {LOG_NAME} AA==\n"
+    with pytest.raises(tlog.TlogError):
+        tlog.parse_checkpoint(text)
+
+
 def test_parse_checkpoint_rejects_missing_blank_line() -> None:
     text = f"{ORIGIN}\n3\n{base64.b64encode(ROOT).decode('ascii')}\nnot-blank\n"
     with pytest.raises(tlog.TlogError):
@@ -528,7 +556,22 @@ def test_parse_checkpoint_rejects_signature_line_with_wrong_dash() -> None:
         tlog.parse_checkpoint(text)
 
 
-@pytest.mark.parametrize("name", ["bad name", "bad+name", "bad\tname", "bad\x1fname"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "bad name",
+        "bad+name",
+        "bad\tname",
+        "bad\x1fname",
+        "bad\u200bname",
+        "bad\ue000name",
+        "bad\u00a0name",
+        "bad\u2028name",
+        "🎉",
+        "漢",
+        "\U0002EBF0",
+    ],
+)
 def test_parse_checkpoint_rejects_invalid_c2sp_signature_name(name: str) -> None:
     text = f"{ORIGIN}\n3\n{base64.b64encode(ROOT).decode('ascii')}\n\n— {name} AA==\n"
     with pytest.raises(tlog.TlogError):
@@ -539,6 +582,37 @@ def test_parse_checkpoint_rejects_lone_surrogate_origin() -> None:
     text = f"bad\ud800origin\n3\n{base64.b64encode(ROOT).decode('ascii')}\n\n— {LOG_NAME} AA==\n"
     with pytest.raises(tlog.TlogError):
         tlog.parse_checkpoint(text)
+
+
+@pytest.mark.parametrize(
+    ("value", "rendered"),
+    [
+        ("a'b", '"a\'b"'),
+        ('a"b', "'a\"b'"),
+        ("a'\"b", "'a\\'\"b'"),
+        ("a\nb", r"'a\nb'"),
+        ("a\\b", r"'a\\b'"),
+        ("\u200b", r"'\u200b'"),
+        ("🎉", r"'\U0001f389'"),
+        ("\U0002EBF0", r"'\U0002ebf0'"),
+        ("\x7f", r"'\x7f'"),
+    ],
+)
+def test_tlog_diagnostic_renderer_matches_python_ascii(value: str, rendered: str) -> None:
+    assert tlog._trunc_repr(value) == rendered
+
+
+def test_parse_checkpoint_ascii_escapes_astral_diagnostic_before_truncation() -> None:
+    oversized_by_one = "🎉" * 81
+    text = (
+        f"{ORIGIN}\n{oversized_by_one}\n{base64.b64encode(ROOT).decode('ascii')}\n\n"
+        f"— {LOG_NAME} AA==\n"
+    )
+    with pytest.raises(tlog.TlogError) as exc_info:
+        tlog.parse_checkpoint(text)
+    assert str(exc_info.value) == (
+        "tree size must be ASCII decimal digits: '" + "\\U0001f389" * 80 + "'…"
+    )
 
 
 def test_parse_checkpoint_rejects_more_than_64_signature_lines() -> None:
@@ -750,13 +824,15 @@ def test_sign_checkpoint_rejects_whitespace_in_name() -> None:
         tlog.sign_checkpoint(ORIGIN, 1, ROOT, hk, "bad name")
 
 
-@pytest.mark.parametrize("origin", ["", "bad\x1forigin", "bad\x7forigin"])
+@pytest.mark.parametrize("origin", ["", "bad\x1forigin", "bad\x7forigin", "🎉", "漢", "\U0002EBF0"])
 def test_sign_checkpoint_rejects_empty_or_control_character_origin(origin: str) -> None:
     with pytest.raises(tlog.TlogError):
         tlog.sign_checkpoint(origin, 1, ROOT, _hybrid_keys(), LOG_NAME)
 
 
-@pytest.mark.parametrize("name", ["", "bad+name", "bad\tname", "bad\x1fname"])
+@pytest.mark.parametrize(
+    "name", ["", "bad+name", "bad\tname", "bad\x1fname", "🎉", "漢", "\U0002EBF0"]
+)
 def test_sign_checkpoint_rejects_invalid_c2sp_name(name: str) -> None:
     with pytest.raises(tlog.TlogError):
         tlog.sign_checkpoint(ORIGIN, 1, ROOT, _hybrid_keys(), name)
