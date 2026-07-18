@@ -78,12 +78,11 @@ _ISO8601_UTC_FMT = "%Y-%m-%dT%H:%M:%SZ"
 _RECEIPT_ID_RE = re.compile(r"^[0-7][0-9A-HJKMNP-TV-Z]{25}$")
 
 # Stage-2 inputs are parsed from untrusted files, so cap them before decoding
-# or base64 expansion.  JSON feeds `verify`'s 10M-character evidence
+# or base64 expansion. JSON feeds `verify`'s 10M-character evidence
 # materialization ceiling; a checkpoint candidate feeds the signed-note 500K
-# text cap.  An RFC 3161 token is embedded base64-expanded (4/3) into the SAME
-# evidence object as the checkpoint note and JSON structure, so its cap must
-# leave that ceiling room for all three together — a token accepted here must
-# never produce anchored evidence the verifier is forced to reject on size.
+# text cap. An RFC 3161 token is embedded base64-expanded (4/3) into the same
+# evidence object. These are pre-allocation bounds; `_cmd_log_anchor` applies
+# the verifier's exact total-evidence bound after composing the output.
 _MAX_STAGE2_INPUT_BYTES = {
     "json": verify._MAX_TRANSPARENCY_EVIDENCE_LEN,
     "candidate": tlog._MAX_NOTE_TEXT_LEN,
@@ -1154,6 +1153,12 @@ def _cmd_log_anchor(args: argparse.Namespace) -> int:
         "checkpoint": checkpoint_text,
         "proofs": [*existing_proofs, *new_proofs],
     }
+    serialized = canon.dumps(updated_evidence)
+    if len(serialized) > verify._MAX_TRANSPARENCY_EVIDENCE_LEN:
+        raise CliUsageError(
+            "produced evidence would exceed the verifier's evidence ceiling "
+            f"({len(serialized)} > {verify._MAX_TRANSPARENCY_EVIDENCE_LEN})"
+        )
 
     _write_json_file(args.out, updated_evidence)
     _print_json({"out": str(args.out), "proofs": len(updated_evidence["anchors"]["proofs"])})
