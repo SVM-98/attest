@@ -49,9 +49,12 @@ def _no_horizon_policy() -> anchor.AnchorPolicy:
 
 
 class _GetRaisesDict(dict[str, Any]):
-    """Hostile evidence mapping whose ordinary accessor is not safe."""
+    """Hostile evidence mapping whose ordinary accessors are not safe."""
 
     def get(self, key: object, default: object = None) -> object:
+        raise KeyError(key)
+
+    def __getitem__(self, key: str) -> Any:
         raise KeyError(key)
 
 
@@ -60,6 +63,45 @@ class _EqualityRaisesString(str):
 
     def __eq__(self, other: object) -> bool:
         raise RuntimeError("hostile equality")
+
+
+class _TreeSizeChangesDict(dict[str, Any]):
+    """Return different tree sizes on successive access attempts."""
+
+    def __init__(self, evidence: dict[str, Any]) -> None:
+        super().__init__(evidence)
+        self.tree_size_reads = 0
+
+    def _tree_size(self) -> int:
+        self.tree_size_reads += 1
+        return 777 if self.tree_size_reads == 1 else 1
+
+    def get(self, key: str, default: Any = None) -> Any:
+        if key == "tree_size":
+            return self._tree_size()
+        return super().get(key, default)
+
+    def __getitem__(self, key: str) -> Any:
+        if key == "tree_size":
+            return self._tree_size()
+        return super().__getitem__(key)
+
+
+class _RaisesOnThirdEqualityString(str):
+    """Behaves normally for claim resolution, then raises during post-processing."""
+
+    comparisons: int
+
+    def __new__(cls, value: str) -> _RaisesOnThirdEqualityString:
+        instance = super().__new__(cls, value)
+        instance.comparisons = 0
+        return instance
+
+    def __eq__(self, other: object) -> bool:
+        self.comparisons += 1
+        if self.comparisons == 3:
+            raise RuntimeError("hostile equality")
+        return super().__eq__(other)
 
 
 class _Bundle:
@@ -822,6 +864,7 @@ def test_verify_transparency_defaults_to_not_checked_when_evidence_absent() -> N
     assert result.manifest_freshness == "not_checked"
     assert result.signature == "valid"
     assert result.ok is True
+    assert result.warnings == ()
 
 
 def test_verify_valid_receipt_claim_reports_logged() -> None:
@@ -868,6 +911,7 @@ def test_verify_valid_key_manifest_claim_reports_logged_and_freshness() -> None:
     assert result.manifest_freshness == f"verified_as_of:{tree_size}"
     assert result.signature == "valid"
     assert result.ok is True
+    assert result.warnings == ()
 
 
 def test_verify_payload_only_precommit_hash_is_rejected_as_entry_mismatch() -> None:
@@ -887,7 +931,7 @@ def test_verify_payload_only_precommit_hash_is_rejected_as_entry_mismatch() -> N
     )
     assert result.transparency == transparency.TRANSPARENCY_NOT_CHECKED
     assert result.corroboration == transparency.CORROBORATION_NONE
-    assert "transparency_entry_mismatch" in result.warnings
+    assert result.warnings == ("transparency_entry_mismatch",)
     assert result.signature == "valid"  # the receipt itself is unaffected
     assert result.ok is True
 
@@ -914,6 +958,7 @@ def test_verify_compromised_key_receipt_stays_invalid_despite_logged_transparenc
     assert any("compromised" in e for e in result.errors)
     assert result.transparency == transparency.TRANSPARENCY_LOGGED
     assert result.corroboration == transparency.CORROBORATION_LOGGED
+    assert result.warnings == ()
 
 
 def test_verify_manifest_v5_without_rotation_chain_caps_corroboration_to_none() -> None:
@@ -938,7 +983,7 @@ def test_verify_manifest_v5_without_rotation_chain_caps_corroboration_to_none() 
         "manifest_version": 5,
         "manifest_sha256": _manifest_sha256(manifest),
     }
-    evidence, log_key, _tree_size = _single_entry_evidence(entry, _hybrid_keys())
+    evidence, log_key, tree_size = _single_entry_evidence(entry, _hybrid_keys())
 
     result = verify.verify(
         _envelope_bytes(envelope),
@@ -949,7 +994,8 @@ def test_verify_manifest_v5_without_rotation_chain_caps_corroboration_to_none() 
     )
     assert result.transparency == transparency.TRANSPARENCY_LOGGED
     assert result.corroboration == transparency.CORROBORATION_NONE
-    assert "corroboration_requires_rotation_chain" in result.warnings
+    assert result.manifest_freshness == f"verified_as_of:{tree_size}"
+    assert result.warnings == ("corroboration_requires_rotation_chain",)
     assert result.signature == "valid"
     assert result.ok is True
 
@@ -992,7 +1038,7 @@ def test_verify_manifest_v5_with_verified_rotation_chain_keeps_corroboration_log
     assert result.transparency == transparency.TRANSPARENCY_LOGGED
     assert result.corroboration == transparency.CORROBORATION_LOGGED
     assert result.manifest_freshness == f"verified_as_of:{tree_size}"
-    assert "corroboration_requires_rotation_chain" not in result.warnings
+    assert result.warnings == ()
 
 
 def test_verify_equivocation_detected_warns_but_leaves_ok_unaffected() -> None:
@@ -1024,7 +1070,7 @@ def test_verify_equivocation_detected_warns_but_leaves_ok_unaffected() -> None:
     )
     assert result.transparency == transparency.TRANSPARENCY_EQUIVOCATION_DETECTED
     assert result.corroboration == transparency.CORROBORATION_NONE
-    assert "log_equivocation_detected" in result.warnings
+    assert result.warnings == ("log_equivocation_detected",)
     assert result.signature == "valid"
     assert result.ok is True  # equivocation is informational — never an error
 
@@ -1040,7 +1086,7 @@ def test_verify_transparency_evidence_without_config_warns_config_missing() -> N
     )
     assert result.transparency == transparency.TRANSPARENCY_NOT_CHECKED
     assert result.corroboration == transparency.CORROBORATION_NONE
-    assert "transparency_config_missing" in result.warnings
+    assert result.warnings == ("transparency_config_missing",)
     assert result.signature == "valid"
     assert result.ok is True
 
@@ -1063,6 +1109,7 @@ def test_verify_unrecognized_claim_type_reports_not_checked() -> None:
     )
     assert result.transparency == transparency.TRANSPARENCY_NOT_CHECKED
     assert result.corroboration == transparency.CORROBORATION_NONE
+    assert result.warnings == ("transparency_claim_unresolvable",)
 
 
 def test_verify_raises_transparency_error_on_log_keys_with_disagreeing_origins() -> None:
@@ -1082,13 +1129,10 @@ def test_verify_raises_transparency_error_on_log_keys_with_disagreeing_origins()
         )
 
 
-def test_verify_confines_hostile_transparency_evidence_get() -> None:
-    # Hardening boundary: verify()'s OWN new code (`_resolve_transparency_
-    # claim`) touches `transparency_evidence.get(...)` before ever calling
-    # `evaluate_transparency` — a hostile mapping there must degrade, never
-    # crash `verify()` itself (mirrors transparency.py's own confinement,
-    # which this test does NOT exercise — this one is specifically about the
-    # integration's own evidence-touching code, not the evaluator's).
+def test_verify_confines_hostile_transparency_evidence_materialization() -> None:
+    # JCS materialization is verify()'s sole untrusted-evidence touch. A
+    # hostile direct accessor must degrade rather than crash the integration;
+    # this does not exercise transparency.py's independent confinement.
     envelope = _receipt_envelope()
     core_hash = tlog.receipt_core_hash(envelope)
     entry = {"type": "receipt", "issuer": _RECEIPT_ISSUER, "core_sha256": core_hash}
@@ -1104,7 +1148,7 @@ def test_verify_confines_hostile_transparency_evidence_get() -> None:
     )
     assert result.transparency == transparency.TRANSPARENCY_NOT_CHECKED
     assert result.corroboration == transparency.CORROBORATION_NONE
-    assert "transparency_claim_unresolvable" in result.warnings
+    assert result.warnings == ("transparency_claim_unresolvable",)
     assert result.signature == "valid"
     assert result.ok is True
 
@@ -1123,4 +1167,93 @@ def test_verify_existing_callers_are_unaffected_by_new_keyword_only_params() -> 
     assert result.transparency == "not_checked"
     assert result.corroboration == "none"
     assert result.manifest_freshness == "not_checked"
+    assert result.ok is True
+    assert result.warnings == ()
+
+
+def test_verify_materializes_changing_tree_size_once_before_evaluation() -> None:
+    # Without materialization, verify() read 777 here, evaluator verified 1,
+    # then manifest freshness was reported as the attacker-selected 777.
+    manifest = _receipt_manifest()
+    envelope = _receipt_envelope()
+    entry = {
+        "type": "key-manifest",
+        "issuer": _RECEIPT_ISSUER,
+        "manifest_version": 1,
+        "manifest_sha256": _manifest_sha256(manifest),
+    }
+    evidence, log_key, _tree_size = _single_entry_evidence(entry, _hybrid_keys())
+    changing_evidence = _TreeSizeChangesDict(evidence)
+
+    result = verify.verify(
+        _envelope_bytes(envelope),
+        _receipt_trust_store(manifest),
+        transparency=changing_evidence,
+        log_keys=[log_key],
+        anchor_policy=_no_horizon_policy(),
+    )
+    # The one materialized value (777) reaches the evaluator too, so it
+    # rejects the mismatch instead of reporting freshness for a different
+    # later value (1).
+    assert changing_evidence.tree_size_reads == 1
+    assert result.transparency == transparency.TRANSPARENCY_NOT_CHECKED
+    assert result.corroboration == transparency.CORROBORATION_NONE
+    assert result.manifest_freshness == "not_checked"
+    assert result.warnings == ("tree_size_mismatch",)
+    assert result.signature == "valid"
+    assert result.ok is True
+
+
+def test_verify_materializes_claim_type_before_post_evaluation_comparison() -> None:
+    # The old integration compared this object twice while resolving its type,
+    # then a third time after evaluation while setting freshness; the third
+    # comparison escaped verify(). JCS materialization replaces it with plain
+    # str before any claim-phase comparison.
+    manifest = _receipt_manifest()
+    envelope = _receipt_envelope()
+    entry = {
+        "type": "key-manifest",
+        "issuer": _RECEIPT_ISSUER,
+        "manifest_version": 1,
+        "manifest_sha256": _manifest_sha256(manifest),
+    }
+    evidence, log_key, tree_size = _single_entry_evidence(entry, _hybrid_keys())
+    claim_type = _RaisesOnThirdEqualityString("key-manifest")
+    evidence["entry"]["type"] = claim_type
+
+    result = verify.verify(
+        _envelope_bytes(envelope),
+        _receipt_trust_store(manifest),
+        transparency=evidence,
+        log_keys=[log_key],
+        anchor_policy=_no_horizon_policy(),
+    )
+    assert claim_type.comparisons == 0
+    assert result.transparency == transparency.TRANSPARENCY_LOGGED
+    assert result.corroboration == transparency.CORROBORATION_LOGGED
+    assert result.manifest_freshness == f"verified_as_of:{tree_size}"
+    assert result.warnings == ()
+    assert result.signature == "valid"
+    assert result.ok is True
+
+
+def test_verify_caps_oversized_transparency_evidence() -> None:
+    envelope = _receipt_envelope()
+    core_hash = tlog.receipt_core_hash(envelope)
+    entry = {"type": "receipt", "issuer": _RECEIPT_ISSUER, "core_sha256": core_hash}
+    evidence, log_key, _tree_size = _single_entry_evidence(entry, _hybrid_keys())
+    evidence["padding"] = "x" * verify._MAX_TRANSPARENCY_EVIDENCE_LEN
+
+    result = verify.verify(
+        _envelope_bytes(envelope),
+        _receipt_trust_store(_receipt_manifest()),
+        transparency=evidence,
+        log_keys=[log_key],
+        anchor_policy=_no_horizon_policy(),
+    )
+    assert result.transparency == transparency.TRANSPARENCY_NOT_CHECKED
+    assert result.corroboration == transparency.CORROBORATION_NONE
+    assert result.manifest_freshness == "not_checked"
+    assert result.warnings == ("transparency_claim_unresolvable",)
+    assert result.signature == "valid"
     assert result.ok is True
