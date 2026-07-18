@@ -260,6 +260,93 @@ def test_readme_present_and_warns_about_private_file(tmp_path: Path) -> None:
     assert "never" in readme.lower()
 
 
+def test_readme_states_proofs_are_corroboration_not_authenticity(tmp_path: Path) -> None:
+    """Stage 2 (design doc "Honest scope"): a proofs/ entry is corroborating
+    evidence a receipt was logged/anchored, never a substitute for the
+    receipt's own signature verification."""
+    envelope = _envelope(receipt_id="01J1V5B4M9Z8QWERTY12345689")
+
+    attest_path, _private_path = bundle.export(
+        [envelope], [_key_manifest()], [], _legal_texts(), tmp_path, "mylibrary"
+    )
+
+    with zipfile.ZipFile(attest_path) as zf:
+        readme = zf.read("README.html").decode("utf-8")
+
+    assert "corroboration" in readme.lower()
+    assert "proofs/" in readme
+
+
+# --- proofs/ (Stage 2: transparency-log evidence travels with the bundle) ---
+
+
+_EVIDENCE_A = {
+    "entry": {"type": "receipt", "issuer": ISSUER, "core_sha256": "a" * 64},
+    "leaf_index": 0,
+    "tree_size": 1,
+    "inclusion_proof": [],
+    "checkpoint": "example.test/log/1\n1\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n\n"
+    "— k AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAA==\n",
+}
+
+
+def test_export_import_roundtrip_carries_proofs(tmp_path: Path) -> None:
+    receipt_id = "01J1V5B4M9Z8QWERTY1234568F"
+    envelope = _envelope(receipt_id=receipt_id)
+
+    attest_path, _private_path = bundle.export(
+        [envelope],
+        [_key_manifest()],
+        [],
+        _legal_texts(),
+        tmp_path,
+        "mylibrary",
+        proofs={receipt_id: _EVIDENCE_A},
+    )
+
+    with zipfile.ZipFile(attest_path) as zf:
+        assert json.loads(zf.read(f"proofs/{receipt_id}.json")) == _EVIDENCE_A
+
+    imported = bundle.import_bundle(attest_path)
+    assert imported.proofs == {receipt_id: _EVIDENCE_A}
+
+
+def test_export_drops_proof_for_a_receipt_not_in_the_bundle(tmp_path: Path) -> None:
+    """A `proofs` entry keyed by a receipt_id that isn't actually being
+    exported must never be written — it would be orphaned evidence for a
+    receipt the recipient doesn't have."""
+    receipt_id = "01J1V5B4M9Z8QWERTY1234568G"
+    envelope = _envelope(receipt_id=receipt_id)
+
+    attest_path, _private_path = bundle.export(
+        [envelope],
+        [_key_manifest()],
+        [],
+        _legal_texts(),
+        tmp_path,
+        "mylibrary",
+        proofs={"some-other-receipt-id": _EVIDENCE_A},
+    )
+
+    with zipfile.ZipFile(attest_path) as zf:
+        assert not any(name.startswith("proofs/") for name in zf.namelist())
+
+    imported = bundle.import_bundle(attest_path)
+    assert imported.proofs == {}
+
+
+def test_import_defaults_proofs_to_empty_dict_when_bundle_has_none(tmp_path: Path) -> None:
+    envelope = _envelope(receipt_id="01J1V5B4M9Z8QWERTY1234568H")
+
+    attest_path, _private_path = bundle.export(
+        [envelope], [_key_manifest()], [], _legal_texts(), tmp_path, "mylibrary"
+    )
+
+    imported = bundle.import_bundle(attest_path)
+    assert imported.proofs == {}
+
+
 # --- disclose: the single-receipt sharing unit ----------------------------------
 
 

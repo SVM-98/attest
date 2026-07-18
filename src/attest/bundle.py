@@ -48,7 +48,7 @@ import hashlib
 import json
 import os
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -94,6 +94,18 @@ compatible verifier reports trust as <code>unauthenticated_tofu</code>
 rather than <code>verified</code> — the signatures are exactly as valid;
 only their provenance could not be freshly confirmed over the network.</p>
 
+<h2>About proofs/ (if present)</h2>
+<p>Some receipts in this bundle may be accompanied by a
+<code>proofs/&lt;receipt_id&gt;.json</code> file: evidence that the receipt (or the
+issuer's key manifest) was recorded in a public transparency log, optionally
+anchored to a Bitcoin block header (for example via
+<code>attest verify --transparency proofs/&lt;receipt_id&gt;.json --log-keys ...
+--anchor-policy ...</code>). This is corroboration, not authenticity: the receipt's
+own Ed25519/ML-DSA-65 signature is what makes it authentic; a proof only shows the
+receipt (or manifest) was independently observable in the log at a point in time,
+and — absent independent witnesses — does not by itself rule out the log operator
+equivocating.</p>
+
 <h2 style="color:#b00020">Never share __BUNDLE_NAME__.private.attest</h2>
 <p><strong>This file, __BUNDLE_NAME__.attest, is safe to share</strong> — it
 was built to contain no secrets. The separate sibling file
@@ -125,6 +137,11 @@ class ImportedBundle:
     artifact_manifests: dict[str, list[dict[str, Any]]]
     legal_texts: dict[str, bytes]
     salts: dict[str, bytes]
+    # Stage 2: transparency-log evidence (Task 4 schema, optionally anchored),
+    # keyed by receipt_id — corroboration, not authenticity (see the bundle
+    # README's own paragraph on this). Empty by default so existing callers
+    # that never pass `proofs=` to `export()` see zero behavior change.
+    proofs: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 def _referenced_legal_hashes(payload: dict[str, Any]) -> list[str]:
@@ -234,6 +251,8 @@ def export(
     legal_texts: dict[str, bytes],
     out_dir: Path,
     name: str,
+    *,
+    proofs: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[Path, Path]:
     """Write `<name>.attest` (shareable) and `<name>.private.attest` (secrets).
 
@@ -241,6 +260,15 @@ def export(
     `legal_texts` BEFORE anything is written to disk (§9: preserve the
     deal) — a partially-written bundle is worse than none, so validation
     happens as a whole pass first.
+
+    `proofs` (Stage 2, keyword-only, defaults to `None`) is an optional
+    `receipt_id -> evidence dict` map (the `attest.tlog`/`attest.transparency`
+    evidence schema, produced by `attest log prove`/`anchor`): each entry
+    whose `receipt_id` is actually among `receipts` is written to
+    `proofs/<receipt_id>.json`. An entry for a receipt_id NOT in this export
+    is silently dropped — it would be orphaned evidence for a receipt the
+    recipient never receives. Existing callers that never pass `proofs=` see
+    zero behavior change (no `proofs/` member is written at all).
     """
     for envelope in receipts:
         payload = envelope.get("payload")
@@ -255,11 +283,13 @@ def export(
 
     salts_b64u: dict[str, str] = {}
     referenced_hashes: set[str] = set()
+    receipt_ids: set[str] = set()
 
     with zipfile.ZipFile(attest_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for envelope in receipts:
             payload = envelope["payload"]
             receipt_id = payload["receipt_id"]
+            receipt_ids.add(receipt_id)
             referenced_hashes.update(_referenced_legal_hashes(payload))
 
             delivery = envelope.get("delivery")
@@ -273,6 +303,10 @@ def export(
 
         for digest in sorted(referenced_hashes):
             zf.writestr(f"legal/{digest}.txt", legal_texts[digest])
+
+        for receipt_id, evidence in sorted((proofs or {}).items()):
+            if receipt_id in receipt_ids:
+                zf.writestr(f"proofs/{receipt_id}.json", json.dumps(evidence))
 
         zf.writestr("README.html", _render_readme(name))
 
@@ -375,6 +409,7 @@ def import_bundle(
     key_manifests_by_issuer: dict[str, list[dict[str, Any]]] = {}
     artifact_manifests: dict[str, list[dict[str, Any]]] = {}
     legal_texts: dict[str, bytes] = {}
+    proofs: dict[str, dict[str, Any]] = {}
 
     # One shared budget for the whole call (spec §2.1: the aggregate cap is a
     # running total of decompressed bytes across ALL members read during one
@@ -407,6 +442,11 @@ def import_bundle(
                         "— bundle is corrupt or tampered"
                     )
                 legal_texts[digest] = content
+            elif filename.startswith("proofs/") and filename.endswith(".json"):
+                receipt_id = filename[len("proofs/") : -len(".json")]
+                evidence = _loads(budget.read(zf, filename))
+                if isinstance(evidence, dict):
+                    proofs[receipt_id] = evidence
 
     # Every legal hash referenced by any imported receipt must be present — mirror
     # export's completeness pass so a stripped bundle can't import as if it still
@@ -451,6 +491,7 @@ def import_bundle(
         artifact_manifests=artifact_manifests,
         legal_texts=legal_texts,
         salts=salts,
+        proofs=proofs,
     )
 
 
