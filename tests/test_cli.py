@@ -2404,6 +2404,54 @@ def test_log_anchor_max_cap_rfc3161_token_stays_within_verifier_evidence_ceiling
     assert len(written) <= verify._MAX_TRANSPARENCY_EVIDENCE_LEN
 
 
+def test_log_anchor_refuses_evidence_exceeding_verifier_ceiling(
+    tmp_path: Path, capsys: CapSys
+) -> None:
+    log_dir = _log_init(tmp_path)
+    header = f"{LOG_ORIGIN}\n0\n" + base64.b64encode(bytes(32)).decode("ascii") + "\n"
+    checkpoint = (
+        header
+        + "\n"
+        + "— "
+        + "n" * (tlog._MAX_NOTE_TEXT_LEN - len(header) - 10)
+        + " AA==\n"
+    )
+    assert tlog.parse_checkpoint(checkpoint).origin == LOG_ORIGIN
+
+    evidence_path = tmp_path / "evidence.json"
+    evidence_path.write_text(json.dumps({"checkpoint": checkpoint}), encoding="utf-8")
+    ots_proof_path = tmp_path / "ots-proof.json"
+    ots_proof_path.write_text("{}", encoding="utf-8")
+    max_cap_token = tmp_path / "max-cap-rfc3161.tsr"
+    with max_cap_token.open("wb") as file:
+        file.truncate(cli._MAX_STAGE2_INPUT_BYTES["rfc3161"])
+    out_path = tmp_path / "anchored.json"
+
+    capsys.readouterr()
+    rc = cli.main(
+        [
+            "log",
+            "anchor",
+            "--dir",
+            str(log_dir),
+            "--evidence",
+            str(evidence_path),
+            "--ots-proof",
+            str(ots_proof_path),
+            "--rfc3161-token",
+            str(max_cap_token),
+            "--out",
+            str(out_path),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "verifier's evidence ceiling" in captured.err
+    assert str(verify._MAX_TRANSPARENCY_EVIDENCE_LEN) in captured.err
+    assert not out_path.exists()
+
+
 def test_log_append_rejects_oversized_entry_json_input(tmp_path: Path, capsys: CapSys) -> None:
     log_dir = _log_init(tmp_path)
     oversized = tmp_path / "oversized-entry.json"
