@@ -17,6 +17,7 @@ import { Checkpoint, TlogError, parseCheckpoint } from './tlog.js'
 import {
   ANCHOR_WARN,
   RFC3161_WARNING,
+  codePointLength,
   pyRepr,
   pyTypeName,
   evidenceNotObject,
@@ -162,7 +163,12 @@ function hex64(value: unknown): Uint8Array | null {
 
 /** Decode a bounded, even-length, lowercase-hex op operand, or `null`. */
 function opHex(value: unknown): Uint8Array | null {
-  if (typeof value !== 'string' || value.length > MAX_OP_HEX_LEN || value.length % 2 !== 0 || !HEX_RE.test(value)) {
+  if (
+    typeof value !== 'string' ||
+    codePointLength(value) > MAX_OP_HEX_LEN ||
+    codePointLength(value) % 2 !== 0 ||
+    !HEX_RE.test(value)
+  ) {
     return null
   }
   return hexToBytes(value)
@@ -277,7 +283,7 @@ export function verifyAnchor(evidence: unknown, checkpoint: unknown, policy: unk
     warnings.push(ANCHOR_WARN.EVIDENCE_CHECKPOINT_NOT_STR)
     return fail()
   }
-  if (checkpointText.length > MAX_CHECKPOINT_TEXT_LEN) {
+  if (codePointLength(checkpointText) > MAX_CHECKPOINT_TEXT_LEN) {
     warnings.push(evidenceCheckpointExceeds(MAX_CHECKPOINT_TEXT_LEN))
     return fail()
   }

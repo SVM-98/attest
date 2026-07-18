@@ -15,7 +15,7 @@ import { sha256 } from '@noble/hashes/sha2'
 import { JsonValue, canonicalBytes } from './canon.js'
 import { verifyStrict as verifyEd25519Strict } from './ed25519.js'
 import { verifyStrict as verifyMldsaStrict, ML_DSA_65_PK_LEN, ML_DSA_65_SIG_LEN } from './mldsa.js'
-import { ERR, pyRepr, pyTypeName } from './messages.js'
+import { ERR, codePointLength, isPythonPrintable, pyRepr, pyStage2StringRepr, pyTypeName, sliceCodePoints } from './messages.js'
 
 const HASH_LEN = 32 // SHA-256 digest length in bytes
 const MAX_JCS_INTEGER = 2 ** 53 - 1
@@ -59,16 +59,8 @@ function hasLoneSurrogate(s: string): boolean {
   return false
 }
 
-// Approximates Python's `str.isprintable()` over the tested surface only
-// (ASCII control characters, incl. DEL) — not full Unicode category coverage
-// (Cc/Cf/Cs/Co/Cn/Zl/Zp/Zs-except-space). The C2SP grammar this guards is
-// ASCII-oriented in practice and the Python test suite only exercises \x1f/\x7f.
 function isPrintable(s: string): boolean {
-  for (const ch of s) {
-    const cp = ch.codePointAt(0)!
-    if (cp < 0x20 || cp === 0x7f) return false
-  }
-  return true
+  return isPythonPrintable(s)
 }
 
 export function leafHash(data: Uint8Array): Uint8Array {
@@ -367,8 +359,8 @@ export const MAX_ROOT_B64_LEN_ = MAX_ROOT_B64_LEN
 /** Bound an untrusted string's repr for an error message — slice BEFORE
  * repr so a multi-megabyte hostile field is never fully rendered. */
 function truncRepr(value: string, limit = 80): string {
-  if (value.length <= limit) return pyRepr(value)
-  return pyRepr(value.slice(0, limit)) + '…'
+  if (codePointLength(value) <= limit) return pyStage2StringRepr(value)
+  return pyStage2StringRepr(sliceCodePoints(value, limit)) + '…'
 }
 
 /** A parsed C2SP signed-note transparency-log checkpoint body. `noteBytes`
@@ -440,11 +432,11 @@ function parseTreeSize(sizeStr: string): bigint {
   if (!DECIMAL_RE.test(sizeStr)) {
     throw new TlogError(`tree size must be ASCII decimal digits: ${truncRepr(sizeStr)}`)
   }
-  if (sizeStr.length > 1 && sizeStr.startsWith('0')) {
+  if (codePointLength(sizeStr) > 1 && sizeStr.startsWith('0')) {
     throw new TlogError(`tree size must not contain leading zeros: ${truncRepr(sizeStr)}`)
   }
-  if (sizeStr.length > MAX_TREE_SIZE_DIGITS) {
-    throw new TlogError(`tree size has too many digits (${sizeStr.length}): ${truncRepr(sizeStr)}`)
+  if (codePointLength(sizeStr) > MAX_TREE_SIZE_DIGITS) {
+    throw new TlogError(`tree size has too many digits (${codePointLength(sizeStr)}): ${truncRepr(sizeStr)}`)
   }
   const treeSize = BigInt(sizeStr)
   if (treeSize > MAX_TREE_SIZE) {
@@ -496,7 +488,7 @@ function splitNote(text: unknown): { header: string[]; sigLines: string[] } {
     throw new TlogError(`checkpoint text must be a str, got ${pyTypeName(text)}`)
   }
   if (!text.endsWith('\n')) throw new TlogError('checkpoint text must end with a newline')
-  if (text.length > MAX_NOTE_TEXT_LEN) {
+  if (codePointLength(text) > MAX_NOTE_TEXT_LEN) {
     throw new TlogError(`checkpoint text exceeds ${MAX_NOTE_TEXT_LEN} chars`)
   }
   let newlineCount = 0
@@ -526,7 +518,7 @@ function parseSignatureLines(lines: string[]): Array<[string, Uint8Array]> {
     const name = m[1]!
     const blobB64 = m[2]!
     validateKeyName(name, 'signature key name')
-    if (blobB64.length > MAX_SIG_B64_LEN) {
+    if (codePointLength(blobB64) > MAX_SIG_B64_LEN) {
       throw new TlogError(`signature blob exceeds ${MAX_SIG_B64_LEN} base64 chars`)
     }
     const blob = decodeStdBase64Strict(blobB64)
@@ -542,7 +534,7 @@ function parseCore(text: unknown): { checkpoint: Checkpoint; signatures: Array<[
   const [originRaw, sizeStr, rootB64] = header as [string, string, string]
   const origin = validateOrigin(originRaw)
   const treeSize = parseTreeSize(sizeStr)
-  if (rootB64.length > MAX_ROOT_B64_LEN) {
+  if (codePointLength(rootB64) > MAX_ROOT_B64_LEN) {
     throw new TlogError(`root exceeds ${MAX_ROOT_B64_LEN} base64 chars`)
   }
   const root = decodeStdBase64Strict(rootB64)

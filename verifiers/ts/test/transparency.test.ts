@@ -880,6 +880,23 @@ describe('verify(): Stage 2 integration', () => {
     expect(result.signature).toBe('valid')
   })
 
+  it('counts transparency evidence caps by Unicode code points, not UTF-16 units', () => {
+    const evidence = singleEntryEvidence(RECEIPT_ENTRY, CP_RECEIPT1)
+    const padding = '🎉'.repeat(5_000_000)
+    expect(padding.length).toBe(10_000_000)
+    evidence['padding'] = padding
+    const result = verify(envelopeBytes(envelopeV1()), receiptTrustStore(manifestV1()), null, null, undefined as unknown as number, {
+      transparency: evidence,
+      logKeys: [HK_A],
+      anchorPolicy: noHorizonPolicy(),
+    })
+    expect(result.transparency).toBe(TRANSPARENCY_LOGGED)
+    expect(result.corroboration).toBe(CORROBORATION_LOGGED)
+    expect(result.manifest_freshness).toBe('not_checked')
+    expect(result.warnings).toEqual(['license.drm is drm-bound (design vector 18)'])
+    expect(result.signature).toBe('valid')
+  })
+
   it('accepts evaluator max-scale anchor evidence (harmonization boundary)', () => {
     // The outer materialization cap must COVER what the anchor evaluator's
     // own inner caps accept: 64 OTS proofs of 64 ops with max-size operands
