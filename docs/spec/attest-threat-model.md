@@ -177,7 +177,7 @@ An entry's verdict describes only what `attest-v0.1.md` and `attest-v0.2.md` cur
 
 - **Actor / precondition:** `network attacker` controls delivery carrying the salt, and `buyer` holds no other salt copy.
 - **Impact:** The buyer permanently loses the ability to prove the buyer commitment for that receipt.
-- **Verdict:** Out of scope — v0.1 §4.2, v0.1 §8.1, v0.1 §14.2. `delivery` is optional and unsigned, and neither specification establishes delivery reliability, detects removal, or recovers a salt when it was the `buyer`'s only copy. This is a tracked protocol gap in buyer-binding-secret custody.
+- **Verdict:** Out of scope — v0.1 §4.2, v0.1 §8.1, v0.1 §14.2. `delivery` is optional and unsigned, and neither specification establishes delivery reliability, detects removal, or recovers a salt when it was the `buyer`'s only copy. Custody of buyer binding secrets is a scope boundary of these specifications (§7), not a gap awaiting a mechanism: no protocol can reconstruct a secret that no party retains.
 - **Residual risk:** Removing the salt neither forges nor invalidates the receipt, but it permanently prevents commitment-path binding for that receipt. A missing disclosure leaves `binding: "not_checked"`, which does not affect `ok`.
 
 #### TM-13 — Interception of receipts in delivery
@@ -200,7 +200,7 @@ An entry's verdict describes only what `attest-v0.1.md` and `attest-v0.2.md` cur
 
 - **Actor / precondition:** `network attacker` has access to the `buyer` storage or backups containing the private bundle.
 - **Impact:** Every salt in the file becomes usable for commitment recomputation, and where per-receipt buyer keypairs are stored, the thief can answer binding challenges as the buyer for every affected receipt.
-- **Verdict:** Out of scope — v0.1 §14.1, v0.1 §14.2, v0.1 §8.2. The two-file split reduces accidental sharing but does not protect the private file against theft, detect its theft, or revoke the exposed binding secrets. This is a tracked protocol gap in private-bundle custody.
+- **Verdict:** Out of scope — v0.1 §14.1, v0.1 §14.2, v0.1 §8.2. The two-file split reduces accidental sharing but does not protect the private file against theft, detect its theft, or revoke the exposed binding secrets. Custody of the private bundle is a scope boundary of these specifications (§7), not a gap awaiting a mechanism: v0.1 §8.2 places mandatory key custody outside the specification.
 - **Residual risk:** Theft of a `.private.attest` bundle compromises every salt and buyer private key it contains. The private-file naming, documentation, and access warning requirements do not mitigate that theft; they only support the accidental-sharing case in TM-16.
 
 #### TM-16 — Casual re-sharing of a shareable bundle
@@ -430,7 +430,7 @@ An entry's verdict describes only what `attest-v0.1.md` and `attest-v0.2.md` cur
 
 - **Actor / precondition:** `coercive third party` compels an `issuer` holding valid key material to sign a revocation record or publish a key-compromise marking.
 - **Impact:** A revocable receipt is invalidated with a false signed revocation time, or every receipt using a marked key is invalidated despite no actual compromise.
-- **Verdict:** Out of scope — v0.1 §7.3, v0.1 §12.1, v0.1 §12.2. The specifications authenticate `revoked_at` and key status but do not establish their truthfulness or distinguish coercion from voluntary signing. A signed refund-window time can be backdated inside the key-validity window, policy-class records are honored as signed, and a compelled `compromised` marking invalidates every signature under that key. This is a tracked protocol gap.
+- **Verdict:** Out of scope — v0.1 §7.3, v0.1 §12.1, v0.1 §12.2. The specifications authenticate `revoked_at` and key status but do not establish their truthfulness or distinguish coercion from voluntary signing. A signed refund-window time can be backdated inside the key-validity window, policy-class records are honored as signed, and a compelled `compromised` marking invalidates every signature under that key. Compulsion itself is a scope boundary (§7) — no signature scheme distinguishes a compelled signer from a willing one — but the undetectability of a backdated `revoked_at` is a tracked protocol gap (§6.3): revocation records are not among the two loggable entry types (v0.2 §8, v0.2 §15 item 5), so nothing bounds when such a record actually came into existence.
 - **Residual risk:** TM-41 separately mitigates a matching compelled record against a `revocability: "none"` receipt. It does not protect revocable classes or counter a compelled key-status publication.
 
 ### Group G — Transparency log
@@ -586,8 +586,9 @@ The following are attacks the current specifications genuinely do not stop, as d
 | Artifact-manifest rollback — v0.1 §7.2 requires accepting any issuer-signed manifest for the series, with no monotonicity or recency rule | TM-36 | A normative manifest-currency (monotonicity/recency) rule |
 | Key-manifest rollback — a verifier cannot discover a newer manifest, so an old one keeps a compromised key effective; v0.2 §10.4 freshness proves historical inclusion, never current status | TM-29 | The same manifest-currency rule, plus a status-freshness mechanism |
 | OpenTimestamps pre-anchoring — the anchor commits to `checkpoint.note_bytes` while the signature lines are excluded (v0.2 §9.1, §11.1), so a chosen unsigned note can be pre-anchored and signed later by a holder of both log keys | TM-33 | Anchor coverage extended over the signature, or a normative note about what the anchor does not prove |
+| Unbounded revocation timing — revocation records are not among the two loggable entry types (v0.2 §8, v0.2 §15 item 5), so a `revoked_at` backdated inside the signing key's validity window cannot be contradicted by any evidence the specifications define | TM-47 | Transparency coverage for revocation records, which would bound when a record came into existence |
 
-Three further entries describe themselves in the same words but are gaps of a different kind, and belong to the register in §7 rather than to this table: TM-12 and TM-15 turn on custody of buyer secrets, which v0.1 §8.2 places outside the specification by declaring mandatory key custody out of scope, and TM-47 turns on the truthfulness of a signed statement, which no signature scheme can establish. They await a scope decision, not a mechanism. TM-49's split-view discovery problem is likewise absent from this table because the specifications already declare it normatively and route it to witness federation (§6.2), rather than leaving it implicit.
+Two neighbouring cases deliberately do NOT appear in this table, because naming everything a gap would empty the word of meaning. TM-12 and TM-15 turn on custody of buyer secrets: no protocol can reconstruct a secret no party retains, and v0.1 §8.2 places mandatory key custody outside the specification, so they are scope boundaries recorded in §7. TM-47 appears above only for its timing slice; the compulsion that motivates it is likewise a §7 boundary, since no signature scheme distinguishes a compelled signer from a willing one. TM-49's split-view discovery problem is absent because the specifications already declare it normatively and route it to witness federation (§6.2) rather than leaving it implicit.
 
 ## 7. Out-of-scope register
 
