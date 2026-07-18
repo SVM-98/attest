@@ -375,6 +375,8 @@ describe('verifyAnchor never throws on malformed evidence', () => {
     ['🎉', "'\\U0001f389'"],
     ['\u{2ebf0}', "'\\U0002ebf0'"],
     ['\x7f', "'\\x7f'"],
+    ['a\x01b', "'a\\x01b'"],
+    ['a\x1bb', "'a\\x1bb'"],
   ])('renders Python ascii() exactly in unknown proof-kind and OTS-op warnings (%s)', (value, rendered) => {
     const kindVerdict = verifyAnchor(evidence([{ kind: value }]), checkpoint(), policy())
     expect(kindVerdict.warnings).toEqual([`proof[0]: unknown proof kind ${rendered}, ignored`])
