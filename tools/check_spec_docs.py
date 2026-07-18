@@ -37,7 +37,9 @@ _SUB_HEADING_RE = re.compile(r"^### (\d+\.\d+)\s")
 _TM_HEADING_RE = re.compile(r"^#### TM-(\d+)\b.*$", re.MULTILINE)
 _VERDICT_LINE_RE = re.compile(r"^- \*\*Verdict:\*\*.*$", re.MULTILINE)
 _VERDICT_GRAMMAR_RE = re.compile(r"^- \*\*Verdict:\*\* (Mitigated|Out of scope) — .+$")
-_REF_GROUP_RE = re.compile(r"(v0\.[12]) (§\d+(?:\.\d+)?(?:(?:[,;]\s*|\s+and\s+)§\d+(?:\.\d+)?)*)")
+_REF_GROUP_RE = re.compile(
+    r"(v0\.[12]) (§\d+(?:\.\d+)?(?:(?:[,;]\s*(?:and\s+)?|\s+and\s+)§\d+(?:\.\d+)?)*)"
+)
 _REF_SECTION_RE = re.compile(r"§\d+(?:\.\d+)?")
 _MATRIX_ROW_RE = re.compile(r"^\| (v0\.[12]) §(\d+) — [^|]*\|([^|]*)\|\s*$", re.MULTILINE)
 _MATRIX_TM_REF_RE = re.compile(r"TM-(\d+)")
@@ -46,15 +48,21 @@ _MATRIX_TM_REF_RE = re.compile(r"TM-(\d+)")
 # rather than skipped, or a malformed citation silently covers nothing.
 _MATRIX_TM_TOKEN_RE = re.compile(r"TM\S*")
 _CANONICAL_TM_REF_RE = re.compile(r"TM-\d+")
-# Only v0.1 and v0.2 exist. A reference to any other version is drift, not prose.
-_ANY_SPEC_VERSION_RE = re.compile(r"\bv\d+\.\d+\b")
-_FENCED_BLOCK_RE = re.compile(r"^```.*?^```", re.MULTILINE | re.DOTALL)
+# Only v0.1 and v0.2 exist, so any other version cited AS A SPEC is drift. The
+# lookahead keeps ordinary prose ("TLS v1.3") out of it: without a section sign
+# following, a version token is not a citation and flagging it would fail a
+# legitimate edit.
+_ANY_SPEC_VERSION_RE = re.compile(r"\bv\d+\.\d+(?=\s*§)")
+# CommonMark opens a fence with ``` or ~~~, indented up to three spaces.
+_FENCED_BLOCK_RE = re.compile(r"^ {0,3}(```|~~~).*?^ {0,3}\1", re.MULTILINE | re.DOTALL)
 _PC_ROW_RE = re.compile(r"^\| PC-(\d+) \| ([^|]*) \| ([^|]*) \| ([^|]*) \|\s*$", re.MULTILINE)
 _PC01_PIN_RE = re.compile(r"key set exactly `?\{([^}]*)\}")
 _PC01_REQUIRED_PIN_RE = re.compile(r"`properties\.buyer\.required` equals `?(\[[^`]*\])`?")
 _PC01_PATTERN_PIN_RE = re.compile(
     r"`([^`]+)` and `([^`]+)` are pattern-constrained to (\d+) base64url characters"
 )
+_PC01_PATTERN_FIELDS = {"commitment", "pubkey"}
+_PC01_ENUM_PIN_RE = re.compile(r"`identifier_type` to the\s+enum `?(\[[^`]*\])`?")
 
 
 class TmEntry(NamedTuple):
@@ -281,6 +289,13 @@ def check_schema_pins(pc_rows: list[PcRow], schema: dict[str, object]) -> list[s
             errors.append("PC-01: no base64url pattern-constraint pin found in check detail")
             continue
         first_name, second_name, length_text = pattern_match.groups()
+        # The names come from prose, so a drifted document could name the same
+        # field twice and leave the other unchecked. Require both by name.
+        if {first_name, second_name} != _PC01_PATTERN_FIELDS:
+            errors.append(
+                f"PC-01: pattern pin names {sorted({first_name, second_name})}, "
+                f"expected {sorted(_PC01_PATTERN_FIELDS)}"
+            )
         expected_pattern = rf"^[A-Za-z0-9_-]{{{length_text}}}$"
         for name in (first_name, second_name):
             field = buyer_properties.get(name) if isinstance(buyer_properties, dict) else None
@@ -290,6 +305,21 @@ def check_schema_pins(pc_rows: list[PcRow], schema: dict[str, object]) -> list[s
                     f"PC-01: pinned buyer pattern constraint for {name!r} "
                     f"diverges from schema's actual pattern {actual_pattern!r}"
                 )
+
+        enum_match = _PC01_ENUM_PIN_RE.search(row.detail)
+        if enum_match is None:
+            errors.append("PC-01: no 'identifier_type' enum pin found in check detail")
+            continue
+        pinned_enum = json.loads(enum_match.group(1))
+        identifier_type = (
+            buyer_properties.get("identifier_type") if isinstance(buyer_properties, dict) else None
+        )
+        actual_enum = identifier_type.get("enum") if isinstance(identifier_type, dict) else None
+        if actual_enum != pinned_enum:
+            errors.append(
+                f"PC-01: pinned 'identifier_type' enum {pinned_enum} diverges from "
+                f"schema's actual enum {actual_enum!r}"
+            )
 
     return errors
 
