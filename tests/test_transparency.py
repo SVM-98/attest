@@ -1257,3 +1257,56 @@ def test_verify_caps_oversized_transparency_evidence() -> None:
     assert result.warnings == ("transparency_claim_unresolvable",)
     assert result.signature == "valid"
     assert result.ok is True
+
+
+def test_verify_accepts_evaluator_max_scale_anchor_evidence() -> None:
+    # Harmonization guard (review finding): the outer materialization cap
+    # must COVER what the anchor evaluator's own inner caps accept. 64 OTS
+    # proofs of 64 ops with max-size operands serialize past 4M chars and
+    # must still verify end-to-end — never degrade to
+    # transparency_claim_unresolvable as a false negative.
+    envelope = _receipt_envelope()
+    core_hash = tlog.receipt_core_hash(envelope)
+    entry = {"type": "receipt", "issuer": _RECEIPT_ISSUER, "core_sha256": core_hash}
+    evidence, log_key, _tree_size = _single_entry_evidence(entry, _hybrid_keys())
+
+    note_bytes = tlog.parse_checkpoint(evidence["checkpoint"]).note_bytes
+    header_time = 1700000000
+    header_hash = "3a" * 32
+    operand_hex = "ab" * (anchor._MAX_OP_HEX_LEN // 2)
+    operand = bytes.fromhex(operand_hex)
+    acc = hashlib.sha256(note_bytes).digest()
+    ops: list[list[str]] = []
+    for _ in range(anchor._MAX_OPS_PER_PROOF // 2):
+        ops.append(["append", operand_hex])
+        ops.append(["sha256"])
+        acc = hashlib.sha256(acc + operand).digest()
+    proof = {
+        "kind": "ots",
+        "ops": ops,
+        "header_merkle_root": acc.hex(),
+        "header_time": header_time,
+        "header_hash": header_hash,
+    }
+    evidence["anchors"] = {
+        "checkpoint": evidence["checkpoint"],
+        "proofs": [proof] * anchor._MAX_PROOFS_PER_EVIDENCE,
+    }
+    serialized_len = len(canon.dumps(evidence))
+    assert 2_000_000 < serialized_len <= verify._MAX_TRANSPARENCY_EVIDENCE_LEN
+
+    pinned = anchor.PinnedHeader(header_hash=header_hash, merkle_root=acc.hex(), time=header_time)
+    policy = anchor.AnchorPolicy(pinned_headers={header_hash: pinned}, crqc_horizon=None)
+
+    result = verify.verify(
+        _envelope_bytes(envelope),
+        _receipt_trust_store(_receipt_manifest()),
+        transparency=evidence,
+        log_keys=[log_key],
+        anchor_policy=policy,
+    )
+    assert result.transparency == "anchored_before:2023-11-14T22:13:20Z"
+    assert result.corroboration == transparency.CORROBORATION_LOGGED
+    assert result.warnings == ()
+    assert result.signature == "valid"
+    assert result.ok is True

@@ -90,10 +90,16 @@ _WARN_TRANSPARENCY_CONFIG_MISSING = "transparency_config_missing"
 _WARN_TRANSPARENCY_CLAIM_UNRESOLVABLE = "transparency_claim_unresolvable"
 _WARN_ROTATION_CHAIN_REQUIRED = "corroboration_requires_rotation_chain"
 
-# A signed checkpoint text alone can legitimately approach 500 KiB. Two MiB
-# leaves room for that evidence and its proofs while bounding hostile evidence
-# materialization before the JSON decoder performs a second full traversal.
-_MAX_TRANSPARENCY_EVIDENCE_LEN = 2_000_000
+# This outer cap must COVER everything the downstream evaluators' own inner
+# caps accept, or evaluator-valid evidence gets falsely rejected here.
+# Worst-case legitimate bundle, derived from those inner caps: checkpoint +
+# prior_checkpoint + the anchors bundle's own checkpoint copy at ~500KB each
+# (tlog._MAX_NOTE_TEXT_LEN), plus anchors proofs at 64 proofs x 64 ops x
+# ~2060 chars per max append/prepend op (anchor._MAX_PROOFS_PER_EVIDENCE,
+# _MAX_OPS_PER_PROOF, _MAX_OP_HEX_LEN) ~ 8.5MB, plus inclusion/consistency
+# proofs (~8KB) — ~10MB total. The cap still bounds hostile materialization
+# before the JSON decoder performs a second full traversal.
+_MAX_TRANSPARENCY_EVIDENCE_LEN = 10_000_000
 
 
 @dataclass(frozen=True)
