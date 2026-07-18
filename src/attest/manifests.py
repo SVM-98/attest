@@ -100,18 +100,19 @@ def find_key(manifest: dict[str, Any], kid: str) -> dict[str, Any] | None:
     return None
 
 
-def _sign_manifest(
-    manifest: dict[str, Any],
+def sign_signature_block(
+    payload: bytes,
     signing_kp: keys.SigningKeyPair | pq.HybridSigningKeys,
     signing_kid: str,
 ) -> dict[str, Any]:
-    """Build the `manifest_signature` block for `manifest` (mutates nothing —
-    the caller inserts the returned block).
+    """Build a `{kid, sig, sig_ml_dsa_65?}` signature block over `payload`.
 
-    Hybrid signing keys (`pq.HybridSigningKeys`) add a second `sig_ml_dsa_65`
-    leg over the same signable bytes as the Ed25519 `sig` leg.
+    This is the shared hybrid-signing primitive behind every v0.2 signed
+    side-document (key manifests, artifact manifests, revocation records):
+    hybrid signing keys (`pq.HybridSigningKeys`) add a second `sig_ml_dsa_65`
+    leg over the SAME payload bytes as the Ed25519 `sig` leg, so a single
+    canonical payload always drives both legs identically.
     """
-    payload = _signable(manifest)
     if isinstance(signing_kp, pq.HybridSigningKeys):
         ed_sig = keys.sign(payload, signing_kp.ed)
         mldsa_sig = pq.sign(payload, signing_kp.mldsa)
@@ -124,13 +125,28 @@ def _sign_manifest(
     return {"kid": signing_kid, "sig": keys.b64u(sig)}
 
 
-def _verify_signature_block(
+def _sign_manifest(
+    manifest: dict[str, Any],
+    signing_kp: keys.SigningKeyPair | pq.HybridSigningKeys,
+    signing_kid: str,
+) -> dict[str, Any]:
+    """Build the `manifest_signature` block for `manifest` (mutates nothing —
+    the caller inserts the returned block). See `sign_signature_block`.
+    """
+    return sign_signature_block(_signable(manifest), signing_kp, signing_kid)
+
+
+def verify_signature_block(
     payload: bytes, sig_block: dict[str, Any], entry: dict[str, Any]
 ) -> bool:
     """AND rule: `entry` hybrid (carries `pub_ml_dsa_65`) requires BOTH legs
     present and valid; non-hybrid requires the Ed25519 leg valid and
     `sig_ml_dsa_65` ABSENT. Any other combination fails closed. Never raises —
     decode/type errors on untrusted input are treated as verification failure.
+
+    Shared by every v0.2 signed side-document's verification (key manifests,
+    artifact manifests, revocation records) — the single place the AND rule
+    is enforced, so it cannot drift between documents.
     """
     is_hybrid_entry = "pub_ml_dsa_65" in entry
     has_mldsa_leg = "sig_ml_dsa_65" in sig_block
@@ -180,7 +196,7 @@ def verify_key_manifest(manifest: dict[str, Any]) -> bool:
     entry = find_key(manifest, sig_block.get("kid", ""))
     if entry is None:
         return False
-    return _verify_signature_block(_signable(manifest), sig_block, entry)
+    return verify_signature_block(_signable(manifest), sig_block, entry)
 
 
 def check_continuity(trusted: dict[str, Any], candidate: dict[str, Any]) -> bool:
@@ -214,7 +230,7 @@ def check_continuity(trusted: dict[str, Any], candidate: dict[str, Any]) -> bool
     # candidate lists for it. Otherwise an attacker reuses a trusted kid, swaps in
     # its own pub, self-signs, and passes — continuity becomes cryptographically
     # hollow (2026-07-13 review, finding 1).
-    return _verify_signature_block(
+    return verify_signature_block(
         _signable(candidate), candidate["manifest_signature"], signer_entry
     )
 
@@ -303,9 +319,15 @@ def build_artifact_manifest(
     version: int,
     released_at: str,
     artifacts: list[dict[str, Any]],
-    signing_kp: keys.SigningKeyPair,
+    signing_kp: keys.SigningKeyPair | pq.HybridSigningKeys,
     signing_kid: str,
 ) -> dict[str, Any]:
+    """Build and sign an artifact manifest. `signing_kp` mirrors
+    `build_key_manifest`: an `pq.HybridSigningKeys` produces a
+    `manifest_signature` with both the Ed25519 `sig` leg and the
+    `sig_ml_dsa_65` leg (see `sign_signature_block`); a plain
+    `keys.SigningKeyPair` keeps the v0.1 Ed25519-only shape unchanged.
+    """
     manifest: dict[str, Any] = {
         "issuer": issuer,
         "series": series,
@@ -313,14 +335,22 @@ def build_artifact_manifest(
         "released_at": released_at,
         "artifacts": artifacts,
     }
-    sig = keys.sign(_signable(manifest), signing_kp)
-    manifest["manifest_signature"] = {"kid": signing_kid, "sig": keys.b64u(sig)}
+    manifest["manifest_signature"] = sign_signature_block(
+        _signable(manifest), signing_kp, signing_kid
+    )
     return manifest
 
 
 def verify_artifact_manifest(manifest: dict[str, Any], key_manifest: dict[str, Any]) -> bool:
     """Verify against `key_manifest`: signer must be `active` there, with `released_at`
     covered by the signer key's `[valid_from, valid_to]` window, and issuers must match.
+
+    AND rule (v0.2, mirrors `verify_key_manifest`): if the signer's `key_manifest`
+    entry is hybrid (carries `pub_ml_dsa_65`), `manifest_signature` MUST also
+    carry a valid `sig_ml_dsa_65` leg over the same signed bytes, or verification
+    fails closed; an Ed25519-only entry with a stray `sig_ml_dsa_65` leg likewise
+    fails closed (see `verify_signature_block`). Ed25519-only signers keep v0.1
+    behavior byte-for-byte.
 
     Defense-in-depth: the `key_manifest` must itself be self-consistent
     (`verify_key_manifest`) so an attacker-fabricated key manifest paired with a
@@ -346,9 +376,7 @@ def verify_artifact_manifest(manifest: dict[str, Any], key_manifest: dict[str, A
         valid_to = entry.get("valid_to")
         if valid_to is not None and released_at > _parse_date(valid_to):
             return False
-        return keys.verify_strict(
-            _signable(manifest), keys.b64u_decode(sig_block["sig"]), keys.b64u_decode(entry["pub"])
-        )
+        return verify_signature_block(_signable(manifest), sig_block, entry)
     except (KeyError, ValueError, TypeError):
         # Fail closed on wrong-typed fields (e.g. non-str released_at -> TypeError).
         return False
