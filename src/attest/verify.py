@@ -23,6 +23,7 @@ at their safe stub values (`revocation: "unknown"`, `binding:
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
@@ -88,6 +89,11 @@ _CLAIM_TYPE_KEY_MANIFEST = "key-manifest"
 _WARN_TRANSPARENCY_CONFIG_MISSING = "transparency_config_missing"
 _WARN_TRANSPARENCY_CLAIM_UNRESOLVABLE = "transparency_claim_unresolvable"
 _WARN_ROTATION_CHAIN_REQUIRED = "corroboration_requires_rotation_chain"
+
+# A signed checkpoint text alone can legitimately approach 500 KiB. Two MiB
+# leaves room for that evidence and its proofs while bounding hostile evidence
+# materialization before the JSON decoder performs a second full traversal.
+_MAX_TRANSPARENCY_EVIDENCE_LEN = 2_000_000
 
 
 @dataclass(frozen=True)
@@ -406,52 +412,62 @@ def _evaluate_transparency_claim(
     transparency_module._validate_policy(anchor_policy)
 
     try:
+        # This is verify()'s untrusted-evidence boundary. Canonicalize and
+        # parse once so every following phase sees one ordinary JSON object,
+        # never a stateful mapping/value supplied by the caller. The size cap
+        # prevents decoding an arbitrarily large serialized evidence bundle.
+        serialized_evidence = canon.dumps(transparency_evidence)
+        if len(serialized_evidence) > _MAX_TRANSPARENCY_EVIDENCE_LEN:
+            raise ValueError("transparency evidence exceeds materialization limit")
+        materialized_evidence = json.loads(serialized_evidence)
+        if not isinstance(materialized_evidence, dict):
+            raise ValueError("transparency evidence is not an object")
+
         claim_type, expected_entry, tree_size = _resolve_transparency_claim(
-            transparency_evidence, envelope, receipt_issuer_id, issuer_manifest
+            materialized_evidence, envelope, receipt_issuer_id, issuer_manifest
         )
+        if expected_entry is None:
+            warnings.append(_WARN_TRANSPARENCY_CLAIM_UNRESOLVABLE)
+            return _TRANSPARENCY_NOT_CHECKED, _CORROBORATION_NONE, _MANIFEST_FRESHNESS_NOT_CHECKED
+
+        result = transparency_module.evaluate_transparency(
+            materialized_evidence,
+            log_keys=log_keys,
+            expected_origin=origin,
+            policy=anchor_policy,
+            expected_entry=expected_entry,
+        )
+        warnings.extend(result.warnings)
+
+        transparency_state = result.transparency
+        corroboration_state = result.corroboration
+        manifest_freshness_state = _MANIFEST_FRESHNESS_NOT_CHECKED
+
+        reached_logged_or_better = transparency_state not in (
+            transparency_module.TRANSPARENCY_NOT_CHECKED,
+            transparency_module.TRANSPARENCY_EQUIVOCATION_DETECTED,
+        )
+        if claim_type == _CLAIM_TYPE_KEY_MANIFEST and reached_logged_or_better:
+            if tree_size is not None:
+                manifest_freshness_state = f"verified_as_of:{tree_size}"
+            manifest_version = issuer_manifest.get("manifest_version") if issuer_manifest else None
+            if (
+                isinstance(manifest_version, int)
+                and not isinstance(manifest_version, bool)
+                and manifest_version > 1
+                and not rotation_chain_ok
+            ):
+                corroboration_state = _CORROBORATION_NONE
+                warnings.append(_WARN_ROTATION_CHAIN_REQUIRED)
+
+        return transparency_state, corroboration_state, manifest_freshness_state
+    # This intentionally encloses every untrusted claim phase above, including
+    # post-evaluation freshness/rotation logic. It confines hostile mapping
+    # access and equality implementations; never catch BaseException so
+    # interrupts and process-control exceptions still propagate.
     except Exception:
-        # Confinement of hostile evidence field access (hostile __getitem__/
-        # get/__eq__ implementations), never a bare leak — mirrors
-        # evaluate_transparency's own top-level boundary in transparency.py.
-        # Never BaseException: interrupts/process-control still propagate.
         warnings.append(_WARN_TRANSPARENCY_CLAIM_UNRESOLVABLE)
         return _TRANSPARENCY_NOT_CHECKED, _CORROBORATION_NONE, _MANIFEST_FRESHNESS_NOT_CHECKED
-
-    if expected_entry is None:
-        warnings.append(_WARN_TRANSPARENCY_CLAIM_UNRESOLVABLE)
-        return _TRANSPARENCY_NOT_CHECKED, _CORROBORATION_NONE, _MANIFEST_FRESHNESS_NOT_CHECKED
-
-    result = transparency_module.evaluate_transparency(
-        transparency_evidence,
-        log_keys=log_keys,
-        expected_origin=origin,
-        policy=anchor_policy,
-        expected_entry=expected_entry,
-    )
-    warnings.extend(result.warnings)
-
-    transparency_state = result.transparency
-    corroboration_state = result.corroboration
-    manifest_freshness_state = _MANIFEST_FRESHNESS_NOT_CHECKED
-
-    reached_logged_or_better = transparency_state not in (
-        transparency_module.TRANSPARENCY_NOT_CHECKED,
-        transparency_module.TRANSPARENCY_EQUIVOCATION_DETECTED,
-    )
-    if claim_type == _CLAIM_TYPE_KEY_MANIFEST and reached_logged_or_better:
-        if tree_size is not None:
-            manifest_freshness_state = f"verified_as_of:{tree_size}"
-        manifest_version = issuer_manifest.get("manifest_version") if issuer_manifest else None
-        if (
-            isinstance(manifest_version, int)
-            and not isinstance(manifest_version, bool)
-            and manifest_version > 1
-            and not rotation_chain_ok
-        ):
-            corroboration_state = _CORROBORATION_NONE
-            warnings.append(_WARN_ROTATION_CHAIN_REQUIRED)
-
-    return transparency_state, corroboration_state, manifest_freshness_state
 
 
 def _parse_iso(value: object) -> datetime | None:
