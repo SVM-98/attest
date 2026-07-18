@@ -1,0 +1,16 @@
+theory attest
+begin
+
+builtins: signing
+
+/* Fresh-key registration, minimal, just to make the toolchain sanity trace runnable. */
+rule Register_Key:
+    [ Fr(~sk) ]
+  --[ KeyRegistered($A, pk(~sk)) ]->
+    [ !Ltk($A, ~sk), !Pk($A, pk(~sk)), Out(pk(~sk)) ]
+
+lemma sanity_toolchain:
+  exists-trace
+  "Ex A key #i. KeyRegistered(A, key) @ #i"
+
+end
