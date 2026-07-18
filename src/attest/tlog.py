@@ -434,8 +434,8 @@ def receipt_core_hash(envelope: dict[str, Any]) -> str:
 
 # C2SP signed-note signature line: em dash U+2014, one space, name, one
 # space, standard base64 (with padding) of the signature blob. Name grammar
-# is checked separately so its C2SP Unicode-space/control-character rules are
-# shared by parsing, verification, and signing.
+# is checked separately so its C2SP printable-ASCII rules are shared by
+# parsing, verification, and signing.
 _SIG_LINE_RE = re.compile(r"\A— ([^ ]+) ([A-Za-z0-9+/]+={0,2})\Z")
 # Strict ASCII decimal only: `str.isdigit()` also accepts non-decimal
 # Unicode digit-value characters (e.g. superscript "²") that `int()` then
@@ -477,12 +477,12 @@ _MAX_ROOT_B64_LEN = 44
 
 
 def _trunc_repr(value: str, limit: int = 80) -> str:
-    """Bound an untrusted string's repr for an error message — slice BEFORE
-    repr so a multi-megabyte hostile field is never fully rendered (repr of
-    control characters amplifies ~4x per byte)."""
+    """Bound an untrusted string's ASCII repr for an error message — slice
+    BEFORE rendering so a multi-megabyte hostile field is never fully
+    rendered (escaped controls and non-ASCII code points amplify output)."""
     if len(value) <= limit:
-        return repr(value)
-    return repr(value[:limit]) + "…"
+        return ascii(value)
+    return ascii(value[:limit]) + "…"
 
 
 @dataclass(frozen=True)
@@ -520,30 +520,30 @@ def _key_hash(name: str, signature_type: bytes, pub: bytes) -> bytes:
 
 
 def _validate_origin(origin: object, field: str = "origin") -> str:
-    """Require the one-line, printable origin used in a checkpoint header."""
-    if not isinstance(origin, str) or not origin or not origin.isprintable():
-        raise TlogError(f"{field} must be a non-empty printable str")
-    try:
-        origin.encode()
-    except UnicodeEncodeError as exc:
-        raise TlogError(f"{field} must be valid UTF-8") from exc
+    """Require a non-empty printable-ASCII checkpoint origin.
+
+    C2SP origins are schema-less-URL-style ASCII in practice. Keeping this
+    grammar ASCII-only also makes acceptance independent of the host
+    runtime's Unicode database.
+    """
+    if (
+        not isinstance(origin, str)
+        or not origin
+        or any(not "\x20" <= character <= "\x7e" for character in origin)
+    ):
+        raise TlogError(f"{field} must be a non-empty printable ASCII str")
     return origin
 
 
 def _validate_key_name(name: object, field: str = "name") -> str:
-    """Require the C2SP signed-note key-name grammar."""
+    """Require a non-empty printable-ASCII C2SP signed-note key name."""
     if (
         not isinstance(name, str)
         or not name
         or "+" in name
-        or any(character.isspace() for character in name)
-        or not name.isprintable()
+        or any(not "\x21" <= character <= "\x7e" for character in name)
     ):
-        raise TlogError(f"{field} must be non-empty and contain no spaces, '+' or controls")
-    try:
-        name.encode()
-    except UnicodeEncodeError as exc:
-        raise TlogError(f"{field} must be valid UTF-8") from exc
+        raise TlogError(f"{field} must be non-empty printable ASCII without '+'")
     return name
 
 

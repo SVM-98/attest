@@ -398,6 +398,30 @@ def test_verify_anchor_unknown_kind_is_ignored_not_fatal() -> None:
     assert "proof[0]: unknown proof kind 'future-kind', ignored" in verdict.warnings
 
 
+@pytest.mark.parametrize(
+    ("value", "rendered"),
+    [
+        ("a'b", '"a\'b"'),
+        ('a"b', "'a\"b'"),
+        ("a'\"b", "'a\\'\"b'"),
+        ("a\nb", r"'a\nb'"),
+        ("a\\b", r"'a\\b'"),
+        ("\u200b", r"'\u200b'"),
+        ("🎉", r"'\U0001f389'"),
+        ("\U0002EBF0", r"'\U0002ebf0'"),
+        ("\x7f", r"'\x7f'"),
+    ],
+)
+def test_verify_anchor_warning_renderer_matches_python_ascii(value: str, rendered: str) -> None:
+    kind_verdict = anchor.verify_anchor(_evidence([{"kind": value}]), _checkpoint(), _policy())
+    assert kind_verdict.warnings == [f"proof[0]: unknown proof kind {rendered}, ignored"]
+
+    op_verdict = anchor.verify_anchor(
+        _evidence([_ots_proof(ops=[[value]])]), _checkpoint(), _policy()
+    )
+    assert op_verdict.warnings == [f"proof[0]: unknown ots op {rendered}"]
+
+
 @pytest.mark.parametrize("hostile_kind", [10**5000, "x" * 100_000], ids=["huge-int", "huge-string"])
 def test_verify_anchor_safely_renders_hostile_unknown_kind(hostile_kind: object) -> None:
     verdict = anchor.verify_anchor(_evidence([{"kind": hostile_kind}]), _checkpoint(), _policy())

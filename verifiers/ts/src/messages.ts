@@ -1,6 +1,6 @@
 // Verbatim error/warning strings. Conformance vectors substring-match these,
 // so DO NOT paraphrase. `pyRepr` is the retained, deliberately limited v0.1
-// renderer. Stage 2 warning paths that mirror Python's repr use
+// renderer. Stage 2 warning paths that mirror Python's ascii() use
 // `pyStage2StringRepr` below instead.
 
 export function pyRepr(x: unknown): string {
@@ -9,17 +9,6 @@ export function pyRepr(x: unknown): string {
   if (typeof x === 'boolean') return x ? 'True' : 'False'
   if (Array.isArray(x)) return `[${x.map(pyRepr).join(', ')}]`
   return String(x)
-}
-
-const PYTHON_NON_PRINTABLE_RE = /[\p{C}\p{Z}]/u
-
-/** Python `str.isprintable()` for a JS string: Unicode C and Z categories
- * are non-printable, except that ordinary ASCII space is printable. */
-export function isPythonPrintable(s: string): boolean {
-  for (const ch of s) {
-    if (ch !== ' ' && PYTHON_NON_PRINTABLE_RE.test(ch)) return false
-  }
-  return true
 }
 
 /** Count Unicode code points, matching Python's `len(str)`, rather than JS
@@ -44,7 +33,7 @@ export function sliceCodePoints(s: string, limit: number): string {
   return result
 }
 
-/** Faithful Python `repr(str)` for the bounded Stage-2 warning/error paths.
+/** Faithful Python `ascii(str)` for the bounded Stage-2 warning/error paths.
  * It intentionally does not replace the legacy v0.1 `pyRepr` helper above. */
 export function pyStage2StringRepr(value: string): string {
   const quote = value.includes("'") && !value.includes('"') ? '"' : "'"
@@ -56,7 +45,7 @@ export function pyStage2StringRepr(value: string): string {
     else if (ch === '\r') out += '\\r'
     else if (ch === '\t') out += '\\t'
     else if (ch === quote) out += `\\${quote}`
-    else if (isPythonPrintable(ch)) out += ch
+    else if (cp < 0x7f) out += ch
     else if (cp < 0x100) out += `\\x${cp.toString(16).padStart(2, '0')}`
     else if (cp <= 0xffff) out += `\\u${cp.toString(16).padStart(4, '0')}`
     else out += `\\U${cp.toString(16).padStart(8, '0')}`

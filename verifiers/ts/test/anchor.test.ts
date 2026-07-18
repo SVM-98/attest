@@ -371,9 +371,11 @@ describe('verifyAnchor never throws on malformed evidence', () => {
     [`a'"b`, "'a\\'\"b'"],
     ['a\nb', "'a\\nb'"],
     ['a\\b', "'a\\\\b'"],
-    ['a\u200bb', "'a\\u200bb'"],
-    ['🎉', "'🎉'"],
-  ])('renders Python repr exactly in unknown proof-kind and OTS-op warnings (%s)', (value, rendered) => {
+    ['\u200b', "'\\u200b'"],
+    ['🎉', "'\\U0001f389'"],
+    ['\u{2ebf0}', "'\\U0002ebf0'"],
+    ['\x7f', "'\\x7f'"],
+  ])('renders Python ascii() exactly in unknown proof-kind and OTS-op warnings (%s)', (value, rendered) => {
     const kindVerdict = verifyAnchor(evidence([{ kind: value }]), checkpoint(), policy())
     expect(kindVerdict.warnings).toEqual([`proof[0]: unknown proof kind ${rendered}, ignored`])
 
@@ -381,10 +383,12 @@ describe('verifyAnchor never throws on malformed evidence', () => {
     expect(opVerdict.warnings).toEqual([`proof[0]: unknown ots op ${rendered}`])
   })
 
-  it('slices unknown proof-kind strings by code point before Python repr', () => {
+  it('slices unknown proof-kind strings by code point before Python ascii()', () => {
     const kind = '🎉'.repeat(60) + 'tail'
     const verdict = verifyAnchor(evidence([{ kind }]), checkpoint(), policy())
-    expect(verdict.warnings).toEqual([`proof[0]: unknown proof kind '${'🎉'.repeat(56)}..., ignored`])
+    expect(verdict.warnings).toEqual([
+      `proof[0]: unknown proof kind '${'\\U0001f389'.repeat(5)}\\U0001..., ignored`,
+    ])
   })
 
   it.each([[10n ** 5000n, 'huge-bigint'], ['x'.repeat(100_000), 'huge-string']])(

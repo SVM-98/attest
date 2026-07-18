@@ -124,18 +124,18 @@ class AnchorVerdict:
 def _trunc(value: object, limit: int = 60) -> str:
     """Safely render an untrusted value for a bounded warning message.
 
-    Never call ``repr`` on arbitrary evidence values: rendering a hostile
+    Never call ``ascii`` on arbitrary evidence values: rendering a hostile
     integer or a user-defined object can itself raise or allocate an
     unbounded temporary. Strings are sliced *before* rendering; only small
     integers and the two scalar singletons are rendered directly.
     """
     if type(value) is str:
-        text = repr(value[:limit])
+        text = ascii(value[:limit])
         return text if len(text) <= limit else text[: limit - 3] + "..."
     if value is None or type(value) is bool:
-        return repr(value)
+        return ascii(value)
     if type(value) is int and value.bit_length() <= 256:
-        return repr(value)
+        return ascii(value)
     type_name = type(value).__name__
     return f"<{type_name[: limit - 2]}>"
 
