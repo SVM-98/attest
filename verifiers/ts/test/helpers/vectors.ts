@@ -7,8 +7,10 @@ import { join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { b64uDecode } from '../../src/b64u.js'
 import { loadsStrict } from '../../src/canon.js'
-import type { JsonObject } from '../../src/canon.js'
+import type { JsonObject, JsonValue } from '../../src/canon.js'
 import type { Disclosure } from '../../src/index.js'
+import type { LogKey } from '../../src/tlog.js'
+import type { AnchorPolicy, PinnedHeader } from '../../src/anchor.js'
 
 const HERE = fileURLToPath(new URL('.', import.meta.url))
 export const VECTORS_ROOT = join(HERE, '..', '..', '..', '..', 'docs', 'spec', 'vectors')
@@ -60,3 +62,42 @@ export function disclosure(dir: string): Disclosure | null {
   return { challenge: [b64uDecode(d.nonce_b64u), b64uDecode(d.sig_b64u)] }
 }
 export const expected = (dir: string) => loadJson(join(dir, 'expected.json'))
+
+// group 28 (transparency/corroboration conformance corpus) only — see
+// tools/gen_vectors.py's gen_28_transparency docstring for the on-disk shape.
+export function transparencyEvidence(dir: string): JsonValue | null {
+  const p = join(dir, 'transparency.json')
+  // Routed through loadJsonStrict (not plain JSON.parse), same reasoning as
+  // manifests.json/revocation.json above: verify()'s transparency claim
+  // resolution re-canonicalizes this evidence via canonicalBytes(), which
+  // only accepts bigint for JSON integers (leaf_index/tree_size).
+  return existsSync(p) ? loadJsonStrict(p) : null
+}
+export function logKeys(dir: string): LogKey[] | null {
+  const p = join(dir, 'log-keys.json')
+  if (!existsSync(p)) return null
+  const entries = loadJson(p) as Array<{
+    origin: string; name: string; ed25519_pub_b64u: string; mldsa_pub_b64u: string
+  }>
+  return entries.map((entry) => ({
+    origin: entry.origin,
+    name: entry.name,
+    ed25519Pub: b64uDecode(entry.ed25519_pub_b64u),
+    mldsaPub: b64uDecode(entry.mldsa_pub_b64u),
+  }))
+}
+export function anchorPolicy(dir: string): AnchorPolicy | null {
+  const p = join(dir, 'anchor-policy.json')
+  if (!existsSync(p)) return null
+  const data = loadJson(p) as {
+    pinned_headers: Record<string, { header_hash: string; merkle_root: string; time: number }>
+    crqc_horizon: number | null
+  }
+  const pinnedHeaders: Record<string, PinnedHeader> = {}
+  for (const [headerHash, header] of Object.entries(data.pinned_headers)) {
+    pinnedHeaders[headerHash] = {
+      headerHash: header.header_hash, merkleRoot: header.merkle_root, time: header.time,
+    }
+  }
+  return { pinnedHeaders, crqcHorizon: data.crqc_horizon }
+}

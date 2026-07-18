@@ -16,6 +16,7 @@ Each leaf directory contains:
 - optional `revocation.json` — a single issuer-signed revocation record, fed to the verifier as its revocation view, for vectors that check §6 step 6.
 - optional `manifest_pristine.json` — only for vector 11: the untampered, self-consistent manifest, alongside the tampered one actually used for verification.
 - optional `canonical.json` — the exact canonical serialization bytes of the leaf's payload. A conforming implementation MUST reproduce these bytes exactly when canonicalizing the parsed payload. Present on vectors 21f/21g (supplementary-plane encodings) and 24.
+- optional `transparency.json` / `log-keys.json` / `anchor-policy.json` — group 28 only: the untrusted transparency/corroboration evidence bundle, the verifier's pinned transparency-log signing identities, and its pinned Bitcoin block headers + CRQC horizon, fed to the verifier as `transparency`/`log_keys`/`anchor_policy`. Only group 28's `expected.json` carries the corresponding `transparency`/`corroboration`/`manifest_freshness` result fields.
 
 ## Vector index
 
@@ -87,6 +88,33 @@ Checked against [`docs/spec/attest-v0.2.md`](../attest-v0.2.md), the additive de
 | 26f | `f-kid-mismatch-between-legs` | The two signature entries carry different `kid` values — rejected (the hybrid pair must be one signer). |
 | 26g | `g-key-entry-not-hybrid` | The resolved manifest key entry has no `pub_ml_dsa_65` — rejected, nothing to verify the PQ leg against. |
 | 26h | `h-manifest-downgraded-continuity` | A rotation candidate manifest signed by a hybrid key but whose `manifest_signature` was downgraded to Ed25519-only — the receipt's own signature still verifies, but the manifest fails its own hybrid AND-check, so the rotation chain is discontinuous: `trust: "unverified_rotation"`. |
+
+### 27: `valid_to` omitted (attest v0.2)
+
+| Leaf | Name | Checks |
+| --- | --- | --- |
+| 27 | `valid-to-absent` | A key manifest entry with the `valid_to` field omitted entirely (not `null`) still self-verifies and resolves an open-ended key — the JSON-shape divergence (absent vs. explicit `null`) must not affect verification. |
+
+### 28: transparency/corroboration layer (attest v0.2, design doc "transparency/corroboration layer")
+
+The cross-core corpus for `verify()`'s Stage 2 `transparency`/`corroboration`/`manifest_freshness` result components, exercising `tlog`/`anchor`/`transparency` end to end. Every leaf's `expected.json` additionally carries `transparency`, `corroboration`, and `manifest_freshness` — the ONLY group where these three appear; every other leaf's absence of these files/fields means `verify()` saw `transparency=None`/`log_keys=None`/`anchor_policy=None` (zero behavior change, Task-8-and-earlier defaults). New per-leaf input files (loaded when present, absent everywhere else): `transparency.json` (the untrusted evidence bundle), `log-keys.json` (the verifier's pinned transparency-log signing identities), `anchor-policy.json` (pinned Bitcoin block headers + optional CRQC horizon).
+
+| Leaf | Name | Checks |
+| --- | --- | --- |
+| 28a | `a-logged-trust-unchanged` | The baseline: a receipt genuinely logged (hybrid-signed checkpoint, valid inclusion proof) — `transparency: "logged"`, `corroboration: "logged"`, `trust` untouched. |
+| 28b | `b-wrong-root` | A validly hybrid-signed checkpoint, but for a Merkle root that does not actually contain this entry — inclusion proof fails, `transparency: "not_checked"`. |
+| 28c | `c-ed-only-checkpoint` | A checkpoint carrying only the Ed25519 signature line, no ML-DSA-65 leg — checkpoint auth is hybrid, MANDATORY (design doc), so a genuine Ed25519-only signature grants no standing at all. |
+| 28d | `d-origin-mismatch-log-key` | A genuinely hybrid-signed checkpoint by the pinned log key material, but claiming a different `origin` than the one pinned in `log-keys.json` — no candidate verifies. |
+| 28e | `e-consistency-ok` | A two-leaf tree with a verifying prior checkpoint (smaller tree) and a genuine consistency proof against the current checkpoint — still just `"logged"` (consistency rules out equivocation, it does not upgrade standing on its own). |
+| 28f | `f-equivocation-detected` | A validly hybrid-signed prior checkpoint claiming the SAME tree size as the current checkpoint but a DIFFERENT root — proof the log signed two incompatible histories: `transparency: "equivocation_detected"` (a hard verdict, not fail-safe degradation). |
+| 28g | `g-entry-hash-mismatch` | The evidence's `entry` disagrees with the hash `verify()` independently computes from the actual receipt — `transparency_entry_mismatch`, regardless of an otherwise-valid checkpoint/proof. |
+| 28h | `h-rotation-chain-omitted` | A self-consistent `manifest_version: 2` issuer manifest, logged as a key-manifest claim, but the trust store holds no rotation chain for the issuer at all — `corroboration` is downgraded to `"none"` with `corroboration_requires_rotation_chain`, even though `transparency` (`"logged"`) and `manifest_freshness` (`"verified_as_of:1"`) are unaffected. |
+| 28i | `i-compromised-key-fail-closed` | A receipt rejected outright for a compromised signing key (`signature: "invalid"`, `ok: false`) still reports `transparency: "logged"`/`corroboration: "logged"` for its own genuinely-logged evidence — proving corroboration can never rescue an otherwise-invalid receipt (design fix 6; transparency is resolved before the pass/fail verdict). |
+| 28j | `j-ots-anchor` | A PQ-surviving `ots` proof replaying from `SHA-256(checkpoint.note_bytes)` to a pinned Bitcoin block header — `transparency` upgrades to `anchored_before:2023-11-14T22:13:20Z` (header time `1700000000`, `transparency.py`'s own documented KAT). |
+| 28k | `k-rfc3161-only` | An `rfc3161`-only anchor proof — opaque classical corroboration only, never sets `pq_surviving`, so `transparency` stays `"logged"` (no PQ/post-horizon standing); the verbatim RFC 3161 warning is asserted. **Adapted**: no leaf here sets `anchor-policy.json`'s `crqc_horizon` — an rfc3161-only proof never reaches `anchor.passes_horizon` regardless of horizon configuration, so a horizon value would add configuration, not test coverage. |
+| 28l | `l-payload-only-precommit` | The evidence entry's `core_sha256` is hashed over the payload ALONE (no domain separation, no signature commitment) — exactly the "pre-sign, log now, sign later" attack `receipt_core_hash`'s domain separation defeats. Same observable outcome as 28g (`transparency_entry_mismatch`), different attacker narrative: this is specifically the hash an attacker could compute before the receipt was ever signed. |
+| 28m | `m-hybrid-revocation-and-rule` | **Adapted** from the original "post-horizon ed-only revocation" framing: `verify.py`'s revocation classification has no `crqc_horizon`-shaped parameter at all (revocation and the transparency/anchor horizon cap are separate subsystems), so that framing cannot be expressed through any `verify()` input. Pins the mechanism that would have to exist for it to hold instead: an Ed25519-only-signed revocation record against a HYBRID (`pub_ml_dsa_65`-carrying) issuer key is unconditionally rejected/ignored (the Task 6/8 sibling-hybrid AND rule, fail-closed) — `revocation: "unknown"`, the record ignored with a warning, `ok: true`. |
+| 28n | `n-unknown-entry-type` | An evidence `entry` whose `type` the log's closed schema doesn't recognize — the claim is unresolvable before any checkpoint/proof is even consulted (`transparency_claim_unresolvable`); the receipt itself verifies untouched (`ok: true`). |
 
 ## Regeneration
 
