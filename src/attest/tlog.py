@@ -379,6 +379,55 @@ def encode_entry(entry: dict[str, Any]) -> bytes:
     return canon.dumps(entry).encode("utf-8")
 
 
+# Domain-separated signed-receipt-core hash prefix (design doc fix 4) — the
+# ONLY receipt-entry hash domain; see `receipt_core_hash`.
+_RECEIPT_CORE_DOMAIN = b"attest-receipt-core-v1\x00"
+
+
+def receipt_core_hash(envelope: dict[str, Any]) -> str:
+    """Domain-separated signed-receipt-core hash (design doc fix 4) — the
+    ONLY receipt-entry hash domain: `SHA-256("attest-receipt-core-v1\\x00" ||
+    JCS(payload) || 0x00 || JCS(signatures))`, where `signatures` is
+    `envelope["signatures"]` canonicalized as a JSON array. `delivery` is
+    deliberately excluded — deleting it never invalidates a receipt's log
+    entry.
+
+    Committing to the SIGNATURE BYTES (not just `payload`) is deliberate,
+    not redundant: post-CRQC, an attacker who has derived an issuer's
+    Ed25519 private key from its public key can sign a backdated payload
+    at will. A hash over `payload` alone would let a pre-committed log
+    entry describe a payload that was never actually signed until long
+    after it was logged — the attacker signs it later, past the horizon,
+    and the old entry still "matches" the forged receipt. Hashing the
+    signature bytes too means the entry can only ever describe a signature
+    that already existed at logging time (design vector 28l's property: an
+    unsigned payload-only precommit is NOT accepted as receipt existence
+    proof).
+
+    `envelope` must carry object member `payload` and array member
+    `signatures` — the same shape `verify()` step 0 already parses. Raises
+    `TlogError` if either is missing or wrong-shaped: this is trusted-input
+    builder-side surface, like this module's other construction functions
+    (`build_tree`, `inclusion_proof`, ...), not a fail-closed boundary over
+    untrusted data.
+    """
+    if not isinstance(envelope, dict):
+        raise TlogError(f"envelope must be an object, got {type(envelope).__name__}")
+    payload = envelope.get("payload")
+    if not isinstance(payload, dict):
+        raise TlogError("envelope missing object member 'payload'")
+    signatures = envelope.get("signatures")
+    if not isinstance(signatures, list):
+        raise TlogError("envelope missing array member 'signatures'")
+    digest = hashlib.sha256(
+        _RECEIPT_CORE_DOMAIN
+        + canon.dumps(payload).encode("utf-8")
+        + b"\x00"
+        + canon.dumps(signatures).encode("utf-8")
+    ).digest()
+    return digest.hex()
+
+
 # --------------------------------------------------------------------------
 # Hybrid signed-note checkpoints (C2SP tlog-checkpoint profile, hybrid AND).
 # --------------------------------------------------------------------------

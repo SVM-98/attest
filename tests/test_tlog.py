@@ -12,11 +12,11 @@ from __future__ import annotations
 
 import base64
 import hashlib
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
-from attest import keys, pq, tlog
+from attest import canon, keys, pq, tlog
 
 LEAVES = [bytes([i]) for i in range(7)]  # b"\x00", b"\x01", ... b"\x06"
 
@@ -872,3 +872,80 @@ def test_parse_checkpoint_rejects_oversized_root_before_decoding() -> None:
         tlog.parse_checkpoint(text)
     assert str(tlog._MAX_ROOT_B64_LEN) in str(exc_info.value)
     assert len(str(exc_info.value)) < 200
+
+
+# --------------------------------------------------------------------------
+# receipt_core_hash (Task 5): signed-receipt-core hash domain.
+# --------------------------------------------------------------------------
+
+
+def test_receipt_core_hash_matches_hand_pinned_kat() -> None:
+    # Hand construction: SHA-256(b"attest-receipt-core-v1\x00" || b'{"a":1}'
+    # || 0x00 || b'[]') — payload {"a": 1}, empty signatures array.
+    expected = "1dac7a8f22603b1d77da8c71d84d5dc2e5d258f57654f76e1de0a0c304bc206e"
+    envelope = {"payload": {"a": 1}, "signatures": []}
+    assert tlog.receipt_core_hash(envelope) == expected
+
+
+def test_receipt_core_hash_matches_domain_separated_jcs_formula() -> None:
+    # Structural check against the spec formula, built from the already
+    # independently-tested `canon.dumps` (test_canon.py) rather than
+    # re-deriving JCS by hand — pins the domain separator, ordering (payload
+    # THEN signatures), and the 0x00 field separator.
+    payload = {"a": 1, "issuer": {"id": "issuer.example"}}
+    signatures = [{"kid": "issuer.example/keys/x#1", "alg": "Ed25519", "sig": "c2ln"}]
+    envelope = {"payload": payload, "signatures": signatures}
+    expected = hashlib.sha256(
+        b"attest-receipt-core-v1\x00"
+        + canon.dumps(payload).encode("utf-8")
+        + b"\x00"
+        + canon.dumps(signatures).encode("utf-8")
+    ).hexdigest()
+    assert tlog.receipt_core_hash(envelope) == expected
+
+
+def test_receipt_core_hash_excludes_delivery() -> None:
+    base_envelope = {"payload": {"a": 1}, "signatures": []}
+    with_delivery = {**base_envelope, "delivery": {"salt": "irrelevant-to-the-core-hash"}}
+    assert tlog.receipt_core_hash(base_envelope) == tlog.receipt_core_hash(with_delivery)
+
+
+def test_receipt_core_hash_changes_when_signature_bytes_change() -> None:
+    # Design fix 4: commits to the SIGNATURE bytes too, not just payload —
+    # two envelopes with identical payloads but different signatures must
+    # not collide.
+    base_envelope = {"payload": {"a": 1}, "signatures": [{"sig": "AAAA"}]}
+    resigned_envelope = {"payload": {"a": 1}, "signatures": [{"sig": "BBBB"}]}
+    assert tlog.receipt_core_hash(base_envelope) != tlog.receipt_core_hash(resigned_envelope)
+
+
+def test_receipt_core_hash_is_lowercase_64_char_hex() -> None:
+    result = tlog.receipt_core_hash({"payload": {}, "signatures": []})
+    assert len(result) == 64
+    assert result == result.lower()
+    assert all(c in "0123456789abcdef" for c in result)
+
+
+def test_receipt_core_hash_raises_on_missing_payload() -> None:
+    with pytest.raises(tlog.TlogError):
+        tlog.receipt_core_hash({"signatures": []})
+
+
+def test_receipt_core_hash_raises_on_non_object_payload() -> None:
+    with pytest.raises(tlog.TlogError):
+        tlog.receipt_core_hash({"payload": "not-an-object", "signatures": []})
+
+
+def test_receipt_core_hash_raises_on_missing_signatures() -> None:
+    with pytest.raises(tlog.TlogError):
+        tlog.receipt_core_hash({"payload": {}})
+
+
+def test_receipt_core_hash_raises_on_non_array_signatures() -> None:
+    with pytest.raises(tlog.TlogError):
+        tlog.receipt_core_hash({"payload": {}, "signatures": "not-a-list"})
+
+
+def test_receipt_core_hash_raises_on_non_dict_envelope() -> None:
+    with pytest.raises(tlog.TlogError):
+        tlog.receipt_core_hash(cast(dict[str, Any], "not-a-dict"))
