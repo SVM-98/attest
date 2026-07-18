@@ -321,6 +321,15 @@ def _require_fields(entry: dict[str, Any], expected: frozenset[str]) -> None:
         raise TlogError(f"entry field mismatch: missing={missing} extra={extra}")
 
 
+def _require_entry_scalar_bounds(entry: dict[str, Any]) -> None:
+    """Bound field names and string values before rendering, regexes, or JCS."""
+    for field, value in entry.items():
+        if (isinstance(field, str) and len(field) > _MAX_ENTRY_SCALAR_LEN) or (
+            isinstance(value, str) and len(value) > _MAX_ENTRY_SCALAR_LEN
+        ):
+            raise TlogError(f"entry scalar exceeds {_MAX_ENTRY_SCALAR_LEN} chars")
+
+
 def _require_issuer(entry: dict[str, Any]) -> None:
     issuer = entry.get("issuer")
     if not isinstance(issuer, str) or not _ISSUER_RE.fullmatch(issuer):
@@ -363,6 +372,7 @@ def encode_entry(entry: dict[str, Any]) -> bytes:
     if not isinstance(entry, dict):
         raise TlogError(f"entry must be an object, got {type(entry).__name__}")
 
+    _require_entry_scalar_bounds(entry)
     entry_type = entry.get("type")
     if entry_type == _TYPE_KEY_MANIFEST:
         _require_fields(entry, _KEY_MANIFEST_FIELDS)
@@ -467,6 +477,10 @@ _MAX_NOTE_SIGNATURES = 64
 # _MAX_CHECKPOINT_TEXT_LEN rationale, which remains caller-side defense in depth.
 _MAX_NOTE_TEXT_LEN = 500_000
 _MAX_NOTE_LINES = 4 + _MAX_NOTE_SIGNATURES
+# Entry schemas contain only a few short identifiers/hashes.  Keep their
+# per-scalar bound aligned with the established signed-note text ceiling so
+# either core rejects hostile diagnostic/regex/canonicalization input first.
+_MAX_ENTRY_SCALAR_LEN = _MAX_NOTE_TEXT_LEN
 # Largest legitimate signature blob is 4 (key hash) + 3309 (ML-DSA-65) =
 # 3313 bytes -> 4420 base64 chars; 8192 is generous headroom. Checked
 # BEFORE base64-decoding so a hostile line cannot force a large allocation.

@@ -2255,6 +2255,155 @@ def _receipt_entry(envelope_path: Path) -> dict[str, Any]:
     }
 
 
+def _write_just_over_limit_file(path: Path, limit: int) -> None:
+    """Create a sparse, just-over-limit input without allocating its payload."""
+    with path.open("wb") as file:
+        file.truncate(limit + 1)
+
+
+def _minimal_anchor_evidence() -> dict[str, str]:
+    """A structurally valid checkpoint is enough to reach anchor input reads."""
+    checkpoint = "\n".join(
+        [
+            LOG_ORIGIN,
+            "0",
+            base64.b64encode(bytes(32)).decode("ascii"),
+            "",
+            "— test-signer AA==",
+            "",
+        ]
+    )
+    return {"checkpoint": checkpoint}
+
+
+@pytest.mark.parametrize("flag", ["--transparency", "--log-keys", "--anchor-policy"])
+def test_verify_rejects_oversized_stage2_json_input(
+    tmp_path: Path, capsys: CapSys, flag: str
+) -> None:
+    seed, _pub = _keygen(tmp_path, "issuer")
+    manifest_path = _manifest_init(tmp_path, seed)
+    envelope_path = _issue(tmp_path, seed, _write_payload(tmp_path))
+    oversized = tmp_path / f"oversized-{flag.removeprefix('--')}.json"
+    _write_just_over_limit_file(oversized, cli._MAX_STAGE2_INPUT_BYTES["json"])
+
+    capsys.readouterr()
+    rc = cli.main(
+        [
+            "verify",
+            str(envelope_path),
+            "--trust-dir",
+            str(_trust_dir(tmp_path, manifest_path)),
+            flag,
+            str(oversized),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert f"{flag} input exceeds" in captured.err
+
+
+def test_log_anchor_rejects_oversized_ots_proof_input(tmp_path: Path, capsys: CapSys) -> None:
+    log_dir = _log_init(tmp_path)
+    evidence_path = tmp_path / "evidence.json"
+    evidence_path.write_text(json.dumps(_minimal_anchor_evidence()), encoding="utf-8")
+    oversized = tmp_path / "oversized-ots-proof.json"
+    _write_just_over_limit_file(oversized, cli._MAX_STAGE2_INPUT_BYTES["json"])
+
+    capsys.readouterr()
+    rc = cli.main(
+        [
+            "log",
+            "anchor",
+            "--dir",
+            str(log_dir),
+            "--evidence",
+            str(evidence_path),
+            "--ots-proof",
+            str(oversized),
+            "--out",
+            str(tmp_path / "anchored.json"),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "--ots-proof input exceeds" in captured.err
+
+
+def test_log_anchor_rejects_oversized_rfc3161_token_input(tmp_path: Path, capsys: CapSys) -> None:
+    log_dir = _log_init(tmp_path)
+    evidence_path = tmp_path / "evidence.json"
+    evidence_path.write_text(json.dumps(_minimal_anchor_evidence()), encoding="utf-8")
+    ots_proof_path = tmp_path / "ots-proof.json"
+    ots_proof_path.write_text("{}", encoding="utf-8")
+    oversized = tmp_path / "oversized-rfc3161.tsr"
+    _write_just_over_limit_file(oversized, cli._MAX_STAGE2_INPUT_BYTES["rfc3161"])
+
+    capsys.readouterr()
+    rc = cli.main(
+        [
+            "log",
+            "anchor",
+            "--dir",
+            str(log_dir),
+            "--evidence",
+            str(evidence_path),
+            "--ots-proof",
+            str(ots_proof_path),
+            "--rfc3161-token",
+            str(oversized),
+            "--out",
+            str(tmp_path / "anchored.json"),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "--rfc3161-token input exceeds" in captured.err
+
+
+def test_log_append_rejects_oversized_entry_json_input(tmp_path: Path, capsys: CapSys) -> None:
+    log_dir = _log_init(tmp_path)
+    oversized = tmp_path / "oversized-entry.json"
+    _write_just_over_limit_file(oversized, cli._MAX_STAGE2_INPUT_BYTES["json"])
+
+    capsys.readouterr()
+    rc = cli.main(["log", "append", "--dir", str(log_dir), "--entry-json", str(oversized)])
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "--entry-json input exceeds" in captured.err
+
+
+def test_log_sign_checkpoint_rejects_oversized_candidate_input(
+    tmp_path: Path, capsys: CapSys
+) -> None:
+    log_dir = _log_init(tmp_path)
+    candidate_path = log_dir / "checkpoint.candidate"
+    _write_just_over_limit_file(candidate_path, cli._MAX_STAGE2_INPUT_BYTES["candidate"])
+
+    capsys.readouterr()
+    rc = cli.main(
+        [
+            "log",
+            "sign-checkpoint",
+            "--dir",
+            str(log_dir),
+            "--ed25519-key",
+            str(tmp_path / "unused.seed"),
+            "--mldsa-key",
+            str(tmp_path / "unused.mldsa"),
+            "--name",
+            LOG_NAME,
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "checkpoint candidate input exceeds" in captured.err
+
+
 def test_log_init_then_append_writes_unsigned_candidate(tmp_path: Path) -> None:
     log_dir = _log_init(tmp_path)
     seed, _pub = _keygen(tmp_path, "issuer")
@@ -2744,6 +2893,53 @@ def test_log_append_tile_failure_preserves_entries_and_retry_does_not_duplicate(
     )
     entries = [json.loads(line) for line in entries_path.read_text(encoding="utf-8").splitlines()]
     assert entries == [entry_a, entry_b]
+
+
+def test_log_append_deduplicates_canonical_entry_without_mutating_state(
+    tmp_path: Path, capsys: CapSys
+) -> None:
+    log_dir = _log_init(tmp_path)
+    entry_a = {"type": "receipt", "issuer": ISSUER, "core_sha256": "a" * 64}
+    entry_a_path = tmp_path / "entry-a.json"
+    entry_a_path.write_text(json.dumps(entry_a), encoding="utf-8")
+
+    assert (
+        cli.main(["log", "append", "--dir", str(log_dir), "--entry-json", str(entry_a_path)]) == 0
+    )
+    after_first = {
+        path.relative_to(log_dir): path.read_bytes()
+        for path in log_dir.rglob("*")
+        if path.is_file()
+    }
+
+    duplicate_path = tmp_path / "entry-a-reordered.json"
+    duplicate_path.write_text(
+        json.dumps({"core_sha256": "a" * 64, "issuer": ISSUER, "type": "receipt"}),
+        encoding="utf-8",
+    )
+    capsys.readouterr()
+    rc = cli.main(["log", "append", "--dir", str(log_dir), "--entry-json", str(duplicate_path)])
+    duplicate_result = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert duplicate_result["leaf_index"] == 0
+    assert duplicate_result["duplicate"] is True
+    assert {
+        path.relative_to(log_dir): path.read_bytes()
+        for path in log_dir.rglob("*")
+        if path.is_file()
+    } == after_first
+
+    entry_b = {"type": "receipt", "issuer": ISSUER, "core_sha256": "b" * 64}
+    entry_b_path = tmp_path / "entry-b.json"
+    entry_b_path.write_text(json.dumps(entry_b), encoding="utf-8")
+    capsys.readouterr()
+    rc = cli.main(["log", "append", "--dir", str(log_dir), "--entry-json", str(entry_b_path)])
+    distinct_result = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert distinct_result["leaf_index"] == 1
+    assert "duplicate" not in distinct_result
 
 
 def test_log_sign_checkpoint_replace_failure_preserves_existing_checkpoint_and_entries(

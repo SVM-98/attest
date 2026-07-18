@@ -77,6 +77,17 @@ _TILE_FULL_WIDTH = 256  # C2SP tlog-tiles: leaves per level-0 tile
 _ISO8601_UTC_FMT = "%Y-%m-%dT%H:%M:%SZ"
 _RECEIPT_ID_RE = re.compile(r"^[0-7][0-9A-HJKMNP-TV-Z]{25}$")
 
+# Stage-2 inputs are parsed from untrusted files, so cap them before decoding
+# or base64 expansion.  JSON feeds `verify`'s 10M-character evidence
+# materialization ceiling; a checkpoint candidate feeds the signed-note 500K
+# text cap; and an RFC 3161 token gets three quarters of the JSON ceiling so
+# its 4/3 base64 expansion remains bounded when anchor evidence is written.
+_MAX_STAGE2_INPUT_BYTES = {
+    "json": verify._MAX_TRANSPARENCY_EVIDENCE_LEN,
+    "candidate": tlog._MAX_NOTE_TEXT_LEN,
+    "rfc3161": verify._MAX_TRANSPARENCY_EVIDENCE_LEN * 3 // 4,
+}
+
 
 class CliUsageError(Exception):
     """A usage/IO problem this CLI can explain better than the raw exception."""
@@ -98,9 +109,41 @@ def _same_file_target(a: Path, b: Path) -> bool:
         return False
 
 
-def _read_json(path: Path) -> Any:
+def _read_bounded_bytes(path: Path, *, max_bytes: int, input_name: str) -> bytes:
+    """Read at most `max_bytes` from an untrusted CLI file.
+
+    The size check avoids allocating a known-oversized regular file; bounded
+    read still closes the stat/read race before a decoder or base64 can fully
+    materialize a replacement file.
+    """
     try:
-        text = path.read_text(encoding="utf-8")
+        if path.stat().st_size > max_bytes:
+            raise CliUsageError(f"{input_name} input exceeds {max_bytes} bytes: {path}")
+        with path.open("rb") as file:
+            data = file.read(max_bytes + 1)
+    except FileNotFoundError as exc:
+        raise CliUsageError(f"file not found: {path}") from exc
+    except OSError as exc:
+        raise CliUsageError(f"cannot read {path}: {exc}") from exc
+    if len(data) > max_bytes:
+        raise CliUsageError(f"{input_name} input exceeds {max_bytes} bytes: {path}")
+    return data
+
+
+def _read_bounded_text(path: Path, *, max_bytes: int, input_name: str) -> str:
+    try:
+        return _read_bounded_bytes(path, max_bytes=max_bytes, input_name=input_name).decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise CliUsageError(f"cannot decode {path} as UTF-8: {exc}") from exc
+
+
+def _read_json(path: Path, *, max_bytes: int | None = None, input_name: str = "JSON") -> Any:
+    try:
+        text = (
+            _read_bounded_text(path, max_bytes=max_bytes, input_name=input_name)
+            if max_bytes is not None
+            else path.read_text(encoding="utf-8")
+        )
     except FileNotFoundError as exc:
         raise CliUsageError(f"file not found: {path}") from exc
     except OSError as exc:
@@ -812,18 +855,38 @@ def _cmd_log_append(args: argparse.Namespace) -> int:
         raise CliUsageError("--entry-json must not be the log's own checkpoint candidate")
 
     origin = _read_log_origin(log_dir)
-    new_entry = _read_json(args.entry_json)
+    new_entry = _read_json(
+        args.entry_json, max_bytes=_MAX_STAGE2_INPUT_BYTES["json"], input_name="--entry-json"
+    )
     if not isinstance(new_entry, dict):
         raise CliUsageError(f"{args.entry_json} must contain a JSON object")
     try:
-        tlog.encode_entry(new_entry)
+        new_entry_bytes = tlog.encode_entry(new_entry)
     except tlog.TlogError as exc:
         raise CliUsageError(f"{args.entry_json} is not a valid log entry: {exc}") from exc
 
     # Compute everything fallible BEFORE writing anything: a rejected append
     # must leave the log's on-disk state byte-identical to before the call.
-    updated_entries = [*_read_log_entries(log_dir), new_entry]
-    encoded = _encoded_entries(updated_entries)
+    existing_entries = _read_log_entries(log_dir)
+    existing_encoded = _encoded_entries(existing_entries)
+    for leaf_index, existing_entry_bytes in enumerate(existing_encoded):
+        if existing_entry_bytes == new_entry_bytes:
+            # Canonically identical leaves are an idempotent append: do not
+            # touch any state, so a retry after an authoritative commit stays
+            # a no-op instead of growing the tree a second time.
+            _print_json(
+                {
+                    "dir": str(log_dir),
+                    "size": len(existing_entries),
+                    "leaf_index": leaf_index,
+                    "candidate": str(candidate_path),
+                    "duplicate": True,
+                }
+            )
+            return EXIT_OK
+
+    updated_entries = [*existing_entries, new_entry]
+    encoded = [*existing_encoded, new_entry_bytes]
     leaf_hashes = [tlog.leaf_hash(e) for e in encoded]
     root = tlog.build_tree(encoded)
     tree_size = len(updated_entries)
@@ -834,9 +897,9 @@ def _cmd_log_append(args: argparse.Namespace) -> int:
     # committed first because it is derived only; then commit the candidate
     # before entries, leaving entries LAST.  If a crash lands after the new
     # candidate but before entries, sign-checkpoint independently recomputes
-    # from entries and fails closed on the mismatch.  A retry sees the old
-    # entries and therefore appends this entry exactly once, rather than
-    # duplicating an entry that was already made authoritative.
+    # from entries and fails closed on the mismatch.  A retry after an
+    # authoritative entries commit takes the canonical-byte duplicate branch
+    # above, so it cleanly no-ops rather than duplicating that leaf.
     staged_candidate: Path | None = None
     staged_entries: Path | None = None
     staged_tiles: Path | None = None
@@ -891,7 +954,12 @@ def _cmd_log_sign_checkpoint(args: argparse.Namespace) -> int:
             f"no checkpoint candidate at {candidate_path}; run `attest log append` first"
         )
     candidate_origin, candidate_size, candidate_root = _parse_candidate_text(
-        candidate_path.read_text(encoding="utf-8"), candidate_path
+        _read_bounded_text(
+            candidate_path,
+            max_bytes=_MAX_STAGE2_INPUT_BYTES["candidate"],
+            input_name="checkpoint candidate",
+        ),
+        candidate_path,
     )
     if (
         candidate_origin != origin
@@ -1031,7 +1099,9 @@ def _cmd_log_anchor(args: argparse.Namespace) -> int:
 
     origin = _read_log_origin(log_dir)
 
-    evidence = _read_json(args.evidence)
+    evidence = _read_json(
+        args.evidence, max_bytes=_MAX_STAGE2_INPUT_BYTES["json"], input_name="--evidence"
+    )
     if not isinstance(evidence, dict):
         raise CliUsageError(f"{args.evidence} must contain a JSON object")
     checkpoint_text = evidence.get("checkpoint")
@@ -1049,7 +1119,9 @@ def _cmd_log_anchor(args: argparse.Namespace) -> int:
             f"match this log's origin {origin!r}"
         )
 
-    ots_proof = _read_json(args.ots_proof)
+    ots_proof = _read_json(
+        args.ots_proof, max_bytes=_MAX_STAGE2_INPUT_BYTES["json"], input_name="--ots-proof"
+    )
     if not isinstance(ots_proof, dict):
         raise CliUsageError(f"{args.ots_proof} must contain a JSON object")
     # `kind` is authoritative from which flag supplied the file, not read from
@@ -1060,7 +1132,13 @@ def _cmd_log_anchor(args: argparse.Namespace) -> int:
     # one boundary that actually judges this evidence).
     new_proofs: list[dict[str, Any]] = [{**ots_proof, "kind": "ots"}]
     if args.rfc3161_token is not None:
-        token_b64 = base64.b64encode(args.rfc3161_token.read_bytes()).decode("ascii")
+        token_b64 = base64.b64encode(
+            _read_bounded_bytes(
+                args.rfc3161_token,
+                max_bytes=_MAX_STAGE2_INPUT_BYTES["rfc3161"],
+                input_name="--rfc3161-token",
+            )
+        ).decode("ascii")
         new_proofs.append({"kind": "rfc3161", "token_b64": token_b64})
 
     existing_anchors = evidence.get("anchors")
@@ -1103,7 +1181,7 @@ def _load_log_keys(path: Path) -> list[tlog.LogKey]:
     """Parse the vector-runners' `log-keys.json` shape: a JSON array of
     `{"origin", "name", "ed25519_pub_b64u", "mldsa_pub_b64u"}` — the
     verifier's OWN pinned trust config, never taken from a bundle."""
-    data = _read_json(path)
+    data = _read_json(path, max_bytes=_MAX_STAGE2_INPUT_BYTES["json"], input_name="--log-keys")
     if not isinstance(data, list):
         raise CliUsageError(f"{path} must contain a JSON array of log keys")
     log_keys: list[tlog.LogKey] = []
@@ -1149,7 +1227,9 @@ def _load_anchor_policy(path: Path | None, crqc_horizon: int | None) -> anchor.A
     pinned_headers: dict[str, anchor.PinnedHeader] = {}
     horizon = crqc_horizon
     if path is not None:
-        data = _read_json(path)
+        data = _read_json(
+            path, max_bytes=_MAX_STAGE2_INPUT_BYTES["json"], input_name="--anchor-policy"
+        )
         if not isinstance(data, dict):
             raise CliUsageError(f"{path} must contain a JSON object")
         raw_headers = data.get("pinned_headers", {})
@@ -1228,7 +1308,15 @@ def _cmd_verify(args: argparse.Namespace) -> int:
         )
     disclosure = _build_disclosure(args)
 
-    transparency_evidence = _read_json(args.transparency) if args.transparency is not None else None
+    transparency_evidence = (
+        _read_json(
+            args.transparency,
+            max_bytes=_MAX_STAGE2_INPUT_BYTES["json"],
+            input_name="--transparency",
+        )
+        if args.transparency is not None
+        else None
+    )
     if transparency_evidence is not None and not isinstance(transparency_evidence, dict):
         raise CliUsageError(f"--transparency file {args.transparency} must contain a JSON object")
     log_keys = _load_log_keys(args.log_keys) if args.log_keys is not None else None

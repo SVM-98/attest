@@ -135,6 +135,10 @@ export const revocationViewOversizeRevocable = (n: number, max: number) =>
 export const RFC3161_WARNING =
   'rfc3161 token accepted as opaque classical evidence, carries no post-horizon weight'
 
+// Kept byte-identical to tlog.py: free-text entry scalars are bounded before
+// regex matching, diagnostic rendering, or JCS canonicalization.
+export const entryScalarExceeds = (max: number) => `entry scalar exceeds ${max} chars`
+
 export const ANCHOR_WARN = {
   EVIDENCE_CHECKPOINT_REQUIRED: 'evidence.checkpoint is required',
   EVIDENCE_CHECKPOINT_NOT_STR: 'evidence.checkpoint must be a str',
