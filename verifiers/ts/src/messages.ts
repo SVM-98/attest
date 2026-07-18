@@ -45,7 +45,7 @@ export function pyStage2StringRepr(value: string): string {
     else if (ch === '\r') out += '\\r'
     else if (ch === '\t') out += '\\t'
     else if (ch === quote) out += `\\${quote}`
-    else if (cp < 0x7f) out += ch
+    else if (cp >= 0x20 && cp < 0x7f) out += ch
     else if (cp < 0x100) out += `\\x${cp.toString(16).padStart(2, '0')}`
     else if (cp <= 0xffff) out += `\\u${cp.toString(16).padStart(4, '0')}`
     else out += `\\U${cp.toString(16).padStart(8, '0')}`
