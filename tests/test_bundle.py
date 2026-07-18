@@ -347,6 +347,21 @@ def test_import_defaults_proofs_to_empty_dict_when_bundle_has_none(tmp_path: Pat
     assert imported.proofs == {}
 
 
+@pytest.mark.parametrize(
+    "member_name",
+    ["proofs//tmp/x.json", "proofs/../../../victim.json"],
+)
+def test_import_rejects_proof_member_paths_that_are_not_exact_ulid_basenames(
+    tmp_path: Path, member_name: str
+) -> None:
+    """Proof member names later become output filenames, so imports accept
+    only the schema's exact ULID basename shape before exposing them."""
+    hostile = _make_raw_zip(tmp_path, {member_name: b"{}"}, "hostile-proofs.attest")
+
+    with pytest.raises(bundle.BundleError, match="invalid proof member path"):
+        bundle.import_bundle(hostile)
+
+
 # --- disclose: the single-receipt sharing unit ----------------------------------
 
 

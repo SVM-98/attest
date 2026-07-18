@@ -47,6 +47,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -65,6 +66,7 @@ _MAX_MEMBER_BYTES = 64 * 1024 * 1024  # 64 MiB per decompressed member
 _MAX_TOTAL_BYTES = 1024 * 1024 * 1024  # 1 GiB decompressed across one bundle
 _MAX_ENTRIES = 100_000  # central-directory entry count
 _READ_CHUNK = 1024 * 1024  # 1 MiB streaming read granularity
+_RECEIPT_ID_RE = re.compile(r"^[0-7][0-9A-HJKMNP-TV-Z]{25}$")
 
 _README_TEMPLATE = """<!doctype html>
 <html lang="en">
@@ -124,6 +126,28 @@ that one receipt's binding secret, never your whole library.</p>
 
 class BundleError(Exception):
     """A bundle cannot be produced without breaking the deal it claims to preserve (§9)."""
+
+
+def _proof_member_receipt_id(filename: str) -> str:
+    """Return the receipt id in a strictly-shaped ``proofs/`` member.
+
+    A bundle is attacker-supplied, and callers later derive an on-disk proof
+    filename from this value.  The receipt schema pins ids to ULIDs, so accept
+    only the one safe member shape: ``proofs/<ULID>.json``.  In particular,
+    never turn an absolute path, traversal component, or nested member into a
+    receipt id that an importer could join below its output directory.
+    """
+    relative = filename.removeprefix("proofs/")
+    if not relative.endswith(".json"):
+        raise BundleError(
+            f"invalid proof member path {filename!r}; expected proofs/<ULID>.json"
+        )
+    receipt_id = relative.removesuffix(".json")
+    if relative != f"{receipt_id}.json" or _RECEIPT_ID_RE.fullmatch(receipt_id) is None:
+        raise BundleError(
+            f"invalid proof member path {filename!r}; expected proofs/<ULID>.json"
+        )
+    return receipt_id
 
 
 @dataclass(frozen=True)
@@ -442,8 +466,8 @@ def import_bundle(
                         "— bundle is corrupt or tampered"
                     )
                 legal_texts[digest] = content
-            elif filename.startswith("proofs/") and filename.endswith(".json"):
-                receipt_id = filename[len("proofs/") : -len(".json")]
+            elif filename.startswith("proofs/"):
+                receipt_id = _proof_member_receipt_id(filename)
                 evidence = _loads(budget.read(zf, filename))
                 if isinstance(evidence, dict):
                     proofs[receipt_id] = evidence
