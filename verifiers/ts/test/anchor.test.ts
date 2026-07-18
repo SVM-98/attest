@@ -13,6 +13,7 @@ import {
   AnchorPolicy,
   AnchorVerdict,
   PinnedHeader,
+  MAX_CHECKPOINT_TEXT_LEN_,
   verifyAnchor,
   passesHorizon,
 } from '../src/anchor.js'
@@ -315,27 +316,38 @@ describe('verifyAnchor never throws on malformed evidence', () => {
     expect(verdict.anchored).toBe(false)
     expect(verdict.anchoredBefore).toBeNull()
     expect(verdict.pqSurviving).toBe(false)
-    expect(verdict.warnings).toHaveLength(1)
-    expect(verdict.warnings[0]).toContain('evidence must be an object')
+    const typeName = bad === null ? 'NoneType' : Array.isArray(bad) ? 'list' : typeof bad === 'boolean' ? 'bool' : typeof bad === 'string' ? 'str' : 'int'
+    expect(verdict.warnings).toEqual([`evidence must be an object, got ${typeName}`])
   })
 
   it('never throws when the proofs key is missing', () => {
     const verdict = verifyAnchor({ checkpoint: checkpointText() }, checkpoint(), policy())
     expect(verdict.anchored).toBe(false)
-    expect(verdict.warnings[0]).toContain('evidence.proofs must be a list')
+    expect(verdict.warnings).toEqual(['evidence.proofs must be a list, got NoneType'])
   })
 
   it.each(['not-a-list', 1, null, {}])('never throws when proofs is not a list (%s)', (badProofs) => {
     const verdict = verifyAnchor({ checkpoint: checkpointText(), proofs: badProofs }, checkpoint(), policy())
     expect(verdict.anchored).toBe(false)
-    expect(verdict.warnings[0]).toContain('evidence.proofs must be a list')
+    const typeName = badProofs === null
+      ? 'NoneType'
+      : Array.isArray(badProofs)
+        ? 'list'
+        : typeof badProofs === 'boolean'
+          ? 'bool'
+          : typeof badProofs === 'string'
+            ? 'str'
+            : typeof badProofs === 'object'
+              ? 'dict'
+              : 'int'
+    expect(verdict.warnings).toEqual([`evidence.proofs must be a list, got ${typeName}`])
   })
 
   it('caps the proofs list length', () => {
     const oversized = Array.from({ length: 65 }, () => ({ kind: 'bogus' }))
     const verdict = verifyAnchor(evidence(oversized), checkpoint(), policy())
     expect(verdict.anchored).toBe(false)
-    expect(verdict.warnings[0]).toContain('exceeds max length 64')
+    expect(verdict.warnings).toEqual(['evidence.proofs exceeds max length 64'])
   })
 
   it.each([null, 'string', 42, [], true])('ignores a non-object proof entry with a warning (%s)', (badProof) => {
@@ -350,7 +362,29 @@ describe('verifyAnchor never throws on malformed evidence', () => {
     const verdict = verifyAnchor(ev, checkpoint(), policy())
     expect(verdict.anchored).toBe(true)
     expect(verdict.anchoredBefore).toBe(HEADER_TIME)
-    expect(verdict.warnings).toContain("proof[0]: unknown proof kind 'future-kind', ignored")
+    expect(verdict.warnings).toEqual(["proof[0]: unknown proof kind 'future-kind', ignored"])
+  })
+
+  it.each([
+    ["a'b", `"a'b"`],
+    ['a"b', "'a\"b'"],
+    [`a'"b`, "'a\\'\"b'"],
+    ['a\nb', "'a\\nb'"],
+    ['a\\b', "'a\\\\b'"],
+    ['a\u200bb', "'a\\u200bb'"],
+    ['🎉', "'🎉'"],
+  ])('renders Python repr exactly in unknown proof-kind and OTS-op warnings (%s)', (value, rendered) => {
+    const kindVerdict = verifyAnchor(evidence([{ kind: value }]), checkpoint(), policy())
+    expect(kindVerdict.warnings).toEqual([`proof[0]: unknown proof kind ${rendered}, ignored`])
+
+    const opVerdict = verifyAnchor(evidence([otsProof({ ops: [[value]] })]), checkpoint(), policy())
+    expect(opVerdict.warnings).toEqual([`proof[0]: unknown ots op ${rendered}`])
+  })
+
+  it('slices unknown proof-kind strings by code point before Python repr', () => {
+    const kind = '🎉'.repeat(60) + 'tail'
+    const verdict = verifyAnchor(evidence([{ kind }]), checkpoint(), policy())
+    expect(verdict.warnings).toEqual([`proof[0]: unknown proof kind '${'🎉'.repeat(56)}..., ignored`])
   })
 
   it.each([[10n ** 5000n, 'huge-bigint'], ['x'.repeat(100_000), 'huge-string']])(
@@ -565,9 +599,20 @@ describe('AnchorPolicy structural validation', () => {
   })
 
   it('rejects an oversized evidence.checkpoint text before it reaches parseCheckpoint', () => {
-    const text = 'x'.repeat(500_000 + 1)
+    const text = 'x'.repeat(MAX_CHECKPOINT_TEXT_LEN_ + 1)
     const verdict = verifyAnchor({ checkpoint: text, proofs: [otsProof()] }, checkpoint(), policy())
     expect(verdict.anchored).toBe(false)
-    expect(verdict.warnings).toEqual(['evidence.checkpoint exceeds max length 500000'])
+    expect(verdict.warnings).toEqual([`evidence.checkpoint exceeds max length ${MAX_CHECKPOINT_TEXT_LEN_}`])
+  })
+
+  it('counts evidence checkpoint caps by Unicode code points, not UTF-16 units', () => {
+    const withinCap = '🎉'.repeat(MAX_CHECKPOINT_TEXT_LEN_ / 2 + 1)
+    expect(withinCap.length).toBeGreaterThan(MAX_CHECKPOINT_TEXT_LEN_)
+    const withinVerdict = verifyAnchor({ checkpoint: withinCap, proofs: [] }, checkpoint(), policy())
+    expect(withinVerdict.warnings).toEqual(['evidence.checkpoint is not a valid signed checkpoint'])
+
+    const beyondCap = '🎉'.repeat(MAX_CHECKPOINT_TEXT_LEN_ + 1)
+    const beyondVerdict = verifyAnchor({ checkpoint: beyondCap, proofs: [] }, checkpoint(), policy())
+    expect(beyondVerdict.warnings).toEqual([`evidence.checkpoint exceeds max length ${MAX_CHECKPOINT_TEXT_LEN_}`])
   })
 })

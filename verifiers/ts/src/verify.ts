@@ -22,7 +22,7 @@ import {
 import {
   ERR, WARN, unsupportedAttestVersion, signaturesCount, unsupportedSigAlg, noTrustedManifest,
   noKeyInManifest, keyCompromised, keyRetired, issuedAtOutsideWindow, malformedKeyMaterial,
-  malformedSigMaterial, unknownField, unknownEol, keyEntryNotHybrid, pyRepr,
+  malformedSigMaterial, unknownField, unknownEol, keyEntryNotHybrid, pyRepr, codePointLength,
   VERIFY_TRANSPARENCY_WARN,
 } from './messages.js'
 
@@ -310,7 +310,7 @@ function evaluateTransparencyClaim(
     // the caller. The size cap prevents decoding an arbitrarily large
     // serialized evidence bundle.
     const serializedEvidence = dumps(transparencyEvidence)
-    if (serializedEvidence.length > MAX_TRANSPARENCY_EVIDENCE_LEN) {
+    if (codePointLength(serializedEvidence) > MAX_TRANSPARENCY_EVIDENCE_LEN) {
       throw new Error('transparency evidence exceeds materialization limit')
     }
     const materializedEvidence: unknown = JSON.parse(serializedEvidence)

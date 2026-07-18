@@ -34,6 +34,7 @@ import {
   keyHash,
   TlogError,
   LogKey,
+  MAX_NOTE_TEXT_LEN_,
 } from '../src/tlog.js'
 
 const enc = new TextEncoder()
@@ -375,6 +376,21 @@ describe('parseCheckpoint (structural validation only)', () => {
     expect(() => parseCheckpoint(text)).toThrow(TlogError)
   })
 
+  it.each([
+    ['zero-width format', 'bad\u200borigin'],
+    ['private-use', 'bad\ue000origin'],
+    ['non-breaking space', 'bad\u00a0origin'],
+    ['line separator', 'bad\u2028origin'],
+  ])('rejects a Python-nonprintable Unicode origin (%s)', (_category, origin) => {
+    const text = `${origin}\n3\n${btoa(String.fromCharCode(...ROOT))}\n\n— ${LOG_NAME} AA==\n`
+    expect(() => parseCheckpoint(text)).toThrow(TlogError)
+  })
+
+  it.each(['plain space', '🎉', '漢'])('accepts a Python-printable Unicode origin (%s)', (origin) => {
+    const text = `${origin}\n3\n${btoa(String.fromCharCode(...ROOT))}\n\n— ${LOG_NAME} AA==\n`
+    expect(parseCheckpoint(text).origin).toBe(origin)
+  })
+
   it('rejects a missing blank line', () => {
     const text = `${ORIGIN}\n3\n${btoa(String.fromCharCode(...ROOT))}\nnot-blank\n`
     expect(() => parseCheckpoint(text)).toThrow(TlogError)
@@ -442,7 +458,16 @@ describe('parseCheckpoint (structural validation only)', () => {
     expect(() => parseCheckpoint(text)).toThrow(TlogError)
   })
 
-  it.each(['bad name', 'bad+name', 'bad\tname', 'bad\x1fname'])('rejects an invalid C2SP signature name (%s)', (name) => {
+  it.each([
+    'bad name',
+    'bad+name',
+    'bad\tname',
+    'bad\x1fname',
+    'bad\u200bname',
+    'bad\ue000name',
+    'bad\u00a0name',
+    'bad\u2028name',
+  ])('rejects an invalid C2SP signature name (%s)', (name) => {
     const text = `${ORIGIN}\n3\n${btoa(String.fromCharCode(...ROOT))}\n\n— ${name} AA==\n`
     expect(() => parseCheckpoint(text)).toThrow(TlogError)
   })
@@ -481,6 +506,16 @@ describe('parseCheckpoint (structural validation only)', () => {
     expect(threw).toBe(true)
   })
 
+  it('counts checkpoint-text caps by Unicode code points, not UTF-16 units', () => {
+    const suffix = `\n3\n${btoa(String.fromCharCode(...ROOT))}\n\n— ${LOG_NAME} AA==\n`
+    const withinCap = '🎉'.repeat(MAX_NOTE_TEXT_LEN_ / 2) + suffix
+    expect(withinCap.length).toBeGreaterThan(MAX_NOTE_TEXT_LEN_)
+    expect(parseCheckpoint(withinCap).origin).toBe('🎉'.repeat(MAX_NOTE_TEXT_LEN_ / 2))
+
+    const beyondCap = '🎉'.repeat(MAX_NOTE_TEXT_LEN_) + suffix
+    expect(() => parseCheckpoint(beyondCap)).toThrow(`checkpoint text exceeds ${MAX_NOTE_TEXT_LEN_} chars`)
+  })
+
   it('accepts the maximum number of signature lines (64)', () => {
     const signature = `— ${LOG_NAME} AA==\n`
     const header = `${ORIGIN}\n3\n${btoa(String.fromCharCode(...ROOT))}\n\n`
@@ -502,6 +537,14 @@ describe('parseCheckpoint (structural validation only)', () => {
       expect((e as Error).message.length).toBeLessThan(200)
     }
     expect(threw).toBe(true)
+  })
+
+  it('uses Python code-point slicing for bounded checkpoint diagnostics', () => {
+    const oversizedByOne = '🎉'.repeat(81)
+    const text = `${ORIGIN}\n${oversizedByOne}\n${btoa(String.fromCharCode(...ROOT))}\n\n— ${LOG_NAME} AA==\n`
+    expect(() => parseCheckpoint(text)).toThrow(
+      `tree size must be ASCII decimal digits: '${'🎉'.repeat(80)}'…`,
+    )
   })
 
   it('rejects an oversized signature blob before decoding', () => {

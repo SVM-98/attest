@@ -1,6 +1,7 @@
 // Verbatim error/warning strings. Conformance vectors substring-match these,
-// so DO NOT paraphrase. Interpolations reproduce Python repr (!r) exactly:
-// strings single-quoted, None bare; kid is bare in compromised/retired, repr'd in "no key".
+// so DO NOT paraphrase. `pyRepr` is the retained, deliberately limited v0.1
+// renderer. Stage 2 warning paths that mirror Python's repr use
+// `pyStage2StringRepr` below instead.
 
 export function pyRepr(x: unknown): string {
   if (typeof x === 'string') return `'${x}'`
@@ -8,6 +9,59 @@ export function pyRepr(x: unknown): string {
   if (typeof x === 'boolean') return x ? 'True' : 'False'
   if (Array.isArray(x)) return `[${x.map(pyRepr).join(', ')}]`
   return String(x)
+}
+
+const PYTHON_NON_PRINTABLE_RE = /[\p{C}\p{Z}]/u
+
+/** Python `str.isprintable()` for a JS string: Unicode C and Z categories
+ * are non-printable, except that ordinary ASCII space is printable. */
+export function isPythonPrintable(s: string): boolean {
+  for (const ch of s) {
+    if (ch !== ' ' && PYTHON_NON_PRINTABLE_RE.test(ch)) return false
+  }
+  return true
+}
+
+/** Count Unicode code points, matching Python's `len(str)`, rather than JS
+ * UTF-16 code units. Avoids materializing an array for attacker-sized text. */
+export function codePointLength(s: string): number {
+  let length = 0
+  for (const _ of s) length++
+  return length
+}
+
+/** Python `s[:limit]` semantics for JS strings. The callers use small,
+ * fixed limits for rendered diagnostics, so building the bounded result is
+ * safe without splitting an attacker-controlled full string into an array. */
+export function sliceCodePoints(s: string, limit: number): string {
+  let result = ''
+  let length = 0
+  for (const ch of s) {
+    if (length === limit) break
+    result += ch
+    length++
+  }
+  return result
+}
+
+/** Faithful Python `repr(str)` for the bounded Stage-2 warning/error paths.
+ * It intentionally does not replace the legacy v0.1 `pyRepr` helper above. */
+export function pyStage2StringRepr(value: string): string {
+  const quote = value.includes("'") && !value.includes('"') ? '"' : "'"
+  let out = quote
+  for (const ch of value) {
+    const cp = ch.codePointAt(0)!
+    if (ch === '\\') out += '\\\\'
+    else if (ch === '\n') out += '\\n'
+    else if (ch === '\r') out += '\\r'
+    else if (ch === '\t') out += '\\t'
+    else if (ch === quote) out += `\\${quote}`
+    else if (isPythonPrintable(ch)) out += ch
+    else if (cp < 0x100) out += `\\x${cp.toString(16).padStart(2, '0')}`
+    else if (cp <= 0xffff) out += `\\u${cp.toString(16).padStart(4, '0')}`
+    else out += `\\U${cp.toString(16).padStart(8, '0')}`
+  }
+  return out + quote
 }
 
 // Python `type(x).__name__` for the closed universe of values that ever cross
@@ -116,9 +170,9 @@ export const evidenceProofsExceeds = (max: number) => `evidence.proofs exceeds m
 export const proofNotObject = (i: number, v: unknown) => `proof[${i}]: must be an object, got ${pyTypeName(v)}`
 export const proofPrefixed = (i: number, msg: string) => `proof[${i}]: ${msg}`
 export const otsTooManyOps = (max: number) => `ots proof has more than ${max} ops`
-export const otsUnknownOp = (op: string) => `unknown ots op ${pyRepr(op)}`
-export const otsOperandInvalid = (op: string) => `ots ${pyRepr(op)} operand must be bounded, even-length lowercase hex`
-export const otsOperandRequired = (op: string) => `ots ${pyRepr(op)} op needs exactly one hex operand`
+export const otsUnknownOp = (op: string) => `unknown ots op ${pyTruncRepr(op)}`
+export const otsOperandInvalid = (op: string) => `ots ${pyTruncRepr(op)} operand must be bounded, even-length lowercase hex`
+export const otsOperandRequired = (op: string) => `ots ${pyTruncRepr(op)} op needs exactly one hex operand`
 export const otsHeaderTimeInvalid = (max: number) =>
   `ots proof 'header_time' must be a positive int no later than ${max}`
 export const rfc3161TokenNotStr = (v: unknown) => `rfc3161 token_b64 must be a str, got ${pyTypeName(v)}`
@@ -128,8 +182,8 @@ export const unknownProofKind = (kind: unknown) => `unknown proof kind ${pyTrunc
 // never invoke a hostile object's own stringification, only these three cases.
 export function pyTruncRepr(value: unknown, limit = 60): string {
   if (typeof value === 'string') {
-    const text = pyRepr(value.slice(0, limit))
-    return text.length <= limit ? text : text.slice(0, limit - 3) + '...'
+    const text = pyStage2StringRepr(sliceCodePoints(value, limit))
+    return codePointLength(text) <= limit ? text : sliceCodePoints(text, limit - 3) + '...'
   }
   if (value === null || value === undefined || typeof value === 'boolean') return pyRepr(value)
   if (typeof value === 'number' && Number.isInteger(value)) return String(value)
