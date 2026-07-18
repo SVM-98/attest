@@ -80,12 +80,14 @@ _RECEIPT_ID_RE = re.compile(r"^[0-7][0-9A-HJKMNP-TV-Z]{25}$")
 # Stage-2 inputs are parsed from untrusted files, so cap them before decoding
 # or base64 expansion.  JSON feeds `verify`'s 10M-character evidence
 # materialization ceiling; a checkpoint candidate feeds the signed-note 500K
-# text cap; and an RFC 3161 token gets three quarters of the JSON ceiling so
-# its 4/3 base64 expansion remains bounded when anchor evidence is written.
+# text cap.  An RFC 3161 token is embedded base64-expanded (4/3) into the SAME
+# evidence object as the checkpoint note and JSON structure, so its cap must
+# leave that ceiling room for all three together — a token accepted here must
+# never produce anchored evidence the verifier is forced to reject on size.
 _MAX_STAGE2_INPUT_BYTES = {
     "json": verify._MAX_TRANSPARENCY_EVIDENCE_LEN,
     "candidate": tlog._MAX_NOTE_TEXT_LEN,
-    "rfc3161": verify._MAX_TRANSPARENCY_EVIDENCE_LEN * 3 // 4,
+    "rfc3161": (verify._MAX_TRANSPARENCY_EVIDENCE_LEN - tlog._MAX_NOTE_TEXT_LEN - 500_000) * 3 // 4,
 }
 
 
