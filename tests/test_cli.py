@@ -2618,3 +2618,172 @@ def test_export_import_carries_proofs_via_proof_dir(tmp_path: Path, capsys: CapS
 
     assert import_report["proofs"] == 1
     assert (import_out_dir / "proofs" / f"{receipt_id}.json").exists()
+
+
+def test_export_refuses_traversal_receipt_id_before_reading_outside_proof_dir(
+    tmp_path: Path, capsys: CapSys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Even a hostile, schema-bypassing receipt JSON cannot turn --proof-dir
+    into an arbitrary-file read through its receipt_id."""
+    seed, _pub = _keygen(tmp_path, "issuer")
+    manifest_path = _manifest_init(tmp_path, seed)
+    payload_path = _write_payload(tmp_path)
+    envelope_path = _issue(tmp_path, seed, payload_path)
+    envelope = json.loads(envelope_path.read_text(encoding="utf-8"))
+    envelope["payload"]["receipt_id"] = "../victim"
+    envelope_path.write_text(json.dumps(envelope), encoding="utf-8")
+
+    proof_dir = tmp_path / "proofs"
+    proof_dir.mkdir()
+    outside = tmp_path / "victim.json"
+    outside.write_text(json.dumps({"must_not_be_read": True}), encoding="utf-8")
+    original_read_json = cli._read_json
+
+    def reject_outside_read(path: Path) -> Any:
+        if path.resolve() == outside.resolve():
+            pytest.fail("attest export tried to read outside --proof-dir")
+        return original_read_json(path)
+
+    monkeypatch.setattr(cli, "_read_json", reject_outside_read)
+    legal_text_path = tmp_path / "legal.txt"
+    legal_text_path.write_bytes(b"attest-test-legal-text-v1")
+    mirror_policy_path = tmp_path / "mirror-policy.txt"
+    mirror_policy_path.write_bytes(b"attest-test-mirror-policy-v1")
+    out_dir = tmp_path / "exported"
+
+    capsys.readouterr()
+    rc = cli.main(
+        [
+            "export",
+            "--receipt",
+            str(envelope_path),
+            "--key-manifest",
+            str(manifest_path),
+            "--legal-text",
+            str(legal_text_path),
+            "--legal-text",
+            str(mirror_policy_path),
+            "--proof-dir",
+            str(proof_dir),
+            "--out-dir",
+            str(out_dir),
+            "--name",
+            "mylibrary",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "not a valid ULID" in captured.err
+    assert outside.read_text(encoding="utf-8") == json.dumps({"must_not_be_read": True})
+    assert not (out_dir / "mylibrary.attest").exists()
+
+
+def test_import_rejects_hostile_proof_member_without_writing_outside_out_dir(
+    tmp_path: Path, capsys: CapSys
+) -> None:
+    out_dir = tmp_path / "imported"
+    outside = (out_dir / "proofs" / ".." / ".." / ".." / "victim.json").resolve()
+    hostile_bundle = tmp_path / "hostile-proofs.attest"
+    with zipfile.ZipFile(hostile_bundle, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("proofs/../../../victim.json", "{}")
+
+    capsys.readouterr()
+    rc = cli.main(["import", "--bundle", str(hostile_bundle), "--out-dir", str(out_dir)])
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "invalid proof member path" in captured.err
+    assert not outside.exists()
+    assert not (out_dir / "proofs").exists()
+
+
+def test_log_append_tile_failure_preserves_entries_and_retry_does_not_duplicate(
+    tmp_path: Path, capsys: CapSys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log_dir = _log_init(tmp_path)
+    seed, _pub = _keygen(tmp_path, "issuer")
+    envelope_a = _issue(
+        tmp_path,
+        seed,
+        _write_payload(tmp_path, "payload-a.json", receipt_id="01J1V5B4M9Z8QWERTY12345671"),
+    )
+    entry_a = _receipt_entry(envelope_a)
+    _log_append(tmp_path, log_dir, entry_a, name="entry-a.json")
+    entries_path = log_dir / "entries.jsonl"
+    candidate_path = log_dir / "checkpoint.candidate"
+    prior_entries = entries_path.read_text(encoding="utf-8")
+    prior_candidate = candidate_path.read_text(encoding="utf-8")
+
+    envelope_b = _issue(
+        tmp_path,
+        seed,
+        _write_payload(tmp_path, "payload-b.json", receipt_id="01J1V5B4M9Z8QWERTY12345672"),
+    )
+    entry_b = _receipt_entry(envelope_b)
+    entry_b_path = tmp_path / "entry-b.json"
+    entry_b_path.write_text(json.dumps(entry_b), encoding="utf-8")
+    original_write_bytes = Path.write_bytes
+
+    def fail_tile_write(path: Path, data: bytes) -> int:
+        raise OSError("simulated tile write failure")
+
+    monkeypatch.setattr(Path, "write_bytes", fail_tile_write)
+    capsys.readouterr()
+    rc = cli.main(["log", "append", "--dir", str(log_dir), "--entry-json", str(entry_b_path)])
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "simulated tile write failure" in captured.err
+    assert entries_path.read_text(encoding="utf-8") == prior_entries
+    assert candidate_path.read_text(encoding="utf-8") == prior_candidate
+
+    monkeypatch.setattr(Path, "write_bytes", original_write_bytes)
+    assert (
+        cli.main(["log", "append", "--dir", str(log_dir), "--entry-json", str(entry_b_path)])
+        == 0
+    )
+    entries = [json.loads(line) for line in entries_path.read_text(encoding="utf-8").splitlines()]
+    assert entries == [entry_a, entry_b]
+
+
+def test_log_sign_checkpoint_replace_failure_preserves_existing_checkpoint_and_entries(
+    tmp_path: Path, capsys: CapSys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log_dir = _log_init(tmp_path)
+    ed_seed, _ed_pub, mldsa_out = _keygen_hybrid(tmp_path, "log-signer")
+    seed, _pub = _keygen(tmp_path, "issuer")
+    envelope_path = _issue(tmp_path, seed, _write_payload(tmp_path))
+    _log_append(tmp_path, log_dir, _receipt_entry(envelope_path))
+    checkpoint_path = _log_sign_checkpoint(log_dir, ed_seed, mldsa_out)
+    prior_checkpoint = checkpoint_path.read_text(encoding="utf-8")
+    prior_entries = (log_dir / "entries.jsonl").read_text(encoding="utf-8")
+    original_replace = cli.os.replace
+
+    def fail_checkpoint_replace(source: Path | str, destination: Path | str) -> None:
+        if Path(destination) == checkpoint_path:
+            raise OSError("simulated checkpoint replace failure")
+        original_replace(source, destination)
+
+    monkeypatch.setattr(cli.os, "replace", fail_checkpoint_replace)
+    capsys.readouterr()
+    rc = cli.main(
+        [
+            "log",
+            "sign-checkpoint",
+            "--dir",
+            str(log_dir),
+            "--ed25519-key",
+            str(ed_seed),
+            "--mldsa-key",
+            str(mldsa_out),
+            "--name",
+            LOG_NAME,
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "simulated checkpoint replace failure" in captured.err
+    assert checkpoint_path.read_text(encoding="utf-8") == prior_checkpoint
+    assert (log_dir / "entries.jsonl").read_text(encoding="utf-8") == prior_entries

@@ -33,8 +33,10 @@ import datetime
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -73,6 +75,7 @@ _LOG_CHECKPOINT_FILENAME = "checkpoint"
 _LOG_TILE_DIRNAME = "tile"
 _TILE_FULL_WIDTH = 256  # C2SP tlog-tiles: leaves per level-0 tile
 _ISO8601_UTC_FMT = "%Y-%m-%dT%H:%M:%SZ"
+_RECEIPT_ID_RE = re.compile(r"^[0-7][0-9A-HJKMNP-TV-Z]{25}$")
 
 
 class CliUsageError(Exception):
@@ -135,6 +138,33 @@ def _write_secret_text(path: Path, text: str) -> None:
     with os.fdopen(fd, "w") as fh:
         os.fchmod(fh.fileno(), _SECRET_FILE_MODE)
         fh.write(text)
+
+
+def _stage_text(path: Path, text: str) -> Path:
+    """Write text to a sibling temporary file and return that file.
+
+    Keeping the temporary file beside its destination makes the eventual
+    ``os.replace`` an atomic same-filesystem rename.  Callers retain control
+    over commit ordering when several state files must change together.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent, text=True)
+    staged = Path(temp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+    except Exception:
+        staged.unlink(missing_ok=True)
+        raise
+    return staged
+
+
+def _replace_staged_file(staged: Path, destination: Path) -> None:
+    """Atomically install a sibling staged file, removing it on failure."""
+    try:
+        os.replace(staged, destination)
+    finally:
+        staged.unlink(missing_ok=True)
 
 
 def _read_b64u_file(path: Path) -> bytes:
@@ -205,6 +235,29 @@ def _safe_name(value: str) -> str:
     can never escape the output directory (2026-07-13 review, finding 14)."""
     safe = value.replace("/", "_").replace("\\", "_").replace(":", "_").replace("..", "_")
     return safe or "_"
+
+
+def _proof_path_in_dir(proof_dir: Path, receipt_id: str) -> Path:
+    """Return the one proof path allowed for a schema-valid receipt id.
+
+    Receipt ids are ULIDs, not general path components.  Check that contract
+    before forming a filename, then resolve the result and keep it below the
+    resolved proof directory as a defence in depth against an unexpected
+    symlink.  ``attest export`` must never read evidence outside ``--proof-dir``.
+    """
+    if _RECEIPT_ID_RE.fullmatch(receipt_id) is None:
+        raise CliUsageError(
+            f"receipt_id {receipt_id!r} is not a valid ULID; refusing to read a proof path"
+        )
+    try:
+        proof_root = proof_dir.resolve()
+        candidate = (proof_dir / f"{receipt_id}.json").resolve()
+        candidate.relative_to(proof_root)
+    except (OSError, ValueError) as exc:
+        raise CliUsageError(
+            f"proof path for receipt_id {receipt_id!r} escapes --proof-dir; refusing to read it"
+        ) from exc
+    return candidate
 
 
 # --- `attest log` on-disk state helpers --------------------------------------
@@ -292,16 +345,8 @@ def _encoded_entries(entries: list[dict[str, Any]]) -> list[bytes]:
     return encoded
 
 
-def _append_log_entry(log_dir: Path, entry: dict[str, Any]) -> None:
-    entries_path = _log_entries_path(log_dir)
-    entries_path.parent.mkdir(parents=True, exist_ok=True)
-    with entries_path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(entry, sort_keys=True) + "\n")
-
-
-def _rebuild_tiles(log_dir: Path, leaf_hashes: list[bytes]) -> None:
-    """Rebuild the level-0 (leaf-hash) tlog-tiles under LOG/tile/0/... from
-    scratch, deterministically, from the CURRENT leaf hash list.
+def _stage_tiles(log_dir: Path, leaf_hashes: list[bytes]) -> Path:
+    """Stage rebuilt level-0 (leaf-hash) tlog-tiles beside ``LOG/tile/0``.
 
     Simplification, documented (see the module-level LOG layout comment
     above and the task report): a full tile covers `_TILE_FULL_WIDTH`
@@ -309,21 +354,53 @@ def _rebuild_tiles(log_dir: Path, leaf_hashes: list[bytes]) -> None:
     growing right edge is named `<index>.p.<width>` (a flattened stand-in for
     C2SP's `<index>.p/<width>` — the nested form exists purely to keep tile
     URLs short at huge scale, irrelevant for the small logs this CLI targets).
-    Always fully regenerated rather than patched incrementally, so it can
-    never drift out of sync with `entries.jsonl`.
+    The complete replacement is written before it is installed, rather than
+    patching the live cache incrementally.  That keeps a failed tile write
+    from disturbing the existing cache and prevents an installed cache from
+    drifting out of sync with `entries.jsonl` after a successful append.
     """
+    tile_parent = _log_tile_dir(log_dir)
+    tile_parent.mkdir(parents=True, exist_ok=True)
+    staged = Path(tempfile.mkdtemp(prefix=".0.", dir=tile_parent))
+    try:
+        for start in range(0, len(leaf_hashes), _TILE_FULL_WIDTH):
+            chunk = leaf_hashes[start : start + _TILE_FULL_WIDTH]
+            index = start // _TILE_FULL_WIDTH
+            width = len(chunk)
+            name = str(index) if width == _TILE_FULL_WIDTH else f"{index}.p.{width}"
+            (staged / name).write_bytes(b"".join(chunk))
+    except Exception:
+        shutil.rmtree(staged, ignore_errors=True)
+        raise
+    return staged
+
+
+def _replace_staged_tiles(log_dir: Path, staged: Path) -> None:
+    """Install a staged tile directory without ever modifying it in place."""
     tile_dir = _log_tile_dir(log_dir) / "0"
-    if tile_dir.exists():
-        shutil.rmtree(tile_dir)
-    if not leaf_hashes:
-        return
-    tile_dir.mkdir(parents=True, exist_ok=True)
-    for start in range(0, len(leaf_hashes), _TILE_FULL_WIDTH):
-        chunk = leaf_hashes[start : start + _TILE_FULL_WIDTH]
-        index = start // _TILE_FULL_WIDTH
-        width = len(chunk)
-        name = str(index) if width == _TILE_FULL_WIDTH else f"{index}.p.{width}"
-        (tile_dir / name).write_bytes(b"".join(chunk))
+    tile_parent = tile_dir.parent
+    backup = Path(tempfile.mkdtemp(prefix=".0.previous.", dir=tile_parent))
+    backup.rmdir()  # reserve a unique, absent same-directory rename target
+    moved_existing = False
+    try:
+        if os.path.lexists(tile_dir):
+            os.replace(tile_dir, backup)
+            moved_existing = True
+        os.replace(staged, tile_dir)
+    except Exception:
+        # The cache is derived data, but restore it when the second rename
+        # fails so an ordinary I/O error does not leave an avoidable gap.
+        if moved_existing and not os.path.lexists(tile_dir):
+            try:
+                os.replace(backup, tile_dir)
+            except OSError:
+                pass
+        raise
+    else:
+        if moved_existing:
+            shutil.rmtree(backup, ignore_errors=True)
+    finally:
+        shutil.rmtree(staged, ignore_errors=True)
 
 
 def _candidate_text(origin: str, tree_size: int, root: bytes) -> str:
@@ -737,10 +814,32 @@ def _cmd_log_append(args: argparse.Namespace) -> int:
     root = tlog.build_tree(encoded)
     tree_size = len(updated_entries)
     candidate_text = _candidate_text(origin, tree_size, root)
+    entries_text = "".join(json.dumps(entry, sort_keys=True) + "\n" for entry in updated_entries)
 
-    _append_log_entry(log_dir, new_entry)
-    _rebuild_tiles(log_dir, leaf_hashes)
-    candidate_path.write_text(candidate_text, encoding="utf-8")
+    # Stage every output before changing visible state.  The tile cache is
+    # committed first because it is derived only; then commit the candidate
+    # before entries, leaving entries LAST.  If a crash lands after the new
+    # candidate but before entries, sign-checkpoint independently recomputes
+    # from entries and fails closed on the mismatch.  A retry sees the old
+    # entries and therefore appends this entry exactly once, rather than
+    # duplicating an entry that was already made authoritative.
+    staged_candidate: Path | None = None
+    staged_entries: Path | None = None
+    staged_tiles: Path | None = None
+    try:
+        staged_candidate = _stage_text(candidate_path, candidate_text)
+        staged_entries = _stage_text(entries_path, entries_text)
+        staged_tiles = _stage_tiles(log_dir, leaf_hashes)
+        _replace_staged_tiles(log_dir, staged_tiles)
+        _replace_staged_file(staged_candidate, candidate_path)
+        _replace_staged_file(staged_entries, entries_path)
+    finally:
+        if staged_candidate is not None:
+            staged_candidate.unlink(missing_ok=True)
+        if staged_entries is not None:
+            staged_entries.unlink(missing_ok=True)
+        if staged_tiles is not None:
+            shutil.rmtree(staged_tiles, ignore_errors=True)
 
     _print_json(
         {
@@ -835,7 +934,9 @@ def _cmd_log_sign_checkpoint(args: argparse.Namespace) -> int:
     # own public keys cannot themselves later verify.
     tlog.verify_checkpoint(signed_text, log_key, origin)
 
-    checkpoint_path.write_text(signed_text, encoding="utf-8")
+    # A failed checkpoint write must preserve the previous signed checkpoint:
+    # stage beside it and atomically replace only once the full text exists.
+    _replace_staged_file(_stage_text(checkpoint_path, signed_text), checkpoint_path)
     _print_json(
         {
             "dir": str(log_dir),
@@ -1191,7 +1292,7 @@ def _cmd_export(args: argparse.Namespace) -> int:
             receipt_id = payload.get("receipt_id") if isinstance(payload, dict) else None
             if not isinstance(receipt_id, str):
                 continue
-            candidate = args.proof_dir / f"{receipt_id}.json"
+            candidate = _proof_path_in_dir(args.proof_dir, receipt_id)
             if candidate.is_file():
                 evidence = _read_json(candidate)
                 if not isinstance(evidence, dict):
