@@ -34,6 +34,18 @@ Vector-directory conventions (a "vector case" is any directory containing
     revocation record, fed to `verify()` as `revocation_view=[record]`.
     Vectors 14/14b (Fase 2) need no new file — they populate `manifests.json`'s
     already-reserved `"chains"` member instead.
+  - optional `transparency.json` / `log-keys.json` / `anchor-policy.json`
+    (group 28 only, Stage 2 "transparency/corroboration layer"): fed to
+    `verify()` as `transparency=`/`log_keys=`/`anchor_policy=`.
+    `transparency.json` is the untrusted evidence bundle verbatim (see
+    `attest.transparency.evaluate_transparency`'s evidence schema).
+    `log-keys.json` is a list of `{"origin", "name", "ed25519_pub_b64u",
+    "mldsa_pub_b64u"}`, each turned into a `tlog.LogKey`. `anchor-policy.json`
+    is `{"pinned_headers": {<hex>: {"header_hash", "merkle_root", "time"}},
+    "crqc_horizon"}`, turned into an `anchor.AnchorPolicy`. All three are
+    absent (and `verify()` sees `None`) for every leaf outside group 28, so
+    existing leaves see zero behavior change; `expected.json` only gains the
+    `transparency`/`corroboration`/`manifest_freshness` members for group 28.
 """
 
 from __future__ import annotations
@@ -44,7 +56,7 @@ from typing import Any
 
 import pytest
 
-from attest import canon, keys, manifests, verify
+from attest import anchor, canon, keys, manifests, tlog, verify
 
 VECTORS_DIR = Path(__file__).resolve().parent.parent / "docs" / "spec" / "vectors"
 
@@ -99,6 +111,44 @@ def _disclosure(vector_dir: Path) -> verify.Disclosure | None:
     )
 
 
+def _log_keys(vector_dir: Path) -> list[tlog.LogKey] | None:
+    path = vector_dir / "log-keys.json"
+    if not path.exists():
+        return None
+    return [
+        tlog.LogKey(
+            origin=entry["origin"],
+            name=entry["name"],
+            ed25519_pub=keys.b64u_decode(entry["ed25519_pub_b64u"]),
+            mldsa_pub=keys.b64u_decode(entry["mldsa_pub_b64u"]),
+        )
+        for entry in _load_json(path)
+    ]
+
+
+def _anchor_policy(vector_dir: Path) -> anchor.AnchorPolicy | None:
+    path = vector_dir / "anchor-policy.json"
+    if not path.exists():
+        return None
+    data = _load_json(path)
+    pinned_headers = {
+        header_hash: anchor.PinnedHeader(
+            header_hash=header["header_hash"],
+            merkle_root=header["merkle_root"],
+            time=header["time"],
+        )
+        for header_hash, header in data["pinned_headers"].items()
+    }
+    return anchor.AnchorPolicy(pinned_headers=pinned_headers, crqc_horizon=data["crqc_horizon"])
+
+
+def _transparency_evidence(vector_dir: Path) -> dict[str, Any] | None:
+    path = vector_dir / "transparency.json"
+    if not path.exists():
+        return None
+    return _load_json(path)  # type: ignore[no-any-return]
+
+
 @pytest.mark.parametrize("vector_dir", _VECTOR_DIRS, ids=_VECTOR_IDS)
 def test_vector_matches_spec_intended_result(vector_dir: Path) -> None:
     expected = _load_json(vector_dir / "expected.json")
@@ -108,7 +158,13 @@ def test_vector_matches_spec_intended_result(vector_dir: Path) -> None:
     revocation_view = _revocation_view(vector_dir)
 
     result = verify.verify(
-        envelope_bytes, trust_store, revocation_view=revocation_view, disclosure=disclosure
+        envelope_bytes,
+        trust_store,
+        revocation_view=revocation_view,
+        disclosure=disclosure,
+        transparency=_transparency_evidence(vector_dir),
+        log_keys=_log_keys(vector_dir),
+        anchor_policy=_anchor_policy(vector_dir),
     )
 
     assert result.signature == expected["signature"]
@@ -118,6 +174,12 @@ def test_vector_matches_spec_intended_result(vector_dir: Path) -> None:
         assert result.revocation == expected["revocation"]
     if "binding" in expected:
         assert result.binding == expected["binding"]
+    if "transparency" in expected:
+        assert result.transparency == expected["transparency"]
+    if "corroboration" in expected:
+        assert result.corroboration == expected["corroboration"]
+    if "manifest_freshness" in expected:
+        assert result.manifest_freshness == expected["manifest_freshness"]
     if "ok" in expected:
         assert result.ok == expected["ok"]
     if "errors" in expected:
@@ -155,9 +217,10 @@ def test_vectors_directory_is_nonempty() -> None:
     `VECTORS_DIR` path) making the whole suite above vacuously pass."""
     # 23 Fase 1/2 leaves (01-18) + 20 regression-corpus leaves (19-25, 2026-07-13)
     # + 8 hybrid conformance leaves (26, 2026-07-17) + 1 absent-valid_to
-    # parity leaf (27, 2026-07-17):
-    # 19 a/b, 20 a-c, 21 a-g, 22 a-c, 23 a/b, 24, 25 a/b, 26 a-h.
-    assert len(_VECTOR_DIRS) >= 52
+    # parity leaf (27, 2026-07-17) + 14 transparency/corroboration conformance
+    # leaves (28, 2026-07-18):
+    # 19 a/b, 20 a-c, 21 a-g, 22 a-c, 23 a/b, 24, 25 a/b, 26 a-h, 28 a-n.
+    assert len(_VECTOR_DIRS) >= 66
 
 
 _CANONICAL_DIRS = [p for p in _VECTOR_DIRS if (p / "canonical.json").exists()]

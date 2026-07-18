@@ -1,0 +1,11 @@
+{
+  "checkpoint": "attest-transparency-log.example/2026\n1\nM8ZC29T33KNJNm9+DHgwLABzw4q4btLscePoD1oCvNw=\n\n\u2014 attest-log-2026 dpWeByT4ypaXUjY/ECY4hylkIuvZnqYlMmBCbWbkrtY7VEFhYQqD19s+ZTFpWR+LJ6Zut+HK76PovcRgiOE94YI5kgE=\n",
+  "entry": {
+    "core_sha256": "39c37ac5a3e2a95c004f3bb92c85cff8e9481152f58a7cec8e3b412859daead7",
+    "issuer": "store.example.com",
+    "type": "receipt"
+  },
+  "inclusion_proof": [],
+  "leaf_index": 0,
+  "tree_size": 1
+}

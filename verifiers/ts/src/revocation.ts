@@ -1,7 +1,5 @@
 import { JsonObject, JsonValue, canonicalBytes } from './canon.js'
-import { verifyKeyManifest, findKey } from './manifests.js'
-import { verifyStrict } from './ed25519.js'
-import { b64uDecode } from './b64u.js'
+import { verifyKeyManifest, findKey, verifySignatureBlock } from './manifests.js'
 import { parseStrictUtc, parseIsoLenient } from './dates.js'
 import { revocationFailedVerify, outsideRefundWindow, revocationViewOversize, revocationViewOversizeRevocable, WARN } from './messages.js'
 
@@ -19,10 +17,18 @@ function signableRecordBytes(record: JsonObject): Uint8Array {
 // true. Loop-over-records callers hoist that call — one manifest self-verify
 // per classification, not per record (review improvement #17). To verify a
 // single record, use verifyRecord, which composes both halves.
+//
+// AND rule (v0.2, mirrors manifests.py's verify_record_signature): if the
+// signer's keyManifest entry is hybrid (carries pub_ml_dsa_65), `signature`
+// MUST also carry a valid sig_ml_dsa_65 leg over the same signed bytes, or
+// verification fails closed; an Ed25519-only entry with a stray
+// sig_ml_dsa_65 leg likewise fails closed (see verifySignatureBlock).
+// Ed25519-only signers keep v0.1 behavior byte-for-byte (Stage 2 Task 6/8
+// sibling-patch parity).
 export function verifyRecordSignature(record: JsonObject, keyManifest: JsonObject): boolean {
   try {
     const sig = asObject(record['signature'])
-    if (!sig || typeof sig['kid'] !== 'string' || typeof sig['sig'] !== 'string') return false
+    if (!sig || typeof sig['kid'] !== 'string') return false
     const entry = findKey(keyManifest, sig['kid'])
     if (!entry || entry['status'] !== 'active') return false // active only: retired/compromised reject
     const at = parseStrictUtc(record['revoked_at'])
@@ -30,9 +36,7 @@ export function verifyRecordSignature(record: JsonObject, keyManifest: JsonObjec
     if (at === null || from === null || at < from) return false
     const to = entry['valid_to']
     if (to !== null && to !== undefined) { const toMs = parseStrictUtc(to); if (toMs === null || at > toMs) return false }
-    const pub = entry['pub']
-    if (typeof pub !== 'string') return false
-    return verifyStrict(signableRecordBytes(record), b64uDecode(sig['sig']), b64uDecode(pub))
+    return verifySignatureBlock(signableRecordBytes(record), sig, entry)
   } catch { return false }
 }
 

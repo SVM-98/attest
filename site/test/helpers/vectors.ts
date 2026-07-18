@@ -2,7 +2,7 @@ import { readdirSync, readFileSync, existsSync, statSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
 import { fileURLToPath, URL as NodeURL } from 'node:url'
 import { loadsStrict } from 'attest-verifier'
-import type { JsonObject, TrustStore, Disclosure, JsonValue } from 'attest-verifier'
+import type { JsonObject, TrustStore, Disclosure, JsonValue, LogKey, AnchorPolicy, PinnedHeader } from 'attest-verifier'
 
 // Use node:url's URL explicitly — under `@vitest-environment jsdom` the global
 // URL is jsdom's WHATWG implementation, which fileURLToPath doesn't recognize.
@@ -55,3 +55,40 @@ export function disclosure(dir: string): Disclosure | null {
   return { challenge: [b64u(d.nonce_b64u), b64u(d.sig_b64u)] }
 }
 export const expected = (dir: string) => JSON.parse(readFileSync(join(dir, 'expected.json'), 'utf-8'))
+
+// group 28 (transparency/corroboration conformance corpus) only — mirrors
+// verifiers/ts/test/helpers/vectors.ts's loader of the same name.
+export function transparencyEvidence(dir: string): JsonValue | null {
+  const p = join(dir, 'transparency.json')
+  return existsSync(p) ? loadJsonStrict(p) : null
+}
+export function logKeys(dir: string): LogKey[] | null {
+  const p = join(dir, 'log-keys.json')
+  if (!existsSync(p)) return null
+  const entries = JSON.parse(readFileSync(p, 'utf-8')) as Array<{
+    origin: string; name: string; ed25519_pub_b64u: string; mldsa_pub_b64u: string
+  }>
+  const b64u = (s: string): Uint8Array => {
+    const bin = atob(s.replace(/-/g, '+').replace(/_/g, '/'))
+    return Uint8Array.from(bin, (c) => c.charCodeAt(0))
+  }
+  return entries.map((entry) => ({
+    origin: entry.origin, name: entry.name,
+    ed25519Pub: b64u(entry.ed25519_pub_b64u), mldsaPub: b64u(entry.mldsa_pub_b64u),
+  }))
+}
+export function anchorPolicy(dir: string): AnchorPolicy | null {
+  const p = join(dir, 'anchor-policy.json')
+  if (!existsSync(p)) return null
+  const data = JSON.parse(readFileSync(p, 'utf-8')) as {
+    pinned_headers: Record<string, { header_hash: string; merkle_root: string; time: number }>
+    crqc_horizon: number | null
+  }
+  const pinnedHeaders: Record<string, PinnedHeader> = {}
+  for (const [headerHash, header] of Object.entries(data.pinned_headers)) {
+    pinnedHeaders[headerHash] = {
+      headerHash: header.header_hash, merkleRoot: header.merkle_root, time: header.time,
+    }
+  }
+  return { pinnedHeaders, crqcHorizon: data.crqc_horizon }
+}

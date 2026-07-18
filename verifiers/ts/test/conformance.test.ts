@@ -1,4 +1,4 @@
-// The conformance merge gate (27 vectors / 52 leaves): this suite discovers every leaf under
+// The conformance merge gate (28 vector groups / 66 leaves): this suite discovers every leaf under
 // `docs/spec/vectors/` and asserts the produced VerificationResult matches
 // its `expected.json`, using the exact same match rules as the Python
 // reference's `tests/test_vectors.py`. Passing this suite in full IS the
@@ -15,13 +15,17 @@ const leaves = V.findLeafDirs()
 const canonicalLeaves = leaves.filter((d) => existsSync(join(d, 'canonical.json')))
 
 describe('attest v0.1 conformance vectors', () => {
-  it('discovers the full vector suite (>= 52 leaves)', () => {
-    expect(leaves.length).toBeGreaterThanOrEqual(52)
+  it('discovers the full vector suite (>= 66 leaves)', () => {
+    expect(leaves.length).toBeGreaterThanOrEqual(66)
   })
 
   it.each(leaves.map((d) => [V.vectorId(d), d] as const))('%s', (_id, dir) => {
     const exp = V.expected(dir)
-    const r = verify(V.envelopeBytes(dir), V.trustStore(dir), V.revocationView(dir) as any, V.disclosure(dir))
+    const r = verify(V.envelopeBytes(dir), V.trustStore(dir), V.revocationView(dir) as any, V.disclosure(dir), undefined, {
+      transparency: V.transparencyEvidence(dir),
+      logKeys: V.logKeys(dir),
+      anchorPolicy: V.anchorPolicy(dir),
+    })
 
     // always-exact
     expect(r.signature).toBe(exp.signature)
@@ -30,6 +34,9 @@ describe('attest v0.1 conformance vectors', () => {
     // conditional-exact scalars
     if ('revocation' in exp) expect(r.revocation).toBe(exp.revocation)
     if ('binding' in exp) expect(r.binding).toBe(exp.binding)
+    if ('transparency' in exp) expect(r.transparency).toBe(exp.transparency)
+    if ('corroboration' in exp) expect(r.corroboration).toBe(exp.corroboration)
+    if ('manifest_freshness' in exp) expect(r.manifest_freshness).toBe(exp.manifest_freshness)
     if ('ok' in exp) expect(isOk(r)).toBe(exp.ok)
     // exact-list
     if ('errors' in exp) expect([...r.errors]).toEqual(exp.errors)

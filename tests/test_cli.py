@@ -8,16 +8,18 @@ re-testing crypto/schema logic already covered by the library's own suite.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
 import stat
+import zipfile
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from attest import cli, keys, pq, revocation
+from attest import cli, keys, pq, revocation, tlog, verify
 from tests.helpers import make_payload
 
 ISSUER = "store.example.com"
@@ -80,6 +82,25 @@ def _manifest_init(tmp_path: Path, seed: Path, out_name: str = "manifest.json") 
     )
     assert rc == 0
     return out
+
+
+def _write_artifacts(tmp_path: Path) -> Path:
+    artifacts_path = tmp_path / "artifacts.json"
+    artifacts_path.write_text(
+        json.dumps(
+            [
+                {
+                    "role": "installer",
+                    "platform": "windows-x86_64",
+                    "filename": "game.exe",
+                    "size_bytes": 123,
+                    "sha256": "a" * 64,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return artifacts_path
 
 
 def _write_payload(tmp_path: Path, name: str = "payload.json", **overrides: Any) -> Path:
@@ -741,29 +762,16 @@ def test_manifest_rotate_produces_version_2_signed_by_version_1_key(tmp_path: Pa
 
 def test_manifest_artifacts_builds_signed_artifact_manifest(tmp_path: Path) -> None:
     seed, _pub = _keygen(tmp_path, "issuer")
-    _manifest_init(tmp_path, seed)
-
-    artifacts_path = tmp_path / "artifacts.json"
-    artifacts_path.write_text(
-        json.dumps(
-            [
-                {
-                    "role": "installer",
-                    "platform": "windows-x86_64",
-                    "filename": "game.exe",
-                    "size_bytes": 123,
-                    "sha256": "a" * 64,
-                }
-            ]
-        ),
-        encoding="utf-8",
-    )
+    key_manifest_path = _manifest_init(tmp_path, seed)
+    artifacts_path = _write_artifacts(tmp_path)
     out = tmp_path / "artifact-manifest.json"
 
     rc = cli.main(
         [
             "manifest",
             "artifacts",
+            "--in",
+            str(key_manifest_path),
             "--issuer",
             ISSUER,
             "--series",
@@ -786,9 +794,161 @@ def test_manifest_artifacts_builds_signed_artifact_manifest(tmp_path: Path) -> N
 
     from attest import manifests
 
-    key_manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    key_manifest = json.loads(key_manifest_path.read_text(encoding="utf-8"))
     artifact_manifest = json.loads(out.read_text(encoding="utf-8"))
     assert manifests.verify_artifact_manifest(artifact_manifest, key_manifest)
+
+
+def test_manifest_artifacts_hybrid_roundtrips(tmp_path: Path) -> None:
+    from attest import manifests
+
+    seed, _pub, mldsa_key = _keygen_hybrid(tmp_path, "issuer")
+    key_manifest_path = _manifest_init_hybrid(tmp_path, seed, mldsa_key, "manifest.json")
+    out = tmp_path / "artifact-manifest.json"
+
+    rc = cli.main(
+        [
+            "manifest",
+            "artifacts",
+            "--in",
+            str(key_manifest_path),
+            "--issuer",
+            ISSUER,
+            "--series",
+            f"{ISSUER}/works/EXG-001",
+            "--version",
+            "1",
+            "--released-at",
+            VALID_FROM,
+            "--artifacts",
+            str(_write_artifacts(tmp_path)),
+            "--signing-kid",
+            KID,
+            "--signing-seed",
+            str(seed),
+            "--mldsa-key",
+            str(mldsa_key),
+            "--out",
+            str(out),
+        ]
+    )
+
+    assert rc == 0
+    key_manifest = json.loads(key_manifest_path.read_text(encoding="utf-8"))
+    artifact_manifest = json.loads(out.read_text(encoding="utf-8"))
+    assert "sig_ml_dsa_65" in artifact_manifest["manifest_signature"]
+    assert manifests.verify_artifact_manifest(artifact_manifest, key_manifest)
+
+
+def test_manifest_artifacts_hybrid_without_mldsa_key_errors(tmp_path: Path, capsys: CapSys) -> None:
+    seed, _pub, mldsa_key = _keygen_hybrid(tmp_path, "issuer")
+    key_manifest_path = _manifest_init_hybrid(tmp_path, seed, mldsa_key, "manifest.json")
+    out = tmp_path / "artifact-manifest.json"
+
+    rc = cli.main(
+        [
+            "manifest",
+            "artifacts",
+            "--in",
+            str(key_manifest_path),
+            "--issuer",
+            ISSUER,
+            "--series",
+            f"{ISSUER}/works/EXG-001",
+            "--version",
+            "1",
+            "--released-at",
+            VALID_FROM,
+            "--artifacts",
+            str(_write_artifacts(tmp_path)),
+            "--signing-kid",
+            KID,
+            "--signing-seed",
+            str(seed),
+            "--out",
+            str(out),
+        ]
+    )
+
+    assert rc == 2
+    assert "is hybrid; --mldsa-key is required" in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_manifest_artifacts_ed_only_with_mldsa_key_errors(tmp_path: Path, capsys: CapSys) -> None:
+    seed, _pub = _keygen(tmp_path, "issuer")
+    key_manifest_path = _manifest_init(tmp_path, seed)
+    _other_seed, _other_pub, mldsa_key = _keygen_hybrid(tmp_path, "other")
+    out = tmp_path / "artifact-manifest.json"
+
+    rc = cli.main(
+        [
+            "manifest",
+            "artifacts",
+            "--in",
+            str(key_manifest_path),
+            "--issuer",
+            ISSUER,
+            "--series",
+            f"{ISSUER}/works/EXG-001",
+            "--version",
+            "1",
+            "--released-at",
+            VALID_FROM,
+            "--artifacts",
+            str(_write_artifacts(tmp_path)),
+            "--signing-kid",
+            KID,
+            "--signing-seed",
+            str(seed),
+            "--mldsa-key",
+            str(mldsa_key),
+            "--out",
+            str(out),
+        ]
+    )
+
+    assert rc == 2
+    assert "is Ed25519-only; --mldsa-key is not allowed" in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_manifest_artifacts_wrong_mldsa_key_errors(tmp_path: Path, capsys: CapSys) -> None:
+    seed, _pub, mldsa_key = _keygen_hybrid(tmp_path, "issuer")
+    key_manifest_path = _manifest_init_hybrid(tmp_path, seed, mldsa_key, "manifest.json")
+    _other_seed, _other_pub, wrong_mldsa_key = _keygen_hybrid(tmp_path, "other")
+    out = tmp_path / "artifact-manifest.json"
+
+    rc = cli.main(
+        [
+            "manifest",
+            "artifacts",
+            "--in",
+            str(key_manifest_path),
+            "--issuer",
+            ISSUER,
+            "--series",
+            f"{ISSUER}/works/EXG-001",
+            "--version",
+            "1",
+            "--released-at",
+            VALID_FROM,
+            "--artifacts",
+            str(_write_artifacts(tmp_path)),
+            "--signing-kid",
+            KID,
+            "--signing-seed",
+            str(seed),
+            "--mldsa-key",
+            str(wrong_mldsa_key),
+            "--out",
+            str(out),
+        ]
+    )
+
+    assert rc == 2
+    assert "does not match the signing key's ML-DSA-65 public key" in capsys.readouterr().err
+    assert not out.exists()
 
 
 # --- usage / IO errors exit 2 -------------------------------------------------
@@ -1819,9 +1979,7 @@ def test_manifest_rotate_to_new_hybrid_key_roundtrips(tmp_path: Path) -> None:
     _seed_b, pub_b, mldsa_b = _keygen_hybrid(tmp_path, "issuer-b")
     kid_b = f"{ISSUER}/keys/test-2#ed25519-1"
     mldsa_pub_b = tmp_path / "issuer-b.mldsa.pub"
-    mldsa_pub_b.write_text(
-        json.loads(mldsa_b.read_text(encoding="utf-8"))["pub"], encoding="utf-8"
-    )
+    mldsa_pub_b.write_text(json.loads(mldsa_b.read_text(encoding="utf-8"))["pub"], encoding="utf-8")
     out = tmp_path / "manifest-v2.json"
 
     rc = cli.main(
@@ -1866,9 +2024,7 @@ def test_manifest_rotate_new_mldsa_pub_requires_new_pub(tmp_path: Path, capsys: 
     seed, _pub, mldsa_key = _keygen_hybrid(tmp_path, "issuer")
     manifest_v1 = _manifest_init_hybrid(tmp_path, seed, mldsa_key, "manifest-v1.json")
     mldsa_pub = tmp_path / "new.mldsa.pub"
-    mldsa_pub.write_text(
-        json.loads(mldsa_key.read_text(encoding="utf-8"))["pub"], encoding="utf-8"
-    )
+    mldsa_pub.write_text(json.loads(mldsa_key.read_text(encoding="utf-8"))["pub"], encoding="utf-8")
 
     rc = cli.main(
         [
@@ -1974,3 +2130,966 @@ def test_issue_seed_aliased_with_salt_out_errors(tmp_path: Path, capsys: CapSys)
     assert rc == 2
     assert capsys.readouterr().err != ""
     assert seed.read_text(encoding="utf-8") == original_seed
+
+
+# --- log: operator/holder commands + verify --transparency (Stage 2) --------
+#
+# The offline-signer split: `log append` is the CI-side step, holding no
+# signing key, and only ever writes an UNSIGNED checkpoint.candidate. `log
+# sign-checkpoint` is the ceremony-side step — the only command that may hold
+# the log's signing keys — and refuses to sign unless its OWN recomputation
+# from the entries file matches the candidate, and (once a prior signed
+# checkpoint exists) unless the new tree is a verified consistency-proof
+# extension of it.
+
+LOG_ORIGIN = "attest-transparency-log.example/test"
+LOG_NAME = "attest-test-log-2026"
+
+
+def _log_init(tmp_path: Path, name: str = "log", origin: str = LOG_ORIGIN) -> Path:
+    log_dir = tmp_path / name
+    rc = cli.main(["log", "init", "--dir", str(log_dir), "--origin", origin])
+    assert rc == 0
+    return log_dir
+
+
+def _log_append(
+    tmp_path: Path, log_dir: Path, entry: dict[str, Any], name: str = "entry.json"
+) -> Path:
+    entry_path = tmp_path / name
+    entry_path.parent.mkdir(parents=True, exist_ok=True)
+    entry_path.write_text(json.dumps(entry), encoding="utf-8")
+    rc = cli.main(["log", "append", "--dir", str(log_dir), "--entry-json", str(entry_path)])
+    assert rc == 0
+    return log_dir / "checkpoint.candidate"
+
+
+def _log_sign_checkpoint(
+    log_dir: Path, ed25519_key: Path, mldsa_key: Path, name: str = LOG_NAME
+) -> Path:
+    rc = cli.main(
+        [
+            "log",
+            "sign-checkpoint",
+            "--dir",
+            str(log_dir),
+            "--ed25519-key",
+            str(ed25519_key),
+            "--mldsa-key",
+            str(mldsa_key),
+            "--name",
+            name,
+        ]
+    )
+    assert rc == 0
+    return log_dir / "checkpoint"
+
+
+def _log_prove(
+    tmp_path: Path, log_dir: Path, leaf_index: int, out_name: str = "evidence.json"
+) -> Path:
+    out = tmp_path / out_name
+    out.parent.mkdir(parents=True, exist_ok=True)
+    rc = cli.main(
+        [
+            "log",
+            "prove",
+            "--dir",
+            str(log_dir),
+            "--leaf-index",
+            str(leaf_index),
+            "--out",
+            str(out),
+        ]
+    )
+    assert rc == 0
+    return out
+
+
+def _log_keys_file(
+    tmp_path: Path,
+    ed_pub_out: Path,
+    mldsa_out: Path,
+    origin: str = LOG_ORIGIN,
+    name: str = LOG_NAME,
+) -> Path:
+    ed_pub_b64u = ed_pub_out.read_text(encoding="utf-8").strip()
+    mldsa_key_file = json.loads(mldsa_out.read_text(encoding="utf-8"))
+    path = tmp_path / "log-keys.json"
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "origin": origin,
+                    "name": name,
+                    "ed25519_pub_b64u": ed_pub_b64u,
+                    "mldsa_pub_b64u": mldsa_key_file["pub"],
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _anchor_policy_file(
+    tmp_path: Path,
+    name: str = "anchor-policy.json",
+    pinned_headers: dict[str, Any] | None = None,
+    crqc_horizon: int | None = None,
+) -> Path:
+    path = tmp_path / name
+    path.write_text(
+        json.dumps({"pinned_headers": pinned_headers or {}, "crqc_horizon": crqc_horizon}),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _receipt_entry(envelope_path: Path) -> dict[str, Any]:
+    envelope = json.loads(envelope_path.read_text(encoding="utf-8"))
+    return {
+        "type": "receipt",
+        "issuer": envelope["payload"]["issuer"]["id"],
+        "core_sha256": tlog.receipt_core_hash(envelope),
+    }
+
+
+def _write_just_over_limit_file(path: Path, limit: int) -> None:
+    """Create a sparse, just-over-limit input without allocating its payload."""
+    with path.open("wb") as file:
+        file.truncate(limit + 1)
+
+
+def _minimal_anchor_evidence() -> dict[str, str]:
+    """A structurally valid checkpoint is enough to reach anchor input reads."""
+    checkpoint = "\n".join(
+        [
+            LOG_ORIGIN,
+            "0",
+            base64.b64encode(bytes(32)).decode("ascii"),
+            "",
+            "— test-signer AA==",
+            "",
+        ]
+    )
+    return {"checkpoint": checkpoint}
+
+
+@pytest.mark.parametrize("flag", ["--transparency", "--log-keys", "--anchor-policy"])
+def test_verify_rejects_oversized_stage2_json_input(
+    tmp_path: Path, capsys: CapSys, flag: str
+) -> None:
+    seed, _pub = _keygen(tmp_path, "issuer")
+    manifest_path = _manifest_init(tmp_path, seed)
+    envelope_path = _issue(tmp_path, seed, _write_payload(tmp_path))
+    oversized = tmp_path / f"oversized-{flag.removeprefix('--')}.json"
+    _write_just_over_limit_file(oversized, cli._MAX_STAGE2_INPUT_BYTES["json"])
+
+    capsys.readouterr()
+    rc = cli.main(
+        [
+            "verify",
+            str(envelope_path),
+            "--trust-dir",
+            str(_trust_dir(tmp_path, manifest_path)),
+            flag,
+            str(oversized),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert f"{flag} input exceeds" in captured.err
+
+
+def test_log_anchor_rejects_oversized_ots_proof_input(tmp_path: Path, capsys: CapSys) -> None:
+    log_dir = _log_init(tmp_path)
+    evidence_path = tmp_path / "evidence.json"
+    evidence_path.write_text(json.dumps(_minimal_anchor_evidence()), encoding="utf-8")
+    oversized = tmp_path / "oversized-ots-proof.json"
+    _write_just_over_limit_file(oversized, cli._MAX_STAGE2_INPUT_BYTES["json"])
+
+    capsys.readouterr()
+    rc = cli.main(
+        [
+            "log",
+            "anchor",
+            "--dir",
+            str(log_dir),
+            "--evidence",
+            str(evidence_path),
+            "--ots-proof",
+            str(oversized),
+            "--out",
+            str(tmp_path / "anchored.json"),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "--ots-proof input exceeds" in captured.err
+
+
+def test_log_anchor_rejects_oversized_rfc3161_token_input(tmp_path: Path, capsys: CapSys) -> None:
+    log_dir = _log_init(tmp_path)
+    evidence_path = tmp_path / "evidence.json"
+    evidence_path.write_text(json.dumps(_minimal_anchor_evidence()), encoding="utf-8")
+    ots_proof_path = tmp_path / "ots-proof.json"
+    ots_proof_path.write_text("{}", encoding="utf-8")
+    oversized = tmp_path / "oversized-rfc3161.tsr"
+    _write_just_over_limit_file(oversized, cli._MAX_STAGE2_INPUT_BYTES["rfc3161"])
+
+    capsys.readouterr()
+    rc = cli.main(
+        [
+            "log",
+            "anchor",
+            "--dir",
+            str(log_dir),
+            "--evidence",
+            str(evidence_path),
+            "--ots-proof",
+            str(ots_proof_path),
+            "--rfc3161-token",
+            str(oversized),
+            "--out",
+            str(tmp_path / "anchored.json"),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "--rfc3161-token input exceeds" in captured.err
+
+
+def test_log_anchor_max_cap_rfc3161_token_stays_within_verifier_evidence_ceiling(
+    tmp_path: Path, capsys: CapSys
+) -> None:
+    """A token accepted at the cap must never yield anchored evidence the
+    verifier is forced to reject on its 10M-character total-evidence ceiling:
+    the cap must leave room for the base64 expansion PLUS checkpoint and JSON
+    overhead inside the same evidence object."""
+    log_dir = _log_init(tmp_path)
+    evidence_path = tmp_path / "evidence.json"
+    evidence_path.write_text(json.dumps(_minimal_anchor_evidence()), encoding="utf-8")
+    ots_proof_path = tmp_path / "ots-proof.json"
+    ots_proof_path.write_text("{}", encoding="utf-8")
+    max_cap_token = tmp_path / "max-cap-rfc3161.tsr"
+    with max_cap_token.open("wb") as file:
+        file.truncate(cli._MAX_STAGE2_INPUT_BYTES["rfc3161"])
+    out_path = tmp_path / "anchored.json"
+
+    capsys.readouterr()
+    rc = cli.main(
+        [
+            "log",
+            "anchor",
+            "--dir",
+            str(log_dir),
+            "--evidence",
+            str(evidence_path),
+            "--ots-proof",
+            str(ots_proof_path),
+            "--rfc3161-token",
+            str(max_cap_token),
+            "--out",
+            str(out_path),
+        ]
+    )
+    capsys.readouterr()
+
+    assert rc == 0
+    written = out_path.read_text(encoding="utf-8")
+    assert len(written) <= verify._MAX_TRANSPARENCY_EVIDENCE_LEN
+
+
+def test_log_anchor_refuses_evidence_exceeding_verifier_ceiling(
+    tmp_path: Path, capsys: CapSys
+) -> None:
+    log_dir = _log_init(tmp_path)
+    header = f"{LOG_ORIGIN}\n0\n" + base64.b64encode(bytes(32)).decode("ascii") + "\n"
+    checkpoint = (
+        header
+        + "\n"
+        + "— "
+        + "n" * (tlog._MAX_NOTE_TEXT_LEN - len(header) - 10)
+        + " AA==\n"
+    )
+    assert tlog.parse_checkpoint(checkpoint).origin == LOG_ORIGIN
+
+    evidence_path = tmp_path / "evidence.json"
+    evidence_path.write_text(json.dumps({"checkpoint": checkpoint}), encoding="utf-8")
+    ots_proof_path = tmp_path / "ots-proof.json"
+    ots_proof_path.write_text("{}", encoding="utf-8")
+    max_cap_token = tmp_path / "max-cap-rfc3161.tsr"
+    with max_cap_token.open("wb") as file:
+        file.truncate(cli._MAX_STAGE2_INPUT_BYTES["rfc3161"])
+    out_path = tmp_path / "anchored.json"
+
+    capsys.readouterr()
+    rc = cli.main(
+        [
+            "log",
+            "anchor",
+            "--dir",
+            str(log_dir),
+            "--evidence",
+            str(evidence_path),
+            "--ots-proof",
+            str(ots_proof_path),
+            "--rfc3161-token",
+            str(max_cap_token),
+            "--out",
+            str(out_path),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "verifier's evidence ceiling" in captured.err
+    assert str(verify._MAX_TRANSPARENCY_EVIDENCE_LEN) in captured.err
+    assert not out_path.exists()
+
+
+def test_log_append_rejects_oversized_entry_json_input(tmp_path: Path, capsys: CapSys) -> None:
+    log_dir = _log_init(tmp_path)
+    oversized = tmp_path / "oversized-entry.json"
+    _write_just_over_limit_file(oversized, cli._MAX_STAGE2_INPUT_BYTES["json"])
+
+    capsys.readouterr()
+    rc = cli.main(["log", "append", "--dir", str(log_dir), "--entry-json", str(oversized)])
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "--entry-json input exceeds" in captured.err
+
+
+def test_log_sign_checkpoint_rejects_oversized_candidate_input(
+    tmp_path: Path, capsys: CapSys
+) -> None:
+    log_dir = _log_init(tmp_path)
+    candidate_path = log_dir / "checkpoint.candidate"
+    _write_just_over_limit_file(candidate_path, cli._MAX_STAGE2_INPUT_BYTES["candidate"])
+
+    capsys.readouterr()
+    rc = cli.main(
+        [
+            "log",
+            "sign-checkpoint",
+            "--dir",
+            str(log_dir),
+            "--ed25519-key",
+            str(tmp_path / "unused.seed"),
+            "--mldsa-key",
+            str(tmp_path / "unused.mldsa"),
+            "--name",
+            LOG_NAME,
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "checkpoint candidate input exceeds" in captured.err
+
+
+def test_log_init_then_append_writes_unsigned_candidate(tmp_path: Path) -> None:
+    log_dir = _log_init(tmp_path)
+    seed, _pub = _keygen(tmp_path, "issuer")
+    payload_path = _write_payload(tmp_path)
+    envelope_path = _issue(tmp_path, seed, payload_path)
+
+    candidate = _log_append(tmp_path, log_dir, _receipt_entry(envelope_path))
+
+    assert candidate.exists()
+    candidate_text = candidate.read_text(encoding="utf-8")
+    lines = candidate_text.split("\n")
+    assert lines[0] == LOG_ORIGIN
+    assert lines[1] == "1"
+    # Genuinely unsigned: a real (hybrid-signed) checkpoint has signature
+    # lines after a blank line, so a bare 3-line body must fail to parse.
+    with pytest.raises(tlog.TlogError):
+        tlog.parse_checkpoint(candidate_text)
+
+
+def test_log_append_rejects_malformed_entry_without_writing_candidate(
+    tmp_path: Path, capsys: CapSys
+) -> None:
+    log_dir = _log_init(tmp_path)
+    bad_entry_path = tmp_path / "bad-entry.json"
+    bad_entry_path.write_text(
+        json.dumps({"type": "receipt", "issuer": "not a dns name"}), encoding="utf-8"
+    )
+
+    capsys.readouterr()
+    rc = cli.main(["log", "append", "--dir", str(log_dir), "--entry-json", str(bad_entry_path)])
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert captured.err != ""
+    assert not (log_dir / "checkpoint.candidate").exists()
+    assert (log_dir / "entries.jsonl").read_text(encoding="utf-8") == ""
+
+
+def test_sign_checkpoint_refuses_when_candidate_root_mismatches_recomputation(
+    tmp_path: Path, capsys: CapSys
+) -> None:
+    log_dir = _log_init(tmp_path)
+    seed, _pub = _keygen(tmp_path, "issuer")
+    payload_path = _write_payload(tmp_path)
+    envelope_path = _issue(tmp_path, seed, payload_path)
+    _log_append(tmp_path, log_dir, _receipt_entry(envelope_path))
+
+    candidate_path = log_dir / "checkpoint.candidate"
+    lines = candidate_path.read_text(encoding="utf-8").split("\n")
+    lines[2] = base64.b64encode(bytes(range(32))).decode("ascii")  # a different, wrong root
+    candidate_path.write_text("\n".join(lines), encoding="utf-8")
+
+    _ed_seed, _ed_pub, mldsa_out = _keygen_hybrid(tmp_path, "log-signer")
+    ed_seed = tmp_path / "log-signer.seed"
+
+    capsys.readouterr()
+    rc = cli.main(
+        [
+            "log",
+            "sign-checkpoint",
+            "--dir",
+            str(log_dir),
+            "--ed25519-key",
+            str(ed_seed),
+            "--mldsa-key",
+            str(mldsa_out),
+            "--name",
+            LOG_NAME,
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert captured.err != ""
+    assert not (log_dir / "checkpoint").exists()
+
+
+def test_sign_checkpoint_refuses_on_history_rewrite_after_prior_checkpoint(
+    tmp_path: Path,
+) -> None:
+    """The consistency check against the PRIOR signed checkpoint is a
+    distinct security property from the candidate-recomputation check: here
+    the candidate is self-consistent with a (silently rewritten) entries
+    file, so only the prior-checkpoint consistency proof catches the
+    equivocation."""
+    log_dir = _log_init(tmp_path)
+    ed_seed, _ed_pub, mldsa_out = _keygen_hybrid(tmp_path, "log-signer")
+    seed, _pub = _keygen(tmp_path, "issuer")
+
+    payload_a = _write_payload(tmp_path, "payload-a.json", receipt_id="01J1V5B4M9Z8QWERTY12345671")
+    envelope_a = _issue(tmp_path, seed, payload_a, out_name="envelope-a.json")
+    _log_append(tmp_path, log_dir, _receipt_entry(envelope_a), name="entry-a.json")
+    checkpoint_path = _log_sign_checkpoint(log_dir, ed_seed, mldsa_out)
+    signed_at_size_1 = checkpoint_path.read_text(encoding="utf-8")
+
+    # Simulate a history rewrite: silently replace the already-signed entry.
+    payload_b = _write_payload(tmp_path, "payload-b.json", receipt_id="01J1V5B4M9Z8QWERTY12345672")
+    envelope_b = _issue(tmp_path, seed, payload_b, out_name="envelope-b.json")
+    (log_dir / "entries.jsonl").write_text(
+        json.dumps(_receipt_entry(envelope_b)) + "\n", encoding="utf-8"
+    )
+
+    payload_c = _write_payload(tmp_path, "payload-c.json", receipt_id="01J1V5B4M9Z8QWERTY12345673")
+    envelope_c = _issue(tmp_path, seed, payload_c, out_name="envelope-c.json")
+    _log_append(tmp_path, log_dir, _receipt_entry(envelope_c), name="entry-c.json")
+
+    rc = cli.main(
+        [
+            "log",
+            "sign-checkpoint",
+            "--dir",
+            str(log_dir),
+            "--ed25519-key",
+            str(ed_seed),
+            "--mldsa-key",
+            str(mldsa_out),
+            "--name",
+            LOG_NAME,
+        ]
+    )
+
+    assert rc == 2
+    assert checkpoint_path.read_text(encoding="utf-8") == signed_at_size_1
+
+
+def test_log_sign_checkpoint_rejects_aliased_signer_keys(tmp_path: Path, capsys: CapSys) -> None:
+    log_dir = _log_init(tmp_path)
+    seed, _pub = _keygen(tmp_path, "issuer")
+    payload_path = _write_payload(tmp_path)
+    envelope_path = _issue(tmp_path, seed, payload_path)
+    _log_append(tmp_path, log_dir, _receipt_entry(envelope_path))
+
+    ed_seed, _ed_pub, _mldsa_out = _keygen_hybrid(tmp_path, "log-signer")
+
+    capsys.readouterr()
+    rc = cli.main(
+        [
+            "log",
+            "sign-checkpoint",
+            "--dir",
+            str(log_dir),
+            "--ed25519-key",
+            str(ed_seed),
+            "--mldsa-key",
+            str(ed_seed),
+            "--name",
+            LOG_NAME,
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert captured.err != ""
+    assert not (log_dir / "checkpoint").exists()
+
+
+def test_log_sign_prove_verify_roundtrip_yields_transparency_logged(
+    tmp_path: Path, capsys: CapSys
+) -> None:
+    log_dir = _log_init(tmp_path)
+    ed_seed, ed_pub, mldsa_out = _keygen_hybrid(tmp_path, "log-signer")
+
+    seed, _pub = _keygen(tmp_path, "issuer")
+    manifest_path = _manifest_init(tmp_path, seed)
+    payload_path = _write_payload(tmp_path)
+    envelope_path = _issue(tmp_path, seed, payload_path)
+    trust_dir = _trust_dir(tmp_path, manifest_path)
+
+    _log_append(tmp_path, log_dir, _receipt_entry(envelope_path))
+    _log_sign_checkpoint(log_dir, ed_seed, mldsa_out)
+    evidence_path = _log_prove(tmp_path, log_dir, 0)
+
+    log_keys_path = _log_keys_file(tmp_path, ed_pub, mldsa_out)
+    anchor_policy_path = _anchor_policy_file(tmp_path)
+
+    capsys.readouterr()
+    rc = cli.main(
+        [
+            "verify",
+            str(envelope_path),
+            "--trust-dir",
+            str(trust_dir),
+            "--transparency",
+            str(evidence_path),
+            "--log-keys",
+            str(log_keys_path),
+            "--anchor-policy",
+            str(anchor_policy_path),
+        ]
+    )
+    result = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert result["ok"] is True
+    assert result["transparency"] == "logged"
+    assert result["corroboration"] == "logged"
+
+
+def test_verify_crqc_horizon_before_anchor_time_caps_transparency(
+    tmp_path: Path, capsys: CapSys
+) -> None:
+    log_dir = _log_init(tmp_path)
+    ed_seed, ed_pub, mldsa_out = _keygen_hybrid(tmp_path, "log-signer")
+
+    seed, _pub = _keygen(tmp_path, "issuer")
+    manifest_path = _manifest_init(tmp_path, seed)
+    payload_path = _write_payload(tmp_path)
+    envelope_path = _issue(tmp_path, seed, payload_path)
+    trust_dir = _trust_dir(tmp_path, manifest_path)
+
+    _log_append(tmp_path, log_dir, _receipt_entry(envelope_path))
+    checkpoint_path = _log_sign_checkpoint(log_dir, ed_seed, mldsa_out)
+    evidence_path = _log_prove(tmp_path, log_dir, 0)
+
+    checkpoint_text = checkpoint_path.read_text(encoding="utf-8")
+    note_bytes = tlog.parse_checkpoint(checkpoint_text).note_bytes
+    accumulator_start = hashlib.sha256(note_bytes).digest()
+    header_merkle_root = hashlib.sha256(accumulator_start).digest().hex()
+    header_hash = hashlib.sha256(b"attest-cli-test-anchor-header-v1").hexdigest()
+    header_time = 1700000000  # transparency.py's own documented KAT: -> 2023-11-14T22:13:20Z
+
+    ots_proof_path = tmp_path / "ots-proof.json"
+    ots_proof_path.write_text(
+        json.dumps(
+            {
+                "ops": [["sha256"]],
+                "header_merkle_root": header_merkle_root,
+                "header_hash": header_hash,
+                "header_time": header_time,
+            }
+        ),
+        encoding="utf-8",
+    )
+    anchored_path = tmp_path / "anchored-evidence.json"
+    rc = cli.main(
+        [
+            "log",
+            "anchor",
+            "--dir",
+            str(log_dir),
+            "--evidence",
+            str(evidence_path),
+            "--ots-proof",
+            str(ots_proof_path),
+            "--out",
+            str(anchored_path),
+        ]
+    )
+    assert rc == 0
+
+    log_keys_path = _log_keys_file(tmp_path, ed_pub, mldsa_out)
+    anchor_policy_path = _anchor_policy_file(
+        tmp_path,
+        pinned_headers={
+            header_hash: {
+                "header_hash": header_hash,
+                "merkle_root": header_merkle_root,
+                "time": header_time,
+            }
+        },
+    )
+
+    # Sanity check the fixture: without a horizon, the anchor upgrades standing.
+    capsys.readouterr()
+    rc = cli.main(
+        [
+            "verify",
+            str(envelope_path),
+            "--trust-dir",
+            str(trust_dir),
+            "--transparency",
+            str(anchored_path),
+            "--log-keys",
+            str(log_keys_path),
+            "--anchor-policy",
+            str(anchor_policy_path),
+        ]
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert result["transparency"] == "anchored_before:2023-11-14T22:13:20Z"
+
+    # A horizon set BEFORE the anchor's own time caps standing back down: the
+    # anchor must land strictly before the horizon to survive it.
+    capsys.readouterr()
+    rc = cli.main(
+        [
+            "verify",
+            str(envelope_path),
+            "--trust-dir",
+            str(trust_dir),
+            "--transparency",
+            str(anchored_path),
+            "--log-keys",
+            str(log_keys_path),
+            "--anchor-policy",
+            str(anchor_policy_path),
+            "--crqc-horizon",
+            "2020-01-01T00:00:00Z",
+        ]
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert result["transparency"] == "not_checked"
+
+
+def test_export_import_carries_proofs_via_proof_dir(tmp_path: Path, capsys: CapSys) -> None:
+    log_dir = _log_init(tmp_path)
+    ed_seed, _ed_pub, mldsa_out = _keygen_hybrid(tmp_path, "log-signer")
+
+    seed, _pub = _keygen(tmp_path, "issuer")
+    manifest_path = _manifest_init(tmp_path, seed)
+    payload_path = _write_payload(tmp_path)
+    envelope_path = _issue(tmp_path, seed, payload_path)
+    receipt_id = json.loads(payload_path.read_text(encoding="utf-8"))["receipt_id"]
+
+    _log_append(tmp_path, log_dir, _receipt_entry(envelope_path))
+    _log_sign_checkpoint(log_dir, ed_seed, mldsa_out)
+
+    proof_dir = tmp_path / "proofs-in"
+    proof_dir.mkdir()
+    _log_prove(tmp_path, log_dir, 0, out_name=f"proofs-in/{receipt_id}.json")
+
+    legal_text_path = tmp_path / "legal.txt"
+    legal_text_path.write_bytes(b"attest-test-legal-text-v1")
+    mirror_policy_path = tmp_path / "mirror-policy.txt"
+    mirror_policy_path.write_bytes(b"attest-test-mirror-policy-v1")
+
+    out_dir = tmp_path / "exported"
+    capsys.readouterr()
+    rc = cli.main(
+        [
+            "export",
+            "--receipt",
+            str(envelope_path),
+            "--key-manifest",
+            str(manifest_path),
+            "--legal-text",
+            str(legal_text_path),
+            "--legal-text",
+            str(mirror_policy_path),
+            "--proof-dir",
+            str(proof_dir),
+            "--out-dir",
+            str(out_dir),
+            "--name",
+            "mylibrary",
+        ]
+    )
+    assert rc == 0
+    report = json.loads(capsys.readouterr().out)
+
+    with zipfile.ZipFile(report["attest"]) as zf:
+        assert f"proofs/{receipt_id}.json" in zf.namelist()
+
+    import_out_dir = tmp_path / "imported"
+    capsys.readouterr()
+    rc = cli.main(["import", "--bundle", report["attest"], "--out-dir", str(import_out_dir)])
+    assert rc == 0
+    import_report = json.loads(capsys.readouterr().out)
+
+    assert import_report["proofs"] == 1
+    assert (import_out_dir / "proofs" / f"{receipt_id}.json").exists()
+
+
+def test_export_refuses_traversal_receipt_id_before_reading_outside_proof_dir(
+    tmp_path: Path, capsys: CapSys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Even a hostile, schema-bypassing receipt JSON cannot turn --proof-dir
+    into an arbitrary-file read through its receipt_id."""
+    seed, _pub = _keygen(tmp_path, "issuer")
+    manifest_path = _manifest_init(tmp_path, seed)
+    payload_path = _write_payload(tmp_path)
+    envelope_path = _issue(tmp_path, seed, payload_path)
+    envelope = json.loads(envelope_path.read_text(encoding="utf-8"))
+    envelope["payload"]["receipt_id"] = "../victim"
+    envelope_path.write_text(json.dumps(envelope), encoding="utf-8")
+
+    proof_dir = tmp_path / "proofs"
+    proof_dir.mkdir()
+    outside = tmp_path / "victim.json"
+    outside.write_text(json.dumps({"must_not_be_read": True}), encoding="utf-8")
+    original_read_json = cli._read_json
+
+    def reject_outside_read(path: Path) -> Any:
+        if path.resolve() == outside.resolve():
+            pytest.fail("attest export tried to read outside --proof-dir")
+        return original_read_json(path)
+
+    monkeypatch.setattr(cli, "_read_json", reject_outside_read)
+    legal_text_path = tmp_path / "legal.txt"
+    legal_text_path.write_bytes(b"attest-test-legal-text-v1")
+    mirror_policy_path = tmp_path / "mirror-policy.txt"
+    mirror_policy_path.write_bytes(b"attest-test-mirror-policy-v1")
+    out_dir = tmp_path / "exported"
+
+    capsys.readouterr()
+    rc = cli.main(
+        [
+            "export",
+            "--receipt",
+            str(envelope_path),
+            "--key-manifest",
+            str(manifest_path),
+            "--legal-text",
+            str(legal_text_path),
+            "--legal-text",
+            str(mirror_policy_path),
+            "--proof-dir",
+            str(proof_dir),
+            "--out-dir",
+            str(out_dir),
+            "--name",
+            "mylibrary",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "not a valid ULID" in captured.err
+    assert outside.read_text(encoding="utf-8") == json.dumps({"must_not_be_read": True})
+    assert not (out_dir / "mylibrary.attest").exists()
+
+
+def test_import_rejects_hostile_proof_member_without_writing_outside_out_dir(
+    tmp_path: Path, capsys: CapSys
+) -> None:
+    out_dir = tmp_path / "imported"
+    outside = (out_dir / "proofs" / ".." / ".." / ".." / "victim.json").resolve()
+    hostile_bundle = tmp_path / "hostile-proofs.attest"
+    with zipfile.ZipFile(hostile_bundle, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("proofs/../../../victim.json", "{}")
+
+    capsys.readouterr()
+    rc = cli.main(["import", "--bundle", str(hostile_bundle), "--out-dir", str(out_dir)])
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "invalid proof member path" in captured.err
+    assert not outside.exists()
+    assert not (out_dir / "proofs").exists()
+
+
+def test_log_append_tile_failure_preserves_entries_and_retry_does_not_duplicate(
+    tmp_path: Path, capsys: CapSys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log_dir = _log_init(tmp_path)
+    seed, _pub = _keygen(tmp_path, "issuer")
+    envelope_a = _issue(
+        tmp_path,
+        seed,
+        _write_payload(tmp_path, "payload-a.json", receipt_id="01J1V5B4M9Z8QWERTY12345671"),
+    )
+    entry_a = _receipt_entry(envelope_a)
+    _log_append(tmp_path, log_dir, entry_a, name="entry-a.json")
+    entries_path = log_dir / "entries.jsonl"
+    candidate_path = log_dir / "checkpoint.candidate"
+    prior_entries = entries_path.read_text(encoding="utf-8")
+    prior_candidate = candidate_path.read_text(encoding="utf-8")
+
+    envelope_b = _issue(
+        tmp_path,
+        seed,
+        _write_payload(tmp_path, "payload-b.json", receipt_id="01J1V5B4M9Z8QWERTY12345672"),
+    )
+    entry_b = _receipt_entry(envelope_b)
+    entry_b_path = tmp_path / "entry-b.json"
+    entry_b_path.write_text(json.dumps(entry_b), encoding="utf-8")
+    original_write_bytes = Path.write_bytes
+
+    def fail_tile_write(path: Path, data: bytes) -> int:
+        raise OSError("simulated tile write failure")
+
+    monkeypatch.setattr(Path, "write_bytes", fail_tile_write)
+    capsys.readouterr()
+    rc = cli.main(["log", "append", "--dir", str(log_dir), "--entry-json", str(entry_b_path)])
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "simulated tile write failure" in captured.err
+    assert entries_path.read_text(encoding="utf-8") == prior_entries
+    assert candidate_path.read_text(encoding="utf-8") == prior_candidate
+
+    monkeypatch.setattr(Path, "write_bytes", original_write_bytes)
+    assert (
+        cli.main(["log", "append", "--dir", str(log_dir), "--entry-json", str(entry_b_path)]) == 0
+    )
+    entries = [json.loads(line) for line in entries_path.read_text(encoding="utf-8").splitlines()]
+    assert entries == [entry_a, entry_b]
+
+
+def test_log_append_deduplicates_canonical_entry_without_mutating_state(
+    tmp_path: Path, capsys: CapSys
+) -> None:
+    log_dir = _log_init(tmp_path)
+    entry_a = {"type": "receipt", "issuer": ISSUER, "core_sha256": "a" * 64}
+    entry_a_path = tmp_path / "entry-a.json"
+    entry_a_path.write_text(json.dumps(entry_a), encoding="utf-8")
+
+    assert (
+        cli.main(["log", "append", "--dir", str(log_dir), "--entry-json", str(entry_a_path)]) == 0
+    )
+    after_first = {
+        path.relative_to(log_dir): path.read_bytes()
+        for path in log_dir.rglob("*")
+        if path.is_file()
+    }
+
+    duplicate_path = tmp_path / "entry-a-reordered.json"
+    duplicate_path.write_text(
+        json.dumps({"core_sha256": "a" * 64, "issuer": ISSUER, "type": "receipt"}),
+        encoding="utf-8",
+    )
+    capsys.readouterr()
+    rc = cli.main(["log", "append", "--dir", str(log_dir), "--entry-json", str(duplicate_path)])
+    duplicate_result = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert duplicate_result["leaf_index"] == 0
+    assert duplicate_result["duplicate"] is True
+    assert {
+        path.relative_to(log_dir): path.read_bytes()
+        for path in log_dir.rglob("*")
+        if path.is_file()
+    } == after_first
+
+    entry_b = {"type": "receipt", "issuer": ISSUER, "core_sha256": "b" * 64}
+    entry_b_path = tmp_path / "entry-b.json"
+    entry_b_path.write_text(json.dumps(entry_b), encoding="utf-8")
+    capsys.readouterr()
+    rc = cli.main(["log", "append", "--dir", str(log_dir), "--entry-json", str(entry_b_path)])
+    distinct_result = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert distinct_result["leaf_index"] == 1
+    assert "duplicate" not in distinct_result
+
+
+def test_log_sign_checkpoint_replace_failure_preserves_existing_checkpoint_and_entries(
+    tmp_path: Path, capsys: CapSys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log_dir = _log_init(tmp_path)
+    ed_seed, _ed_pub, mldsa_out = _keygen_hybrid(tmp_path, "log-signer")
+    seed, _pub = _keygen(tmp_path, "issuer")
+    envelope_path = _issue(tmp_path, seed, _write_payload(tmp_path))
+    _log_append(tmp_path, log_dir, _receipt_entry(envelope_path))
+    checkpoint_path = _log_sign_checkpoint(log_dir, ed_seed, mldsa_out)
+    prior_checkpoint = checkpoint_path.read_text(encoding="utf-8")
+    prior_entries = (log_dir / "entries.jsonl").read_text(encoding="utf-8")
+    original_replace = cli.os.replace
+
+    def fail_checkpoint_replace(source: Path | str, destination: Path | str) -> None:
+        if Path(destination) == checkpoint_path:
+            raise OSError("simulated checkpoint replace failure")
+        original_replace(source, destination)
+
+    monkeypatch.setattr(cli.os, "replace", fail_checkpoint_replace)
+    capsys.readouterr()
+    rc = cli.main(
+        [
+            "log",
+            "sign-checkpoint",
+            "--dir",
+            str(log_dir),
+            "--ed25519-key",
+            str(ed_seed),
+            "--mldsa-key",
+            str(mldsa_out),
+            "--name",
+            LOG_NAME,
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "simulated checkpoint replace failure" in captured.err
+    assert checkpoint_path.read_text(encoding="utf-8") == prior_checkpoint
+    assert (log_dir / "entries.jsonl").read_text(encoding="utf-8") == prior_entries
+
+
+def test_log_state_files_are_published_with_umask_default_modes(tmp_path: Path) -> None:
+    """LOG state files are public artifacts meant for static hosting: routing
+    them through mkstemp/mkdtemp staging must not install owner-only modes."""
+    previous_umask = os.umask(0o022)
+    try:
+        log_dir = _log_init(tmp_path)
+        seed, _pub = _keygen(tmp_path, "issuer")
+        envelope_path = _issue(tmp_path, seed, _write_payload(tmp_path))
+        _log_append(tmp_path, log_dir, _receipt_entry(envelope_path))
+        ed_seed, _ed_pub, mldsa_out = _keygen_hybrid(tmp_path, "log-signer")
+        _log_sign_checkpoint(log_dir, ed_seed, mldsa_out)
+    finally:
+        os.umask(previous_umask)
+
+    for state_file in ("entries.jsonl", "checkpoint.candidate", "checkpoint"):
+        assert stat.S_IMODE((log_dir / state_file).stat().st_mode) == 0o644, state_file
+    tile_dir = log_dir / "tile" / "0"
+    assert stat.S_IMODE(tile_dir.stat().st_mode) == 0o755
+    for tile in tile_dir.iterdir():
+        assert stat.S_IMODE(tile.stat().st_mode) == 0o644, tile.name

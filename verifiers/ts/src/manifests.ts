@@ -43,8 +43,11 @@ export function signableManifestBytes(manifest: JsonObject): Uint8Array {
 // and valid; non-hybrid requires the Ed25519 leg valid and `sig_ml_dsa_65`
 // ABSENT. Any other combination fails closed. Never throws — decode/type
 // errors on untrusted input are treated as verification failure. Mirrors
-// manifests.py's `_verify_signature_block`.
-function verifySignatureBlock(payload: Uint8Array, sigBlock: JsonObject, entry: JsonObject): boolean {
+// manifests.py's `verify_signature_block` — exported (not module-private, unlike
+// the Python function's leading-underscore convention) because it is the
+// single shared hybrid-verification primitive behind every v0.2 signed
+// side-document: `revocation.ts`'s `verifyRecordSignature` calls this too.
+export function verifySignatureBlock(payload: Uint8Array, sigBlock: JsonObject, entry: JsonObject): boolean {
   const isHybridEntry = 'pub_ml_dsa_65' in entry
   const hasMldsaLeg = 'sig_ml_dsa_65' in sigBlock
   if (isHybridEntry !== hasMldsaLeg) return false
@@ -121,17 +124,22 @@ export function chainContinuous(chain: JsonObject[]): boolean {
   return true
 }
 
+// AND rule (v0.2, mirrors verifyKeyManifest/manifests.py's
+// verify_artifact_manifest): if the signer's keyManifest entry is hybrid
+// (carries pub_ml_dsa_65), manifest_signature MUST also carry a valid
+// sig_ml_dsa_65 leg over the same signed bytes, or verification fails closed;
+// an Ed25519-only entry with a stray sig_ml_dsa_65 leg likewise fails closed
+// (see verifySignatureBlock). Ed25519-only signers keep v0.1 behavior
+// byte-for-byte (Stage 2 Task 6/8 sibling-patch parity).
 export function verifyArtifactManifest(manifest: JsonObject, keyManifest: JsonObject): boolean {
   try {
     if (!verifyKeyManifest(keyManifest)) return false
     const sigBlock = asObject(manifest['manifest_signature'])
-    if (!sigBlock || typeof sigBlock['kid'] !== 'string' || typeof sigBlock['sig'] !== 'string') return false
+    if (!sigBlock || typeof sigBlock['kid'] !== 'string') return false
     if (manifest['issuer'] !== keyManifest['issuer']) return false
     const entry = findKey(keyManifest, sigBlock['kid'])
     if (!entry || entry['status'] !== 'active') return false
     if (!withinReleaseWindow(manifest['released_at'], entry)) return false
-    const pub = entry['pub']
-    if (typeof pub !== 'string') return false
-    return verifyStrict(signableManifestBytes(manifest), b64uDecode(sigBlock['sig']), b64uDecode(pub))
+    return verifySignatureBlock(signableManifestBytes(manifest), sigBlock, entry)
   } catch { return false }
 }

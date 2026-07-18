@@ -1,3 +1,5 @@
+import { sha256 } from '@noble/hashes/sha2'
+import { bytesToHex } from '@noble/curves/utils.js'
 import { JsonObject, JsonValue, canonicalBytes, dumps, CanonError, loadsStrict } from './canon.js'
 import { TrustStore, findKey, withinValidity, chainContinuous } from './manifests.js'
 import { verifyStrict, Ed25519LengthError } from './ed25519.js'
@@ -7,15 +9,43 @@ import { validatePayload, SCHEMA_TOP_LEVEL_KEYS } from './schema.js'
 import { classifyRevocation, MAX_REVOCATION_RECORDS } from './revocation.js'
 import { computeCommitment, verifyChallenge } from './commitment.js'
 import { b64uEncode } from './b64u.js'
+import { TlogError, LogKey, receiptCoreHash, encodeEntry } from './tlog.js'
+import { AnchorPolicy, validatePolicy as validateAnchorPolicyOnly } from './anchor.js'
+import {
+  TransparencyError,
+  TRANSPARENCY_NOT_CHECKED,
+  TRANSPARENCY_EQUIVOCATION_DETECTED,
+  CORROBORATION_NONE,
+  evaluateTransparency,
+  validateLogKeys,
+} from './transparency.js'
 import {
   ERR, WARN, unsupportedAttestVersion, signaturesCount, unsupportedSigAlg, noTrustedManifest,
   noKeyInManifest, keyCompromised, keyRetired, issuedAtOutsideWindow, malformedKeyMaterial,
-  malformedSigMaterial, unknownField, unknownEol, keyEntryNotHybrid,
+  malformedSigMaterial, unknownField, unknownEol, keyEntryNotHybrid, pyRepr, codePointLength,
+  VERIFY_TRANSPARENCY_WARN,
 } from './messages.js'
 
 // attest_version values this verifier's verify() step 1 accepts (v0.1 single-sig,
 // v0.2 hybrid Ed25519+ML-DSA-65). Mirrors verify.py's `_SUPPORTED_ATTEST_VERSIONS`.
 const SUPPORTED_ATTEST_VERSIONS = new Set(['0.1', '0.2'])
+
+// Stage 2 (design doc "transparency/corroboration layer"): three new,
+// purely informational result components. Defaults are the ZERO-behavior-
+// change values existing callers already implicitly get.
+const MANIFEST_FRESHNESS_NOT_CHECKED = 'not_checked'
+const CLAIM_TYPE_RECEIPT = 'receipt'
+const CLAIM_TYPE_KEY_MANIFEST = 'key-manifest'
+
+// This outer cap must COVER everything the downstream evaluators' own inner
+// caps accept, or evaluator-valid evidence gets falsely rejected here.
+// Worst-case legitimate bundle, derived from those inner caps: checkpoint +
+// prior_checkpoint + the anchors bundle's own checkpoint copy at ~500KB each,
+// plus anchors proofs at 64 proofs x 64 ops x ~2060 chars per max
+// append/prepend op ~ 8.5MB, plus inclusion/consistency proofs (~8KB) —
+// ~10MB total. Mirrors verify.py's `_MAX_TRANSPARENCY_EVIDENCE_LEN`.
+const MAX_TRANSPARENCY_EVIDENCE_LEN = 10_000_000
+export const MAX_TRANSPARENCY_EVIDENCE_LEN_ = MAX_TRANSPARENCY_EVIDENCE_LEN
 
 export type Signature = 'valid' | 'invalid'
 export type Schema = 'valid' | 'invalid' | 'not_checked'
@@ -23,11 +53,27 @@ export type Binding = 'proven' | 'not_proven' | 'not_checked'
 export type Trust = 'verified' | 'unauthenticated_tofu' | 'unverified_rotation'
 export interface VerificationResult {
   signature: Signature; schema: Schema; revocation: string; binding: Binding; trust: Trust
+  // Stage 2, informational only (never affect signature/schema/revocation/
+  // binding/trust/ok): "not_checked" | "logged" | "anchored_before:<T>" |
+  // "equivocation_detected"; "none" | "logged" | "witnessed"; "not_checked" |
+  // "verified_as_of:<N>". Field names match the Python reference verbatim
+  // (design doc + plan explicitly spell `manifest_freshness`, not camelCase).
+  transparency: string; corroboration: string; manifest_freshness: string
   warnings: string[]; errors: string[]
 }
 export interface Disclosure {
   identifier?: string | null; identifier_type?: string | null
   salt?: Uint8Array | null; challenge?: [Uint8Array, Uint8Array] | null
+}
+// Stage 2 addition: verify(..., {transparency, logKeys, anchorPolicy}) — all
+// optional, defaulting to the ZERO-behavior-change values. `transparency` is
+// one untrusted evidence bundle (a bigint-typed JsonValue, matching this
+// verifier's other JCS-serializable inputs); `logKeys`/`anchorPolicy` are
+// the verifier's trusted, pinned configuration for evaluating it.
+export interface VerifyTransparencyOptions {
+  transparency?: JsonValue | null
+  logKeys?: LogKey[] | null
+  anchorPolicy?: AnchorPolicy | null
 }
 const KNOWN_EOL = new Set(['artifacts-remain-redownloadable', 'escrow', 'none'])
 
@@ -90,11 +136,242 @@ function classifyBinding(payload: JsonObject, d: Disclosure): Binding {
   return 'not_proven'
 }
 
+// --------------------------------------------------------------------------
+// Stage 2: transparency/corroboration/manifest_freshness integration.
+// --------------------------------------------------------------------------
+
+/** True iff `chain` is a validated, gapless rotation history from
+ * manifest_version 1 through `manifest` itself, held in the verifier's OWN
+ * trust store (design fix 6). Deliberately STRICTER than the plain
+ * `chainContinuous` use for `trust`: an ABSENT chain is fine for `trust`
+ * (nothing to validate) but NOT fine here — corroborating a rotated
+ * key-manifest requires the verifier to already hold every intermediate
+ * version itself. `trust` semantics are untouched by this function — it
+ * feeds `corroboration` only. */
+function rotationChainVerified(chain: JsonObject[] | undefined, manifest: JsonObject | undefined): boolean {
+  if (!chain || chain.length === 0 || manifest == null) return false
+  if (dumps(chain[chain.length - 1]!) !== dumps(manifest)) return false
+  if (chain[0]!['manifest_version'] !== 1n) return false
+  return chainContinuous(chain)
+}
+
+/** `candidate` iff it passes the log's own closed entry schema, else `null`
+ * — never trust a computed entry into `evaluateTransparency` without this
+ * (a malformed `expectedEntry` would throw `TransparencyError`, which must
+ * never happen just because the RECEIPT's own untrusted payload was
+ * malformed, e.g. a bad `issuer.id`). */
+function validatedTransparencyEntry(candidate: Record<string, unknown>): Record<string, unknown> | null {
+  try {
+    encodeEntry(candidate)
+  } catch (e) {
+    if (e instanceof TlogError) return null
+    throw e
+  }
+  return candidate
+}
+
+function isPlainRecord(v: unknown): v is Record<string, unknown> {
+  return v !== null && typeof v === 'object' && !Array.isArray(v)
+}
+
+interface ResolvedTransparencyClaim {
+  claimType: string | null
+  expectedEntry: Record<string, unknown> | null
+  treeSize: number | null
+}
+
+/** Read the untrusted evidence's claimed type (`entry.type`) and, only if
+ * `verify()` can independently compute a matching entry from its OWN
+ * trusted artifacts, that entry — plus the evidence's own declared
+ * `tree_size`. The evidence's OWN hash values are never trusted for
+ * anything beyond dispatch — `expectedEntry` is always computed locally. */
+function resolveTransparencyClaim(
+  transparencyEvidence: unknown,
+  envelope: JsonObject,
+  receiptIssuerId: string | null,
+  issuerManifest: JsonObject | null,
+): ResolvedTransparencyClaim {
+  if (!isPlainRecord(transparencyEvidence)) return { claimType: null, expectedEntry: null, treeSize: null }
+
+  const entry = transparencyEvidence['entry']
+  const rawClaimType = isPlainRecord(entry) ? entry['type'] : undefined
+  const claimType = typeof rawClaimType === 'string' ? rawClaimType : null
+
+  const rawTreeSize = transparencyEvidence['tree_size']
+  const treeSize = typeof rawTreeSize === 'number' && Number.isInteger(rawTreeSize) ? rawTreeSize : null
+
+  let expectedEntry: Record<string, unknown> | null = null
+  if (claimType === CLAIM_TYPE_RECEIPT) {
+    let coreHash: string | null
+    try {
+      coreHash = receiptCoreHash(envelope)
+    } catch (e) {
+      if (e instanceof TlogError) coreHash = null
+      else throw e
+    }
+    if (coreHash !== null) {
+      expectedEntry = validatedTransparencyEntry({
+        type: CLAIM_TYPE_RECEIPT,
+        issuer: receiptIssuerId,
+        core_sha256: coreHash,
+      })
+    }
+  } else if (claimType === CLAIM_TYPE_KEY_MANIFEST && issuerManifest !== null) {
+    let manifestSha256: string | null
+    try {
+      manifestSha256 = bytesToHex(sha256(canonicalBytes(issuerManifest)))
+    } catch (e) {
+      if (e instanceof CanonError) manifestSha256 = null
+      else throw e
+    }
+    if (manifestSha256 !== null) {
+      const manifestVersionRaw = issuerManifest['manifest_version']
+      expectedEntry = validatedTransparencyEntry({
+        type: CLAIM_TYPE_KEY_MANIFEST,
+        issuer: issuerManifest['issuer'],
+        manifest_version: typeof manifestVersionRaw === 'bigint' ? Number(manifestVersionRaw) : manifestVersionRaw,
+        manifest_sha256: manifestSha256,
+      })
+    }
+  }
+
+  return { claimType, expectedEntry, treeSize }
+}
+
+/** The single pinned origin shared by every entry in `logKeys` — this is
+ * verify()'s own trusted configuration (mirrors `evaluateTransparency`'s
+ * `expectedOrigin` argument), never derived from untrusted evidence. Each
+ * key is deep-validated via `validateLogKeys` (byte lengths, name/origin
+ * grammar), so a malformed pinned key throws here too, eagerly. Disagreeing
+ * or empty origins are likewise a caller/config bug. */
+function resolveLogOrigin(logKeys: LogKey[]): string {
+  const validated = validateLogKeys(logKeys)
+  const origins = new Set(validated.map((key) => key.origin))
+  if (origins.size !== 1) {
+    throw new TransparencyError(
+      `log_keys must be a non-empty list sharing a single origin, got ${pyRepr([...origins].sort())}`,
+    )
+  }
+  return [...origins][0]!
+}
+
+interface TransparencyClaimOutcome {
+  transparency: string
+  corroboration: string
+  manifestFreshness: string
+}
+
+const ZERO_TRANSPARENCY_CLAIM: TransparencyClaimOutcome = {
+  transparency: TRANSPARENCY_NOT_CHECKED,
+  corroboration: CORROBORATION_NONE,
+  manifestFreshness: MANIFEST_FRESHNESS_NOT_CHECKED,
+}
+
+/** Resolve `{transparency, corroboration, manifestFreshness}` from one
+ * evidence bundle. Computed independently of the receipt's own pass/fail
+ * verdict — called once, early, regardless of whether the receipt later
+ * turns out invalid (e.g. a compromised key), so that corroboration can
+ * never rescue an otherwise-rejected receipt. Absent evidence is the
+ * ZERO-behavior-change default. Evidence present but `logKeys`/`anchorPolicy`
+ * missing is a configuration gap — degrades with a warning, never throws.
+ * A malformed `logKeys`/`anchorPolicy` is trusted-config, validated eagerly
+ * regardless of what the evidence looks like, so a config bug always
+ * surfaces as `TransparencyError`.
+ */
+function evaluateTransparencyClaim(
+  envelope: JsonObject,
+  receiptIssuerId: string | null,
+  issuerManifest: JsonObject | null,
+  rotationChainOk: boolean,
+  transparencyEvidence: JsonValue | null,
+  logKeys: LogKey[] | null,
+  anchorPolicy: AnchorPolicy | null,
+  warnings: string[],
+): TransparencyClaimOutcome {
+  if (transparencyEvidence == null) return ZERO_TRANSPARENCY_CLAIM
+
+  if (logKeys == null || anchorPolicy == null) {
+    warnings.push(VERIFY_TRANSPARENCY_WARN.CONFIG_MISSING)
+    return ZERO_TRANSPARENCY_CLAIM
+  }
+
+  // Trusted-config validation: deliberately OUTSIDE the try block below,
+  // mirroring verify.py's `_evaluate_transparency_claim` (the origin
+  // resolution and policy re-validation run before the untrusted-evidence
+  // phase's broad `except Exception`, so a config bug always surfaces as
+  // TransparencyError rather than being masked as "claim unresolvable").
+  const origin = resolveLogOrigin(logKeys)
+  validateAnchorPolicyOnly(anchorPolicy)
+
+  try {
+    // verify()'s untrusted-evidence boundary. Canonicalize and parse once so
+    // every following phase sees one ordinary JSON object (plain `number`
+    // integers, never bigint) — never a stateful mapping/value supplied by
+    // the caller. The size cap prevents decoding an arbitrarily large
+    // serialized evidence bundle.
+    const serializedEvidence = dumps(transparencyEvidence)
+    if (codePointLength(serializedEvidence) > MAX_TRANSPARENCY_EVIDENCE_LEN) {
+      throw new Error('transparency evidence exceeds materialization limit')
+    }
+    const materializedEvidence: unknown = JSON.parse(serializedEvidence)
+    if (!isPlainRecord(materializedEvidence)) {
+      throw new Error('transparency evidence is not an object')
+    }
+
+    const { claimType, expectedEntry, treeSize } = resolveTransparencyClaim(
+      materializedEvidence,
+      envelope,
+      receiptIssuerId,
+      issuerManifest,
+    )
+    if (expectedEntry === null) {
+      warnings.push(VERIFY_TRANSPARENCY_WARN.CLAIM_UNRESOLVABLE)
+      return ZERO_TRANSPARENCY_CLAIM
+    }
+
+    const result = evaluateTransparency(materializedEvidence, {
+      logKeys,
+      expectedOrigin: origin,
+      policy: anchorPolicy,
+      expectedEntry,
+    })
+    warnings.push(...result.warnings)
+
+    let transparencyState = result.transparency
+    let corroborationState = result.corroboration
+    let manifestFreshnessState = MANIFEST_FRESHNESS_NOT_CHECKED
+
+    const reachedLoggedOrBetter =
+      transparencyState !== TRANSPARENCY_NOT_CHECKED && transparencyState !== TRANSPARENCY_EQUIVOCATION_DETECTED
+    if (claimType === CLAIM_TYPE_KEY_MANIFEST && reachedLoggedOrBetter) {
+      if (treeSize !== null) manifestFreshnessState = `verified_as_of:${treeSize}`
+      const manifestVersion = issuerManifest ? issuerManifest['manifest_version'] : undefined
+      if (typeof manifestVersion === 'bigint' && manifestVersion > 1n && !rotationChainOk) {
+        corroborationState = CORROBORATION_NONE
+        warnings.push(VERIFY_TRANSPARENCY_WARN.ROTATION_CHAIN_REQUIRED)
+      }
+    }
+
+    return { transparency: transparencyState, corroboration: corroborationState, manifestFreshness: manifestFreshnessState }
+  } catch {
+    // Deliberately encloses every untrusted claim phase above, including
+    // post-evaluation freshness/rotation logic. Confines hostile mapping
+    // access and equality implementations.
+    warnings.push(VERIFY_TRANSPARENCY_WARN.CLAIM_UNRESOLVABLE)
+    return ZERO_TRANSPARENCY_CLAIM
+  }
+}
+
 export function verify(
   envelopeBytes: Uint8Array, trustStore: TrustStore,
   revocationView: JsonValue[] | null = null, disclosure: Disclosure | null = null,
   maxRevocationRecords: number = MAX_REVOCATION_RECORDS,
+  options: VerifyTransparencyOptions = {},
 ): VerificationResult {
+  const transparencyEvidence = options.transparency ?? null
+  const logKeys = options.logKeys ?? null
+  const anchorPolicy = options.anchorPolicy ?? null
+
   if (revocationView !== null && !Array.isArray(revocationView))
     throw new TypeError('revocation_view must be a list of records or None')
 
@@ -114,9 +391,19 @@ export function verify(
   const errors: string[] = []
   const warnings: string[] = []
   let trust: Trust = 'unauthenticated_tofu'
+  // Stage 2 defaults — the ZERO-behavior-change values (updated below, once,
+  // right after trust is resolved; see `evaluateTransparencyClaim`'s doc
+  // comment for why this runs before any pass/fail branching).
+  let transparencyState: string = TRANSPARENCY_NOT_CHECKED
+  let corroborationState: string = CORROBORATION_NONE
+  let manifestFreshnessState: string = MANIFEST_FRESHNESS_NOT_CHECKED
   const invalid = (message: string, schema: Schema = 'not_checked'): VerificationResult => {
     errors.push(message)
-    return { signature: 'invalid', schema, revocation: 'unknown', binding: 'not_checked', trust, warnings: [...warnings], errors: [...errors] }
+    return {
+      signature: 'invalid', schema, revocation: 'unknown', binding: 'not_checked', trust,
+      transparency: transparencyState, corroboration: corroborationState, manifest_freshness: manifestFreshnessState,
+      warnings: [...warnings], errors: [...errors],
+    }
   }
 
   // Step 0 — strict parse
@@ -133,8 +420,10 @@ export function verify(
   // Trust resolution — AFTER payload/signatures checks, BEFORE step 1. Never reset later.
   const issuerBlock = obj(payload['issuer'])
   const issuerId = issuerBlock ? issuerBlock['id'] : undefined
+  let issuerManifestForTransparency: JsonObject | undefined
   if (typeof issuerId === 'string') {
     trust = trustStore.provenance[issuerId] === 'tls' ? 'verified' : 'unauthenticated_tofu'
+    issuerManifestForTransparency = trustStore.manifests[issuerId]
     const chain = trustStore.chains?.[issuerId]
     if (chain && chain.length > 0) {
       // A chain that doesn't end at the manifest being used proves nothing about
@@ -144,6 +433,28 @@ export function verify(
       const tailMatchesUsed = used != null && dumps(chain[chain.length - 1]!) === dumps(used)
       if (!chainContinuous(chain) || !tailMatchesUsed) trust = 'unverified_rotation'
     }
+  }
+
+  // --- Transparency/corroboration (Stage 2, informational only): resolved
+  // here, before any pass/fail branching below, so a receipt that later
+  // turns out invalid (e.g. a compromised key) still reports whatever
+  // standing the evidence actually earns — see `evaluateTransparencyClaim`.
+  {
+    const chain = typeof issuerId === 'string' ? trustStore.chains?.[issuerId] : undefined
+    const rotationOk = rotationChainVerified(chain, issuerManifestForTransparency)
+    const claimOutcome = evaluateTransparencyClaim(
+      envelope,
+      typeof issuerId === 'string' ? issuerId : null,
+      issuerManifestForTransparency ?? null,
+      rotationOk,
+      transparencyEvidence,
+      logKeys,
+      anchorPolicy,
+      warnings,
+    )
+    transparencyState = claimOutcome.transparency
+    corroborationState = claimOutcome.corroboration
+    manifestFreshnessState = claimOutcome.manifestFreshness
   }
 
   // Step 1 — envelope shape: attest_version supported; signatures length ==
@@ -263,5 +574,9 @@ export function verify(
     binding = disclosure != null ? classifyBinding(payload, disclosure) : 'not_checked'
   }
 
-  return { signature: 'valid', schema, revocation, binding, trust, warnings: [...warnings], errors: [...errors] }
+  return {
+    signature: 'valid', schema, revocation, binding, trust,
+    transparency: transparencyState, corroboration: corroborationState, manifest_freshness: manifestFreshnessState,
+    warnings: [...warnings], errors: [...errors],
+  }
 }

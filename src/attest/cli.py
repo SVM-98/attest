@@ -27,15 +27,20 @@ rather than `"verified"` even when the signature checks out.
 from __future__ import annotations
 
 import argparse
+import base64
 import copy
+import datetime
 import hashlib
 import json
 import os
+import re
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
-from attest import bundle, canon, issue, keys, manifests, pq, verify
+from attest import anchor, bundle, canon, issue, keys, manifests, pq, tlog, verify
 
 EXIT_OK = 0
 EXIT_VERIFICATION_FAILED = 1
@@ -44,6 +49,45 @@ EXIT_USAGE_ERROR = 2
 _SECRET_FILE_MODE = 0o600
 _PROVENANCE_BUNDLE = "bundle"  # local trust material is unauthenticated TOFU (design §5)
 _REDACTED_SALT = "<redacted: run on the .private material to see it>"
+
+# --- `attest log` on-disk layout (Stage 2, offline-signer split) -------------
+#
+# LOG/config.json          — {"origin": ...}, written once by `log init`.
+# LOG/entries.jsonl        — one JSON entry object per line, append-only; the
+#                            SOLE source of truth (tiles/candidate/checkpoint
+#                            are all derived from it, never the reverse).
+# LOG/checkpoint.candidate — UNSIGNED note body (origin/size/b64 root only,
+#                            no signature lines) written by `log append`.
+# LOG/checkpoint           — the hybrid-signed C2SP note, written only by
+#                            `log sign-checkpoint` (the offline/ceremony step).
+# LOG/tile/0/...           — level-0 (leaf-hash) tlog-tiles, rebuilt from
+#                            scratch on every `log append`. Simplification
+#                            (documented, see `_rebuild_tiles`): only level 0
+#                            is materialized — the C2SP interior-level cache
+#                            tiles are a pure read-amplification optimization
+#                            for very large logs and are not needed here; a
+#                            mirror can rebuild the whole tree from level-0
+#                            tiles alone by re-running RFC 6962 MTH over them.
+_LOG_CONFIG_FILENAME = "config.json"
+_LOG_ENTRIES_FILENAME = "entries.jsonl"
+_LOG_CANDIDATE_FILENAME = "checkpoint.candidate"
+_LOG_CHECKPOINT_FILENAME = "checkpoint"
+_LOG_TILE_DIRNAME = "tile"
+_TILE_FULL_WIDTH = 256  # C2SP tlog-tiles: leaves per level-0 tile
+_ISO8601_UTC_FMT = "%Y-%m-%dT%H:%M:%SZ"
+_RECEIPT_ID_RE = re.compile(r"^[0-7][0-9A-HJKMNP-TV-Z]{25}$")
+
+# Stage-2 inputs are parsed from untrusted files, so cap them before decoding
+# or base64 expansion. JSON feeds `verify`'s 10M-character evidence
+# materialization ceiling; a checkpoint candidate feeds the signed-note 500K
+# text cap. An RFC 3161 token is embedded base64-expanded (4/3) into the same
+# evidence object. These are pre-allocation bounds; `_cmd_log_anchor` applies
+# the verifier's exact total-evidence bound after composing the output.
+_MAX_STAGE2_INPUT_BYTES = {
+    "json": verify._MAX_TRANSPARENCY_EVIDENCE_LEN,
+    "candidate": tlog._MAX_NOTE_TEXT_LEN,
+    "rfc3161": (verify._MAX_TRANSPARENCY_EVIDENCE_LEN - tlog._MAX_NOTE_TEXT_LEN - 500_000) * 3 // 4,
+}
 
 
 class CliUsageError(Exception):
@@ -66,9 +110,41 @@ def _same_file_target(a: Path, b: Path) -> bool:
         return False
 
 
-def _read_json(path: Path) -> Any:
+def _read_bounded_bytes(path: Path, *, max_bytes: int, input_name: str) -> bytes:
+    """Read at most `max_bytes` from an untrusted CLI file.
+
+    The size check avoids allocating a known-oversized regular file; bounded
+    read still closes the stat/read race before a decoder or base64 can fully
+    materialize a replacement file.
+    """
     try:
-        text = path.read_text(encoding="utf-8")
+        if path.stat().st_size > max_bytes:
+            raise CliUsageError(f"{input_name} input exceeds {max_bytes} bytes: {path}")
+        with path.open("rb") as file:
+            data = file.read(max_bytes + 1)
+    except FileNotFoundError as exc:
+        raise CliUsageError(f"file not found: {path}") from exc
+    except OSError as exc:
+        raise CliUsageError(f"cannot read {path}: {exc}") from exc
+    if len(data) > max_bytes:
+        raise CliUsageError(f"{input_name} input exceeds {max_bytes} bytes: {path}")
+    return data
+
+
+def _read_bounded_text(path: Path, *, max_bytes: int, input_name: str) -> str:
+    try:
+        return _read_bounded_bytes(path, max_bytes=max_bytes, input_name=input_name).decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise CliUsageError(f"cannot decode {path} as UTF-8: {exc}") from exc
+
+
+def _read_json(path: Path, *, max_bytes: int | None = None, input_name: str = "JSON") -> Any:
+    try:
+        text = (
+            _read_bounded_text(path, max_bytes=max_bytes, input_name=input_name)
+            if max_bytes is not None
+            else path.read_text(encoding="utf-8")
+        )
     except FileNotFoundError as exc:
         raise CliUsageError(f"file not found: {path}") from exc
     except OSError as exc:
@@ -106,6 +182,44 @@ def _write_secret_text(path: Path, text: str) -> None:
     with os.fdopen(fd, "w") as fh:
         os.fchmod(fh.fileno(), _SECRET_FILE_MODE)
         fh.write(text)
+
+
+def _publishable_mode(base_mode: int) -> int:
+    """Mode bits a plain ``open()``/``mkdir()`` would produce under the umask."""
+    mask = os.umask(0)
+    os.umask(mask)
+    return base_mode & ~mask
+
+
+def _stage_text(path: Path, text: str) -> Path:
+    """Write text to a sibling temporary file and return that file.
+
+    Keeping the temporary file beside its destination makes the eventual
+    ``os.replace`` an atomic same-filesystem rename.  Callers retain control
+    over commit ordering when several state files must change together.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent, text=True)
+    staged = Path(temp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        # mkstemp creates the file owner-only, but every _stage_text target is
+        # a public log artifact meant for static hosting — os.replace keeps the
+        # staged mode, so restore what a plain open() would have produced.
+        os.chmod(staged, _publishable_mode(0o666))
+    except Exception:
+        staged.unlink(missing_ok=True)
+        raise
+    return staged
+
+
+def _replace_staged_file(staged: Path, destination: Path) -> None:
+    """Atomically install a sibling staged file, removing it on failure."""
+    try:
+        os.replace(staged, destination)
+    finally:
+        staged.unlink(missing_ok=True)
 
 
 def _read_b64u_file(path: Path) -> bytes:
@@ -176,6 +290,202 @@ def _safe_name(value: str) -> str:
     can never escape the output directory (2026-07-13 review, finding 14)."""
     safe = value.replace("/", "_").replace("\\", "_").replace(":", "_").replace("..", "_")
     return safe or "_"
+
+
+def _proof_path_in_dir(proof_dir: Path, receipt_id: str) -> Path:
+    """Return the one proof path allowed for a schema-valid receipt id.
+
+    Receipt ids are ULIDs, not general path components.  Check that contract
+    before forming a filename, then resolve the result and keep it below the
+    resolved proof directory as a defence in depth against an unexpected
+    symlink.  ``attest export`` must never read evidence outside ``--proof-dir``.
+    """
+    if _RECEIPT_ID_RE.fullmatch(receipt_id) is None:
+        raise CliUsageError(
+            f"receipt_id {receipt_id!r} is not a valid ULID; refusing to read a proof path"
+        )
+    try:
+        proof_root = proof_dir.resolve()
+        candidate = (proof_dir / f"{receipt_id}.json").resolve()
+        candidate.relative_to(proof_root)
+    except (OSError, ValueError) as exc:
+        raise CliUsageError(
+            f"proof path for receipt_id {receipt_id!r} escapes --proof-dir; refusing to read it"
+        ) from exc
+    return candidate
+
+
+# --- `attest log` on-disk state helpers --------------------------------------
+
+
+def _log_config_path(log_dir: Path) -> Path:
+    return log_dir / _LOG_CONFIG_FILENAME
+
+
+def _log_entries_path(log_dir: Path) -> Path:
+    return log_dir / _LOG_ENTRIES_FILENAME
+
+
+def _log_candidate_path(log_dir: Path) -> Path:
+    return log_dir / _LOG_CANDIDATE_FILENAME
+
+
+def _log_checkpoint_path(log_dir: Path) -> Path:
+    return log_dir / _LOG_CHECKPOINT_FILENAME
+
+
+def _log_tile_dir(log_dir: Path) -> Path:
+    return log_dir / _LOG_TILE_DIRNAME
+
+
+def _validate_cli_origin(origin: str) -> str:
+    """Require a non-empty printable-ASCII origin, mirroring `tlog`'s own
+    checkpoint-origin grammar (kept local rather than reaching into `tlog`'s
+    private validator, since this only needs to fail fast at `log init` —
+    `tlog.sign_checkpoint` enforces the same rule authoritatively later)."""
+    if not origin or any(not "\x20" <= ch <= "\x7e" for ch in origin):
+        raise CliUsageError("--origin must be a non-empty printable ASCII string")
+    return origin
+
+
+def _read_log_origin(log_dir: Path) -> str:
+    """The log's own AUTHORITATIVE origin, from LOG/config.json — never
+    accepted from a command-line flag on any verb but `log init`."""
+    config_path = _log_config_path(log_dir)
+    if not config_path.is_file():
+        raise CliUsageError(
+            f"{log_dir} is not an attest log (missing {config_path}); run `attest log init` first"
+        )
+    config = _read_json(config_path)
+    origin = config.get("origin") if isinstance(config, dict) else None
+    if not isinstance(origin, str) or not origin:
+        raise CliUsageError(f"{config_path} is missing a valid 'origin'")
+    return origin
+
+
+def _read_log_entries(log_dir: Path) -> list[dict[str, Any]]:
+    """The log's AUTHORITATIVE entry history, read fresh from
+    LOG/entries.jsonl every time — never from the (derived, cached)
+    tiles or candidate/checkpoint files."""
+    entries_path = _log_entries_path(log_dir)
+    if not entries_path.is_file():
+        return []
+    entries: list[dict[str, Any]] = []
+    text = entries_path.read_text(encoding="utf-8")
+    for line_no, line in enumerate(text.splitlines(), start=1):
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise CliUsageError(f"{entries_path}:{line_no}: invalid JSON: {exc}") from exc
+        if not isinstance(entry, dict):
+            raise CliUsageError(f"{entries_path}:{line_no}: entry must be a JSON object")
+        entries.append(entry)
+    return entries
+
+
+def _encoded_entries(entries: list[dict[str, Any]]) -> list[bytes]:
+    """Re-validate and canonically re-encode every entry via `tlog.encode_entry`
+    — the exact bytes `tlog.build_tree`/`inclusion_proof`/`consistency_proof`
+    hash as leaves. Re-deriving this from the stored entry dicts (rather than
+    caching encoded bytes anywhere) is what makes recomputation independent
+    of anything the CI-side `append` step may have written."""
+    encoded: list[bytes] = []
+    for i, entry in enumerate(entries):
+        try:
+            encoded.append(tlog.encode_entry(entry))
+        except tlog.TlogError as exc:
+            raise CliUsageError(f"{_LOG_ENTRIES_FILENAME} entry #{i} is invalid: {exc}") from exc
+    return encoded
+
+
+def _stage_tiles(log_dir: Path, leaf_hashes: list[bytes]) -> Path:
+    """Stage rebuilt level-0 (leaf-hash) tlog-tiles beside ``LOG/tile/0``.
+
+    Simplification, documented (see the module-level LOG layout comment
+    above and the task report): a full tile covers `_TILE_FULL_WIDTH`
+    consecutive leaves and is named by its index; a not-yet-full tile at the
+    growing right edge is named `<index>.p.<width>` (a flattened stand-in for
+    C2SP's `<index>.p/<width>` — the nested form exists purely to keep tile
+    URLs short at huge scale, irrelevant for the small logs this CLI targets).
+    The complete replacement is written before it is installed, rather than
+    patching the live cache incrementally.  That keeps a failed tile write
+    from disturbing the existing cache and prevents an installed cache from
+    drifting out of sync with `entries.jsonl` after a successful append.
+    """
+    tile_parent = _log_tile_dir(log_dir)
+    tile_parent.mkdir(parents=True, exist_ok=True)
+    staged = Path(tempfile.mkdtemp(prefix=".0.", dir=tile_parent))
+    try:
+        # mkdtemp creates the directory owner-only, but it becomes the public
+        # LOG/tile/0 on install — restore what a plain mkdir() would produce.
+        os.chmod(staged, _publishable_mode(0o777))
+        for start in range(0, len(leaf_hashes), _TILE_FULL_WIDTH):
+            chunk = leaf_hashes[start : start + _TILE_FULL_WIDTH]
+            index = start // _TILE_FULL_WIDTH
+            width = len(chunk)
+            name = str(index) if width == _TILE_FULL_WIDTH else f"{index}.p.{width}"
+            (staged / name).write_bytes(b"".join(chunk))
+    except Exception:
+        shutil.rmtree(staged, ignore_errors=True)
+        raise
+    return staged
+
+
+def _replace_staged_tiles(log_dir: Path, staged: Path) -> None:
+    """Install a staged tile directory without ever modifying it in place."""
+    tile_dir = _log_tile_dir(log_dir) / "0"
+    tile_parent = tile_dir.parent
+    backup = Path(tempfile.mkdtemp(prefix=".0.previous.", dir=tile_parent))
+    backup.rmdir()  # reserve a unique, absent same-directory rename target
+    moved_existing = False
+    try:
+        if os.path.lexists(tile_dir):
+            os.replace(tile_dir, backup)
+            moved_existing = True
+        os.replace(staged, tile_dir)
+    except Exception:
+        # The cache is derived data, but restore it when the second rename
+        # fails so an ordinary I/O error does not leave an avoidable gap.
+        if moved_existing and not os.path.lexists(tile_dir):
+            try:
+                os.replace(backup, tile_dir)
+            except OSError:
+                pass
+        raise
+    else:
+        if moved_existing:
+            shutil.rmtree(backup, ignore_errors=True)
+    finally:
+        shutil.rmtree(staged, ignore_errors=True)
+
+
+def _candidate_text(origin: str, tree_size: int, root: bytes) -> str:
+    """The UNSIGNED checkpoint-candidate note BODY: the same three header
+    lines (origin, decimal size, standard-base64 root) `tlog.sign_checkpoint`
+    signs over, with no signature lines at all — genuinely unsigned, not a
+    checkpoint with an empty signature list (`tlog.parse_checkpoint` requires
+    at least one signature line and will reject this text outright)."""
+    return "\n".join([origin, str(tree_size), base64.b64encode(root).decode("ascii")]) + "\n"
+
+
+def _parse_candidate_text(text: str, path: Path) -> tuple[str, int, bytes]:
+    lines = text.split("\n")
+    if len(lines) != 4 or lines[3] != "":
+        raise CliUsageError(f"{path} is not a valid checkpoint candidate (expected 3 lines)")
+    origin, size_str, root_b64 = lines[0], lines[1], lines[2]
+    try:
+        tree_size = int(size_str)
+    except ValueError as exc:
+        raise CliUsageError(f"{path} has a non-integer tree size: {size_str!r}") from exc
+    try:
+        root = base64.b64decode(root_b64, validate=True)
+    except ValueError as exc:
+        raise CliUsageError(f"{path} has a malformed base64 root: {exc}") from exc
+    if len(root) != 32:
+        raise CliUsageError(f"{path} root does not decode to 32 bytes")
+    return origin, tree_size, root
 
 
 # --- keygen -------------------------------------------------------------------
@@ -376,11 +686,51 @@ def _cmd_manifest_rotate(args: argparse.Namespace) -> int:
 def _cmd_manifest_artifacts(args: argparse.Namespace) -> int:
     if _same_file_target(args.signing_seed, args.out):
         raise CliUsageError("--signing-seed and --out must be different paths")
+    if _same_file_target(args.manifest_in, args.out):
+        raise CliUsageError("--in and --out must be different paths")
+    if args.mldsa_key is not None and _same_file_target(args.mldsa_key, args.out):
+        raise CliUsageError("--mldsa-key and --out must be different paths")
+
+    key_manifest = _read_json(args.manifest_in)
+    if not isinstance(key_manifest, dict) or "keys" not in key_manifest:
+        raise CliUsageError(f"{args.manifest_in} is not a key manifest")
     artifacts = _read_json(args.artifacts)
     if not isinstance(artifacts, list):
         raise CliUsageError(f"{args.artifacts} must contain a JSON array of artifact entries")
 
-    signing_kp = _load_seed_kp(args.signing_seed)
+    # The signature shape MUST follow the signing entry's own hybrid-ness, not
+    # whether the operator happened to pass --mldsa-key. The shared verifier
+    # requires the manifest_signature shape to match "pub_ml_dsa_65" in the
+    # entry, so any mismatch would otherwise create an invalid artifact
+    # manifest at exit 0.
+    signer_entry = manifests.find_key(key_manifest, args.signing_kid)
+    if signer_entry is None:
+        raise CliUsageError(f"signing key {args.signing_kid!r} is not in {args.manifest_in}")
+    is_hybrid_signer = "pub_ml_dsa_65" in signer_entry
+    mldsa_kp: pq.MLDSAKeyPair | None = None
+    if is_hybrid_signer and args.mldsa_key is None:
+        raise CliUsageError(f"signing key {args.signing_kid!r} is hybrid; --mldsa-key is required")
+    if not is_hybrid_signer and args.mldsa_key is not None:
+        raise CliUsageError(
+            f"signing key {args.signing_kid!r} is Ed25519-only; --mldsa-key is not allowed"
+        )
+    if is_hybrid_signer and args.mldsa_key is not None:
+        mldsa_kp = _load_mldsa_kp(args.mldsa_key)
+        try:
+            entry_mldsa_pub = keys.b64u_decode(signer_entry["pub_ml_dsa_65"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CliUsageError(
+                f"{args.manifest_in} has a malformed pub_ml_dsa_65 for {args.signing_kid!r}: {exc}"
+            ) from exc
+        if mldsa_kp.pub != entry_mldsa_pub:
+            raise CliUsageError(
+                "--mldsa-key does not match the signing key's ML-DSA-65 public key in the manifest"
+            )
+
+    ed_signing_kp = _load_seed_kp(args.signing_seed)
+    signing_kp: keys.SigningKeyPair | pq.HybridSigningKeys = ed_signing_kp
+    if mldsa_kp is not None:
+        signing_kp = pq.HybridSigningKeys(ed=ed_signing_kp, mldsa=mldsa_kp)
     manifest = manifests.build_artifact_manifest(
         args.issuer,
         args.series,
@@ -390,6 +740,11 @@ def _cmd_manifest_artifacts(args: argparse.Namespace) -> int:
         signing_kp,
         args.signing_kid,
     )
+    if not manifests.verify_artifact_manifest(manifest, key_manifest):
+        raise CliUsageError(
+            "built artifact manifest does not self-verify against --in; check that "
+            "--signing-seed, --mldsa-key, issuer, signer status, and released-at match it"
+        )
     _write_json_file(args.out, manifest)
     _print_json(
         {
@@ -460,6 +815,356 @@ def _cmd_issue(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+# --- log: transparency-log operator/holder commands (Stage 2) ---------------
+#
+# THE OFFLINE-SIGNER SPLIT (design doc "Log key custody: offline/HSM ceremony,
+# never CI"): `log append` is the CI-side step. It holds no signing key and
+# only ever produces an UNSIGNED checkpoint.candidate from the entries file.
+# `log sign-checkpoint` is the ceremony-side step, run by a separately-
+# administered offline signer: it is the ONLY command in this CLI that may be
+# given the log's Ed25519/ML-DSA-65 secret keys, and it refuses to sign
+# unless its OWN independent recomputation from LOG/entries.jsonl matches the
+# candidate exactly, and — once a checkpoint has previously been signed —
+# unless the new tree is a verified RFC 6962 consistency-proof extension of
+# it. Never derive either check from which flags were passed: both compare
+# against the log's own authoritative on-disk state.
+
+
+def _cmd_log_init(args: argparse.Namespace) -> int:
+    log_dir: Path = args.dir
+    origin = _validate_cli_origin(args.origin)
+    config_path = _log_config_path(log_dir)
+    if config_path.exists():
+        raise CliUsageError(f"{log_dir} already has a {_LOG_CONFIG_FILENAME}; refusing to re-init")
+
+    _write_json_file(config_path, {"origin": origin})
+    entries_path = _log_entries_path(log_dir)
+    entries_path.parent.mkdir(parents=True, exist_ok=True)
+    entries_path.touch(exist_ok=True)
+
+    _print_json({"dir": str(log_dir), "origin": origin, "size": 0})
+    return EXIT_OK
+
+
+def _cmd_log_append(args: argparse.Namespace) -> int:
+    log_dir: Path = args.dir
+    entries_path = _log_entries_path(log_dir)
+    candidate_path = _log_candidate_path(log_dir)
+    if _same_file_target(args.entry_json, entries_path):
+        raise CliUsageError("--entry-json must not be the log's own entries file")
+    if _same_file_target(args.entry_json, candidate_path):
+        raise CliUsageError("--entry-json must not be the log's own checkpoint candidate")
+
+    origin = _read_log_origin(log_dir)
+    new_entry = _read_json(
+        args.entry_json, max_bytes=_MAX_STAGE2_INPUT_BYTES["json"], input_name="--entry-json"
+    )
+    if not isinstance(new_entry, dict):
+        raise CliUsageError(f"{args.entry_json} must contain a JSON object")
+    try:
+        new_entry_bytes = tlog.encode_entry(new_entry)
+    except tlog.TlogError as exc:
+        raise CliUsageError(f"{args.entry_json} is not a valid log entry: {exc}") from exc
+
+    # Compute everything fallible BEFORE writing anything: a rejected append
+    # must leave the log's on-disk state byte-identical to before the call.
+    existing_entries = _read_log_entries(log_dir)
+    existing_encoded = _encoded_entries(existing_entries)
+    for leaf_index, existing_entry_bytes in enumerate(existing_encoded):
+        if existing_entry_bytes == new_entry_bytes:
+            # Canonically identical leaves are an idempotent append: do not
+            # touch any state, so a retry after an authoritative commit stays
+            # a no-op instead of growing the tree a second time.
+            _print_json(
+                {
+                    "dir": str(log_dir),
+                    "size": len(existing_entries),
+                    "leaf_index": leaf_index,
+                    "candidate": str(candidate_path),
+                    "duplicate": True,
+                }
+            )
+            return EXIT_OK
+
+    updated_entries = [*existing_entries, new_entry]
+    encoded = [*existing_encoded, new_entry_bytes]
+    leaf_hashes = [tlog.leaf_hash(e) for e in encoded]
+    root = tlog.build_tree(encoded)
+    tree_size = len(updated_entries)
+    candidate_text = _candidate_text(origin, tree_size, root)
+    entries_text = "".join(json.dumps(entry, sort_keys=True) + "\n" for entry in updated_entries)
+
+    # Stage every output before changing visible state.  The tile cache is
+    # committed first because it is derived only; then commit the candidate
+    # before entries, leaving entries LAST.  If a crash lands after the new
+    # candidate but before entries, sign-checkpoint independently recomputes
+    # from entries and fails closed on the mismatch.  A retry after an
+    # authoritative entries commit takes the canonical-byte duplicate branch
+    # above, so it cleanly no-ops rather than duplicating that leaf.
+    staged_candidate: Path | None = None
+    staged_entries: Path | None = None
+    staged_tiles: Path | None = None
+    try:
+        staged_candidate = _stage_text(candidate_path, candidate_text)
+        staged_entries = _stage_text(entries_path, entries_text)
+        staged_tiles = _stage_tiles(log_dir, leaf_hashes)
+        _replace_staged_tiles(log_dir, staged_tiles)
+        _replace_staged_file(staged_candidate, candidate_path)
+        _replace_staged_file(staged_entries, entries_path)
+    finally:
+        if staged_candidate is not None:
+            staged_candidate.unlink(missing_ok=True)
+        if staged_entries is not None:
+            staged_entries.unlink(missing_ok=True)
+        if staged_tiles is not None:
+            shutil.rmtree(staged_tiles, ignore_errors=True)
+
+    _print_json(
+        {
+            "dir": str(log_dir),
+            "size": tree_size,
+            "leaf_index": tree_size - 1,
+            "candidate": str(candidate_path),
+        }
+    )
+    return EXIT_OK
+
+
+def _cmd_log_sign_checkpoint(args: argparse.Namespace) -> int:
+    log_dir: Path = args.dir
+    if _same_file_target(args.ed25519_key, args.mldsa_key):
+        raise CliUsageError("--ed25519-key and --mldsa-key must be different paths")
+    checkpoint_path = _log_checkpoint_path(log_dir)
+    if _same_file_target(args.ed25519_key, checkpoint_path) or _same_file_target(
+        args.mldsa_key, checkpoint_path
+    ):
+        # Writing the signed checkpoint must never clobber the secret key
+        # files this same command just read (2026-07-13 review discipline,
+        # finding-18 pattern, extended to the log signer's own keys).
+        raise CliUsageError("--ed25519-key/--mldsa-key must not be the log's own checkpoint file")
+
+    origin = _read_log_origin(log_dir)
+    entries = _read_log_entries(log_dir)
+    encoded = _encoded_entries(entries)
+    recomputed_root = tlog.build_tree(encoded)
+    recomputed_size = len(entries)
+
+    candidate_path = _log_candidate_path(log_dir)
+    if not candidate_path.is_file():
+        raise CliUsageError(
+            f"no checkpoint candidate at {candidate_path}; run `attest log append` first"
+        )
+    candidate_origin, candidate_size, candidate_root = _parse_candidate_text(
+        _read_bounded_text(
+            candidate_path,
+            max_bytes=_MAX_STAGE2_INPUT_BYTES["candidate"],
+            input_name="checkpoint candidate",
+        ),
+        candidate_path,
+    )
+    if (
+        candidate_origin != origin
+        or candidate_size != recomputed_size
+        or candidate_root != recomputed_root
+    ):
+        raise CliUsageError(
+            f"{candidate_path} does not match an independent recomputation from "
+            f"{_LOG_ENTRIES_FILENAME} — refusing to sign (the candidate or the entries "
+            "file may have been tampered with)"
+        )
+
+    ed_kp = _load_seed_kp(args.ed25519_key)
+    mldsa_kp = _load_mldsa_kp(args.mldsa_key)
+    log_key = tlog.LogKey(
+        origin=origin, name=args.name, ed25519_pub=ed_kp.pub, mldsa_pub=mldsa_kp.pub
+    )
+
+    if checkpoint_path.is_file():
+        prior_text = checkpoint_path.read_text(encoding="utf-8")
+        try:
+            prior_checkpoint = tlog.verify_checkpoint(prior_text, log_key, origin)
+        except tlog.TlogError as exc:
+            raise CliUsageError(
+                f"the existing {checkpoint_path} does not verify under this --name/"
+                f"--ed25519-key/--mldsa-key; refusing to sign a successor to a checkpoint "
+                f"this signer cannot authenticate: {exc}"
+            ) from exc
+        if prior_checkpoint.tree_size > recomputed_size:
+            raise CliUsageError(
+                f"the log has shrunk: the prior signed checkpoint covers "
+                f"{prior_checkpoint.tree_size} entries but {_LOG_ENTRIES_FILENAME} now has "
+                f"only {recomputed_size}"
+            )
+        proof = tlog.consistency_proof(encoded, prior_checkpoint.tree_size)
+        if not tlog.verify_consistency(
+            prior_checkpoint.tree_size,
+            prior_checkpoint.root,
+            recomputed_size,
+            recomputed_root,
+            proof,
+        ):
+            raise CliUsageError(
+                "the new tree is not a verified append-only extension of the previously "
+                "signed checkpoint — refusing to sign (possible equivocation/history rewrite)"
+            )
+
+    signing_keys = pq.HybridSigningKeys(ed=ed_kp, mldsa=mldsa_kp)
+    signed_text = tlog.sign_checkpoint(
+        origin, recomputed_size, recomputed_root, signing_keys, args.name
+    )
+
+    # Self-verify before write: never persist a checkpoint this same signer's
+    # own public keys cannot themselves later verify.
+    tlog.verify_checkpoint(signed_text, log_key, origin)
+
+    # A failed checkpoint write must preserve the previous signed checkpoint:
+    # stage beside it and atomically replace only once the full text exists.
+    _replace_staged_file(_stage_text(checkpoint_path, signed_text), checkpoint_path)
+    _print_json(
+        {
+            "dir": str(log_dir),
+            "checkpoint": str(checkpoint_path),
+            "size": recomputed_size,
+            "origin": origin,
+        }
+    )
+    return EXIT_OK
+
+
+def _cmd_log_prove(args: argparse.Namespace) -> int:
+    log_dir: Path = args.dir
+    checkpoint_path = _log_checkpoint_path(log_dir)
+    entries_path = _log_entries_path(log_dir)
+    candidate_path = _log_candidate_path(log_dir)
+    if any(
+        _same_file_target(args.out, target)
+        for target in (checkpoint_path, entries_path, candidate_path)
+    ):
+        raise CliUsageError("--out must not be one of the log's own state files")
+
+    if not checkpoint_path.is_file():
+        raise CliUsageError(
+            f"{log_dir} has no signed checkpoint yet; run `attest log sign-checkpoint` first"
+        )
+    checkpoint_text = checkpoint_path.read_text(encoding="utf-8")
+    try:
+        checkpoint = tlog.parse_checkpoint(checkpoint_text)
+    except tlog.TlogError as exc:
+        raise CliUsageError(f"{checkpoint_path} is not a well-formed checkpoint: {exc}") from exc
+
+    entries = _read_log_entries(log_dir)
+    if checkpoint.tree_size != len(entries):
+        raise CliUsageError(
+            f"the signed checkpoint covers {checkpoint.tree_size} entries but "
+            f"{_LOG_ENTRIES_FILENAME} now has {len(entries)}; run `attest log sign-checkpoint` "
+            "again before proving"
+        )
+
+    leaf_index = args.leaf_index
+    if not 0 <= leaf_index < len(entries):
+        raise CliUsageError(f"--leaf-index {leaf_index} is out of range for {len(entries)} entries")
+
+    encoded = _encoded_entries(entries)
+    proof = tlog.inclusion_proof(encoded, leaf_index)
+
+    evidence = {
+        "entry": entries[leaf_index],
+        "leaf_index": leaf_index,
+        "tree_size": checkpoint.tree_size,
+        "inclusion_proof": [p.hex() for p in proof],
+        "checkpoint": checkpoint_text,
+    }
+    _write_json_file(args.out, evidence)
+    _print_json({"out": str(args.out), "leaf_index": leaf_index, "tree_size": checkpoint.tree_size})
+    return EXIT_OK
+
+
+def _cmd_log_anchor(args: argparse.Namespace) -> int:
+    log_dir: Path = args.dir
+    checkpoint_path = _log_checkpoint_path(log_dir)
+    entries_path = _log_entries_path(log_dir)
+    read_paths = [("--evidence", args.evidence), ("--ots-proof", args.ots_proof)]
+    if args.rfc3161_token is not None:
+        read_paths.append(("--rfc3161-token", args.rfc3161_token))
+    if _same_file_target(args.out, checkpoint_path) or _same_file_target(args.out, entries_path):
+        raise CliUsageError("--out must not be one of the log's own state files")
+    for label, path in read_paths:
+        if _same_file_target(path, checkpoint_path) or _same_file_target(path, entries_path):
+            raise CliUsageError(f"{label} must not be one of the log's own state files")
+        if _same_file_target(args.out, path):
+            raise CliUsageError(f"--out must not be the same path as {label}")
+    for i, (label_a, path_a) in enumerate(read_paths):
+        for label_b, path_b in read_paths[i + 1 :]:
+            if _same_file_target(path_a, path_b):
+                raise CliUsageError(f"{label_a} and {label_b} must be different paths")
+
+    origin = _read_log_origin(log_dir)
+
+    evidence = _read_json(
+        args.evidence, max_bytes=_MAX_STAGE2_INPUT_BYTES["json"], input_name="--evidence"
+    )
+    if not isinstance(evidence, dict):
+        raise CliUsageError(f"{args.evidence} must contain a JSON object")
+    checkpoint_text = evidence.get("checkpoint")
+    if not isinstance(checkpoint_text, str):
+        raise CliUsageError(
+            f"{args.evidence} is missing its 'checkpoint' field; run `attest log prove` first"
+        )
+    try:
+        evidence_checkpoint = tlog.parse_checkpoint(checkpoint_text)
+    except tlog.TlogError as exc:
+        raise CliUsageError(f"{args.evidence}'s checkpoint is malformed: {exc}") from exc
+    if evidence_checkpoint.origin != origin:
+        raise CliUsageError(
+            f"{args.evidence}'s checkpoint origin {evidence_checkpoint.origin!r} does not "
+            f"match this log's origin {origin!r}"
+        )
+
+    ots_proof = _read_json(
+        args.ots_proof, max_bytes=_MAX_STAGE2_INPUT_BYTES["json"], input_name="--ots-proof"
+    )
+    if not isinstance(ots_proof, dict):
+        raise CliUsageError(f"{args.ots_proof} must contain a JSON object")
+    # `kind` is authoritative from which flag supplied the file, not read from
+    # its content: this mirrors --attest-version selecting the signing
+    # profile elsewhere in this CLI, not the fail-open "trust the artifact's
+    # own self-description" antipattern (there is no accept/reject decision
+    # here — attaching is purely mechanical; `verify --transparency` is the
+    # one boundary that actually judges this evidence).
+    new_proofs: list[dict[str, Any]] = [{**ots_proof, "kind": "ots"}]
+    if args.rfc3161_token is not None:
+        token_b64 = base64.b64encode(
+            _read_bounded_bytes(
+                args.rfc3161_token,
+                max_bytes=_MAX_STAGE2_INPUT_BYTES["rfc3161"],
+                input_name="--rfc3161-token",
+            )
+        ).decode("ascii")
+        new_proofs.append({"kind": "rfc3161", "token_b64": token_b64})
+
+    existing_anchors = evidence.get("anchors")
+    existing_proofs: list[Any] = (
+        existing_anchors["proofs"]
+        if isinstance(existing_anchors, dict) and isinstance(existing_anchors.get("proofs"), list)
+        else []
+    )
+    updated_evidence = dict(evidence)
+    updated_evidence["anchors"] = {
+        "checkpoint": checkpoint_text,
+        "proofs": [*existing_proofs, *new_proofs],
+    }
+    serialized = canon.dumps(updated_evidence)
+    if len(serialized) > verify._MAX_TRANSPARENCY_EVIDENCE_LEN:
+        raise CliUsageError(
+            "produced evidence would exceed the verifier's evidence ceiling "
+            f"({len(serialized)} > {verify._MAX_TRANSPARENCY_EVIDENCE_LEN})"
+        )
+
+    _write_json_file(args.out, updated_evidence)
+    _print_json({"out": str(args.out), "proofs": len(updated_evidence["anchors"]["proofs"])})
+    return EXIT_OK
+
+
 # --- verify -----------------------------------------------------------------------
 
 
@@ -471,9 +1176,93 @@ def _result_to_dict(result: verify.VerificationResult) -> dict[str, Any]:
         "revocation": result.revocation,
         "binding": result.binding,
         "trust": result.trust,
+        "transparency": result.transparency,
+        "corroboration": result.corroboration,
+        "manifest_freshness": result.manifest_freshness,
         "warnings": list(result.warnings),
         "errors": list(result.errors),
     }
+
+
+def _load_log_keys(path: Path) -> list[tlog.LogKey]:
+    """Parse the vector-runners' `log-keys.json` shape: a JSON array of
+    `{"origin", "name", "ed25519_pub_b64u", "mldsa_pub_b64u"}` — the
+    verifier's OWN pinned trust config, never taken from a bundle."""
+    data = _read_json(path, max_bytes=_MAX_STAGE2_INPUT_BYTES["json"], input_name="--log-keys")
+    if not isinstance(data, list):
+        raise CliUsageError(f"{path} must contain a JSON array of log keys")
+    log_keys: list[tlog.LogKey] = []
+    for i, entry in enumerate(data):
+        if not isinstance(entry, dict):
+            raise CliUsageError(f"{path}[{i}] must be a JSON object")
+        try:
+            log_keys.append(
+                tlog.LogKey(
+                    origin=entry["origin"],
+                    name=entry["name"],
+                    ed25519_pub=keys.b64u_decode(entry["ed25519_pub_b64u"]),
+                    mldsa_pub=keys.b64u_decode(entry["mldsa_pub_b64u"]),
+                )
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CliUsageError(f"{path}[{i}] is a malformed log key: {exc}") from exc
+    return log_keys
+
+
+def _parse_crqc_horizon(value: str) -> int:
+    """Parse `--crqc-horizon` as an ISO-8601 UTC timestamp (the same
+    `%Y-%m-%dT%H:%M:%SZ` shape `transparency.py`'s `_iso8601` renders) into
+    unix seconds for `anchor.AnchorPolicy.crqc_horizon`."""
+    try:
+        parsed = datetime.datetime.strptime(value, _ISO8601_UTC_FMT).replace(tzinfo=datetime.UTC)
+    except ValueError as exc:
+        raise CliUsageError(
+            f"--crqc-horizon must be an ISO-8601 UTC timestamp like 2030-01-01T00:00:00Z: {value!r}"
+        ) from exc
+    return int(parsed.timestamp())
+
+
+def _load_anchor_policy(path: Path | None, crqc_horizon: int | None) -> anchor.AnchorPolicy | None:
+    """Build the verifier's `AnchorPolicy` from `--anchor-policy` (the
+    vector-runners' `anchor-policy.json` shape: `{"pinned_headers": {<hex>:
+    {"header_hash","merkle_root","time"}}, "crqc_horizon"}`) and/or
+    `--crqc-horizon`, which overrides/sets the horizon field. `None` only
+    when NEITHER flag was given — `verify()` then leaves anchor evaluation
+    unconfigured, same as today's zero-behavior-change default."""
+    if path is None and crqc_horizon is None:
+        return None
+    pinned_headers: dict[str, anchor.PinnedHeader] = {}
+    horizon = crqc_horizon
+    if path is not None:
+        data = _read_json(
+            path, max_bytes=_MAX_STAGE2_INPUT_BYTES["json"], input_name="--anchor-policy"
+        )
+        if not isinstance(data, dict):
+            raise CliUsageError(f"{path} must contain a JSON object")
+        raw_headers = data.get("pinned_headers", {})
+        if not isinstance(raw_headers, dict):
+            raise CliUsageError(f"{path}.pinned_headers must be an object")
+        for header_hash, header in raw_headers.items():
+            if not isinstance(header, dict):
+                raise CliUsageError(f"{path}.pinned_headers[{header_hash!r}] must be an object")
+            try:
+                pinned_headers[header_hash] = anchor.PinnedHeader(
+                    header_hash=header["header_hash"],
+                    merkle_root=header["merkle_root"],
+                    time=header["time"],
+                )
+            except KeyError as exc:
+                raise CliUsageError(
+                    f"{path}.pinned_headers[{header_hash!r}] is missing field {exc}"
+                ) from exc
+        if crqc_horizon is None:
+            file_horizon = data.get("crqc_horizon")
+            if file_horizon is not None and (
+                not isinstance(file_horizon, int) or isinstance(file_horizon, bool)
+            ):
+                raise CliUsageError(f"{path}.crqc_horizon must be an integer or null")
+            horizon = file_horizon
+    return anchor.AnchorPolicy(pinned_headers=pinned_headers, crqc_horizon=horizon)
 
 
 def _build_disclosure(args: argparse.Namespace) -> verify.Disclosure | None:
@@ -526,7 +1315,30 @@ def _cmd_verify(args: argparse.Namespace) -> int:
         )
     disclosure = _build_disclosure(args)
 
-    result = verify.verify(envelope_bytes, trust_store, revocation_view, disclosure)
+    transparency_evidence = (
+        _read_json(
+            args.transparency,
+            max_bytes=_MAX_STAGE2_INPUT_BYTES["json"],
+            input_name="--transparency",
+        )
+        if args.transparency is not None
+        else None
+    )
+    if transparency_evidence is not None and not isinstance(transparency_evidence, dict):
+        raise CliUsageError(f"--transparency file {args.transparency} must contain a JSON object")
+    log_keys = _load_log_keys(args.log_keys) if args.log_keys is not None else None
+    crqc_horizon = _parse_crqc_horizon(args.crqc_horizon) if args.crqc_horizon is not None else None
+    anchor_policy = _load_anchor_policy(args.anchor_policy, crqc_horizon)
+
+    result = verify.verify(
+        envelope_bytes,
+        trust_store,
+        revocation_view,
+        disclosure,
+        transparency=transparency_evidence,
+        log_keys=log_keys,
+        anchor_policy=anchor_policy,
+    )
     _print_json(_result_to_dict(result))
     return EXIT_OK if result.ok else EXIT_VERIFICATION_FAILED
 
@@ -580,8 +1392,30 @@ def _cmd_export(args: argparse.Namespace) -> int:
         content = path.read_bytes()
         legal_texts[hashlib.sha256(content).hexdigest()] = content
 
+    proofs: dict[str, dict[str, Any]] = {}
+    if args.proof_dir is not None:
+        if not args.proof_dir.is_dir():
+            raise CliUsageError(f"--proof-dir {args.proof_dir} is not a directory")
+        for envelope in receipts:
+            payload = envelope.get("payload") if isinstance(envelope, dict) else None
+            receipt_id = payload.get("receipt_id") if isinstance(payload, dict) else None
+            if not isinstance(receipt_id, str):
+                continue
+            candidate = _proof_path_in_dir(args.proof_dir, receipt_id)
+            if candidate.is_file():
+                evidence = _read_json(candidate)
+                if not isinstance(evidence, dict):
+                    raise CliUsageError(f"{candidate} must contain a JSON object")
+                proofs[receipt_id] = evidence
+
     attest_path, private_path = bundle.export(
-        receipts, key_manifests, artifact_manifests, legal_texts, args.out_dir, args.name
+        receipts,
+        key_manifests,
+        artifact_manifests,
+        legal_texts,
+        args.out_dir,
+        args.name,
+        proofs=proofs or None,
     )
     _print_json({"attest": str(attest_path), "private": str(private_path)})
     return EXIT_OK
@@ -626,11 +1460,17 @@ def _cmd_import(args: argparse.Namespace) -> int:
         salts_payload = {rid: keys.b64u(s) for rid, s in imported.salts.items()}
         _write_secret_text(args.out_dir / "salts.json", json.dumps(salts_payload, indent=2))
 
+    if imported.proofs:
+        proofs_dir = args.out_dir / "proofs"
+        for receipt_id, evidence in imported.proofs.items():
+            _write_json_file(proofs_dir / f"{receipt_id}.json", evidence)
+
     _print_json(
         {
             "out_dir": str(args.out_dir),
             "receipts": len(imported.receipts),
             "issuers": sorted(imported.trust_store.manifests),
+            "proofs": len(imported.proofs),
         }
     )
     return EXIT_OK
@@ -790,6 +1630,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=_cmd_manifest_rotate)
 
     p = manifest_sub.add_parser("artifacts", help="Build and sign an artifact manifest")
+    p.add_argument(
+        "--in", dest="manifest_in", required=True, type=Path, help="signer's key manifest"
+    )
     p.add_argument("--issuer", required=True)
     p.add_argument("--series", required=True)
     p.add_argument("--version", required=True, type=int)
@@ -797,6 +1640,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--artifacts", required=True, type=Path, help="JSON file: array of artifacts")
     p.add_argument("--signing-kid", required=True)
     p.add_argument("--signing-seed", required=True, type=Path)
+    p.add_argument(
+        "--mldsa-key",
+        type=Path,
+        default=None,
+        help="ML-DSA-65 leg of the signing key; required exactly for a hybrid key entry",
+    )
     p.add_argument("--out", required=True, type=Path)
     p.set_defaults(func=_cmd_manifest_artifacts)
 
@@ -822,6 +1671,90 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", required=True, type=Path, help="output envelope JSON path")
     p.set_defaults(func=_cmd_issue)
 
+    p_log = sub.add_parser(
+        "log", help="Transparency-log operator/holder commands (offline-signer split)"
+    )
+    log_sub = p_log.add_subparsers(dest="log_command", required=True)
+
+    p = log_sub.add_parser("init", help="Create an empty transparency log directory")
+    p.add_argument("--dir", required=True, type=Path)
+    p.add_argument("--origin", required=True, help="C2SP checkpoint origin, printable ASCII")
+    p.set_defaults(func=_cmd_log_init)
+
+    p = log_sub.add_parser(
+        "append",
+        help="Validate+append one entry, rebuild tiles, write an UNSIGNED candidate",
+        description=(
+            "OFFLINE-SIGNER SPLIT (CI side): validates --entry-json against the closed entry "
+            "schema, appends it to the log's entries store, rebuilds the level-0 tlog-tiles "
+            "under LOG/tile/0/... (a minimal, C2SP-tlog-tiles-inspired leaf-hash layout — see "
+            "the source for the documented simplification), and writes an UNSIGNED "
+            "LOG/checkpoint.candidate (origin, size, base64 root only, no signature). This step "
+            "never signs anything: only `attest log sign-checkpoint`, run by the separately-"
+            "administered offline/ceremony signer, may produce LOG/checkpoint."
+        ),
+    )
+    p.add_argument("--dir", required=True, type=Path)
+    p.add_argument("--entry-json", required=True, type=Path, help="one JSON entry object")
+    p.set_defaults(func=_cmd_log_append)
+
+    p = log_sub.add_parser(
+        "sign-checkpoint",
+        help="OFFLINE SIGNER: recompute+verify the candidate, then sign LOG/checkpoint",
+        description=(
+            "OFFLINE-SIGNER SPLIT (ceremony side): recomputes the tree root directly from the "
+            "entries store (never trusting the candidate or the cached tiles), and refuses to "
+            "sign unless that recomputation EXACTLY matches LOG/checkpoint.candidate. If a "
+            "previously signed LOG/checkpoint already exists, ALSO refuses to sign unless the "
+            "new tree is a verified RFC 6962 consistency-proof extension of it (catches history "
+            "rewrites a self-consistent candidate alone would not). Only once both checks pass "
+            "is the checkpoint hybrid-signed (Ed25519 + ML-DSA-65), self-verified, and written "
+            "to LOG/checkpoint. This is the only command that may hold the log's signing keys; "
+            "CI/the append step never does."
+        ),
+    )
+    p.add_argument("--dir", required=True, type=Path)
+    p.add_argument("--ed25519-key", required=True, type=Path, help="log signer's Ed25519 seed file")
+    p.add_argument("--mldsa-key", required=True, type=Path, help="log signer's ML-DSA-65 key file")
+    p.add_argument("--name", required=True, help="C2SP signed-note key name")
+    p.set_defaults(func=_cmd_log_sign_checkpoint)
+
+    p = log_sub.add_parser(
+        "prove", help="Emit inclusion evidence (Task 4 schema) for one logged entry, no anchors"
+    )
+    p.add_argument("--dir", required=True, type=Path)
+    p.add_argument("--leaf-index", required=True, type=int)
+    p.add_argument("--out", required=True, type=Path)
+    p.set_defaults(func=_cmd_log_prove)
+
+    p = log_sub.add_parser(
+        "anchor",
+        help="Attach externally-obtained OTS/RFC3161 anchor material to an evidence file",
+        description=(
+            "ATTACHES anchor material obtained OUTSIDE this process to a `log prove`-produced "
+            "evidence file's `anchors` member (acquiring an OTS/Bitcoin attestation or an "
+            "RFC 3161 timestamp is out of this CLI's scope — it never touches the network). "
+            "--dir's config.json is read only to confirm the evidence's own checkpoint origin "
+            "actually belongs to this log."
+        ),
+    )
+    p.add_argument("--dir", required=True, type=Path)
+    p.add_argument("--evidence", required=True, type=Path, help="evidence JSON from `log prove`")
+    p.add_argument(
+        "--ots-proof",
+        required=True,
+        type=Path,
+        help="JSON object: ops/header_merkle_root/header_hash/header_time",
+    )
+    p.add_argument(
+        "--rfc3161-token",
+        type=Path,
+        default=None,
+        help="raw RFC 3161 TimeStampToken bytes (opaque, never parsed)",
+    )
+    p.add_argument("--out", required=True, type=Path)
+    p.set_defaults(func=_cmd_log_anchor)
+
     p = sub.add_parser("verify", help="Verify a receipt envelope")
     p.add_argument("envelope", type=Path)
     p.add_argument("--trust-dir", required=True, type=Path, help="directory of key manifest files")
@@ -831,6 +1764,31 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--disclose-salt", type=Path, default=None)
     p.add_argument("--disclose-challenge-nonce", type=Path, default=None)
     p.add_argument("--disclose-challenge-sig", type=Path, default=None)
+    p.add_argument(
+        "--transparency",
+        type=Path,
+        default=None,
+        help="Task-4 evidence JSON for one claim (entry/leaf_index/tree_size/"
+        "inclusion_proof/checkpoint[/anchors])",
+    )
+    p.add_argument(
+        "--log-keys",
+        type=Path,
+        default=None,
+        help="JSON array of pinned {origin,name,ed25519_pub_b64u,mldsa_pub_b64u} log keys",
+    )
+    p.add_argument(
+        "--anchor-policy",
+        type=Path,
+        default=None,
+        help="JSON {pinned_headers,crqc_horizon} anchor trust policy",
+    )
+    p.add_argument(
+        "--crqc-horizon",
+        default=None,
+        help="ISO-8601 UTC timestamp (e.g. 2030-01-01T00:00:00Z); overrides/sets "
+        "--anchor-policy's crqc_horizon",
+    )
     p.set_defaults(func=_cmd_verify)
 
     p = sub.add_parser("disclose", help="Emit one self-contained receipt file")
@@ -851,6 +1809,13 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=[],
         help="repeatable; hash is computed from file content",
+    )
+    p.add_argument(
+        "--proof-dir",
+        type=Path,
+        default=None,
+        help="directory of <receipt_id>.json transparency evidence files (from `attest log "
+        "prove`/`anchor`) to embed under proofs/ — corroboration, not authenticity",
     )
     p.add_argument("--out-dir", required=True, type=Path)
     p.add_argument("--name", required=True)

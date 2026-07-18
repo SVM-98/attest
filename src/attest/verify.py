@@ -22,11 +22,14 @@ at their safe stub values (`revocation: "unknown"`, `binding:
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
-from attest import canon, commitment, keys, manifests, pq, revocation, validate
+from attest import anchor, canon, commitment, keys, manifests, pq, revocation, tlog, validate
+from attest import transparency as transparency_module
 
 _ALG = "Ed25519"  # hard-coded — never selected from any field, mirrors issue.py
 _SUPPORTED_ATTEST_VERSIONS = frozenset({"0.1", "0.2"})
@@ -71,6 +74,32 @@ _RECORD_STATUS_REVOKED = "revoked"
 _BINDING_PROVEN = "proven"
 _BINDING_NOT_PROVEN = "not_proven"
 _BINDING_NOT_CHECKED = "not_checked"
+
+# Stage 2 (design doc "transparency/corroboration layer"): three new,
+# purely informational result components. Defaults are the ZERO-behavior-
+# change values existing callers already implicitly get (Task 5's one
+# non-negotiable constraint) — see `VerificationResult` and `verify()`.
+_TRANSPARENCY_NOT_CHECKED = "not_checked"
+_CORROBORATION_NONE = "none"
+_MANIFEST_FRESHNESS_NOT_CHECKED = "not_checked"
+
+_CLAIM_TYPE_RECEIPT = "receipt"
+_CLAIM_TYPE_KEY_MANIFEST = "key-manifest"
+
+_WARN_TRANSPARENCY_CONFIG_MISSING = "transparency_config_missing"
+_WARN_TRANSPARENCY_CLAIM_UNRESOLVABLE = "transparency_claim_unresolvable"
+_WARN_ROTATION_CHAIN_REQUIRED = "corroboration_requires_rotation_chain"
+
+# This outer cap must COVER everything the downstream evaluators' own inner
+# caps accept, or evaluator-valid evidence gets falsely rejected here.
+# Worst-case legitimate bundle, derived from those inner caps: checkpoint +
+# prior_checkpoint + the anchors bundle's own checkpoint copy at ~500KB each
+# (tlog._MAX_NOTE_TEXT_LEN), plus anchors proofs at 64 proofs x 64 ops x
+# ~2060 chars per max append/prepend op (anchor._MAX_PROOFS_PER_EVIDENCE,
+# _MAX_OPS_PER_PROOF, _MAX_OP_HEX_LEN) ~ 8.5MB, plus inclusion/consistency
+# proofs (~8KB) — ~10MB total. The cap still bounds hostile materialization
+# before the JSON decoder performs a second full traversal.
+_MAX_TRANSPARENCY_EVIDENCE_LEN = 10_000_000
 
 
 @dataclass(frozen=True)
@@ -135,6 +164,14 @@ class VerificationResult:
     )
     binding: str  # "proven" | "not_proven" | "not_checked"
     trust: str  # "verified" | "unauthenticated_tofu" | "unverified_rotation"
+    # Stage 2, informational only (never affect `ok`/`trust`/key-status — see
+    # `verify()`'s module-level constants and `_evaluate_transparency_claim`):
+    transparency: str = _TRANSPARENCY_NOT_CHECKED
+    # "not_checked" | "logged" | "anchored_before:<T>" | "equivocation_detected"
+    corroboration: str = _CORROBORATION_NONE  # "none" | "logged" | "witnessed"
+    manifest_freshness: str = (
+        _MANIFEST_FRESHNESS_NOT_CHECKED  # "not_checked" | "verified_as_of:<N>"
+    )
     warnings: tuple[str, ...] = field(default_factory=tuple)
     errors: tuple[str, ...] = field(default_factory=tuple)
 
@@ -214,6 +251,229 @@ def _chain_continuous(chain: list[dict[str, Any]]) -> bool:
     if len(chain) < 2:
         return True
     return all(manifests.check_continuity(chain[i], chain[i + 1]) for i in range(len(chain) - 1))
+
+
+def _rotation_chain_verified(
+    chain: list[dict[str, Any]] | None, manifest: dict[str, Any] | None
+) -> bool:
+    """True iff `chain` is a validated, gapless rotation history from
+    manifest_version 1 through `manifest` itself, held in the verifier's OWN
+    trust store (design fix 6).
+
+    Deliberately STRICTER than `_chain_continuous`'s use for `trust`: an
+    ABSENT chain is fine for `trust` (Task-8 behavior — nothing to validate)
+    but is NOT fine here. Corroborating a rotated key-manifest requires the
+    verifier to already hold every intermediate version itself; the log
+    merely saying "this manifest existed" is not proof of a legitimate
+    rotation history, only of publication. `trust` semantics are untouched
+    by this function — it feeds `corroboration` only.
+    """
+    if not chain or manifest is None:
+        return False
+    if chain[-1] != manifest:
+        return False
+    if chain[0].get("manifest_version") != 1:
+        return False
+    return _chain_continuous(chain)
+
+
+def _validated_transparency_entry(candidate: dict[str, Any]) -> dict[str, Any] | None:
+    """`candidate` iff it passes the log's own closed entry schema, else `None`
+    — never trust a computed entry into `evaluate_transparency` without this
+    (a malformed `expected_entry` would raise `TransparencyError`, which must
+    never happen just because the RECEIPT's own untrusted payload was
+    malformed, e.g. a bad `issuer.id`)."""
+    try:
+        tlog.encode_entry(candidate)
+    except tlog.TlogError:
+        return None
+    return candidate
+
+
+def _resolve_transparency_claim(
+    transparency_evidence: object,
+    envelope: dict[str, Any],
+    receipt_issuer_id: str | None,
+    issuer_manifest: dict[str, Any] | None,
+) -> tuple[str | None, dict[str, Any] | None, int | None]:
+    """Read the untrusted evidence's claimed type (`entry.type`) and, only if
+    verify() can independently compute a matching entry from its OWN trusted
+    artifacts, that entry — plus the evidence's own declared `tree_size`.
+
+    `claim_type` selects WHICH artifact verify() computes an `expected_entry`
+    for: `"receipt"` from `envelope` itself (the signed-receipt-core hash),
+    `"key-manifest"` from the trusted `issuer_manifest` the caller's trust
+    store already resolved. The evidence's OWN hash values are never trusted
+    for anything beyond this dispatch — `expected_entry` is always computed
+    locally, never read off `transparency_evidence`.
+
+    Returns `(claim_type, expected_entry, tree_size)`. `expected_entry` is
+    `None` when the claim type is unrecognized, no matching trusted artifact
+    exists, or the computed entry fails the log's own closed schema — the
+    caller degrades to `not_checked` in every case, uniformly.
+    """
+    if not isinstance(transparency_evidence, dict):
+        return None, None, None
+
+    entry = transparency_evidence.get("entry")
+    claim_type = entry.get("type") if isinstance(entry, dict) else None
+    if not isinstance(claim_type, str):
+        claim_type = None
+
+    tree_size = transparency_evidence.get("tree_size")
+    if not isinstance(tree_size, int) or isinstance(tree_size, bool):
+        tree_size = None
+
+    expected_entry: dict[str, Any] | None = None
+    if claim_type == _CLAIM_TYPE_RECEIPT:
+        try:
+            core_hash: str | None = tlog.receipt_core_hash(envelope)
+        except tlog.TlogError:
+            core_hash = None
+        if core_hash is not None:
+            expected_entry = _validated_transparency_entry(
+                {
+                    "type": _CLAIM_TYPE_RECEIPT,
+                    "issuer": receipt_issuer_id,
+                    "core_sha256": core_hash,
+                }
+            )
+    elif claim_type == _CLAIM_TYPE_KEY_MANIFEST and issuer_manifest is not None:
+        try:
+            manifest_sha256: str | None = hashlib.sha256(
+                canon.canonical_bytes(issuer_manifest)
+            ).hexdigest()
+        except canon.CanonError:
+            manifest_sha256 = None
+        if manifest_sha256 is not None:
+            expected_entry = _validated_transparency_entry(
+                {
+                    "type": _CLAIM_TYPE_KEY_MANIFEST,
+                    "issuer": issuer_manifest.get("issuer"),
+                    "manifest_version": issuer_manifest.get("manifest_version"),
+                    "manifest_sha256": manifest_sha256,
+                }
+            )
+
+    return claim_type, expected_entry, tree_size
+
+
+def _resolve_log_origin(log_keys: list[tlog.LogKey]) -> str:
+    """The single pinned origin shared by every entry in `log_keys` — this is
+    verify()'s own trusted configuration (mirrors `evaluate_transparency`'s
+    `expected_origin` argument), never derived from untrusted evidence. Each
+    key is deep-validated via `evaluate_transparency`'s own `log_keys`
+    validation (byte lengths, name/origin grammar) — not just shallow
+    `isinstance` — so a malformed pinned key raises here too, eagerly,
+    exactly like it would once `evaluate_transparency` itself validates
+    `log_keys` again. Disagreeing or empty origins are likewise a
+    caller/config bug and raise `TransparencyError`.
+    """
+    validated = transparency_module._validate_log_keys(log_keys)
+    origins = {key.origin for key in validated}
+    if len(origins) != 1:
+        raise transparency_module.TransparencyError(
+            f"log_keys must be a non-empty list sharing a single origin, got {sorted(origins)!r}"
+        )
+    return next(iter(origins))
+
+
+def _evaluate_transparency_claim(
+    envelope: dict[str, Any],
+    receipt_issuer_id: str | None,
+    issuer_manifest: dict[str, Any] | None,
+    rotation_chain_ok: bool,
+    transparency_evidence: dict[str, Any] | None,
+    log_keys: list[tlog.LogKey] | None,
+    anchor_policy: anchor.AnchorPolicy | None,
+    warnings: list[str],
+) -> tuple[str, str, str]:
+    """Resolve `(transparency, corroboration, manifest_freshness)` from one
+    evidence bundle (design doc "transparency/corroboration layer").
+
+    Computed independently of the receipt's own pass/fail verdict — called
+    once, early, regardless of whether the receipt later turns out invalid
+    (e.g. a compromised key), so that corroboration can never rescue an
+    otherwise-rejected receipt: demonstrating that requires the evidence
+    actually being evaluated, not merely defaulting to `not_checked` because
+    the receipt failed first (design fix 6 / vector 28i's property).
+
+    Absent evidence is the ZERO-behavior-change default. Evidence present but
+    `log_keys`/`anchor_policy` missing is a configuration gap (the verifier
+    wasn't set up for transparency checking) — degrades with a warning,
+    never raises: the evidence side must never brick a receipt verification.
+    A malformed `log_keys`/`anchor_policy` is trusted-config, validated
+    eagerly and regardless of what the evidence looks like, so a config bug
+    always surfaces as `TransparencyError` rather than being masked by
+    coincidentally-also-unresolvable evidence.
+    """
+    if transparency_evidence is None:
+        return _TRANSPARENCY_NOT_CHECKED, _CORROBORATION_NONE, _MANIFEST_FRESHNESS_NOT_CHECKED
+
+    if log_keys is None or anchor_policy is None:
+        warnings.append(_WARN_TRANSPARENCY_CONFIG_MISSING)
+        return _TRANSPARENCY_NOT_CHECKED, _CORROBORATION_NONE, _MANIFEST_FRESHNESS_NOT_CHECKED
+
+    origin = _resolve_log_origin(log_keys)
+    transparency_module._validate_policy(anchor_policy)
+
+    try:
+        # This is verify()'s untrusted-evidence boundary. Canonicalize and
+        # parse once so every following phase sees one ordinary JSON object,
+        # never a stateful mapping/value supplied by the caller. The size cap
+        # prevents decoding an arbitrarily large serialized evidence bundle.
+        serialized_evidence = canon.dumps(transparency_evidence)
+        if len(serialized_evidence) > _MAX_TRANSPARENCY_EVIDENCE_LEN:
+            raise ValueError("transparency evidence exceeds materialization limit")
+        materialized_evidence = json.loads(serialized_evidence)
+        if not isinstance(materialized_evidence, dict):
+            raise ValueError("transparency evidence is not an object")
+
+        claim_type, expected_entry, tree_size = _resolve_transparency_claim(
+            materialized_evidence, envelope, receipt_issuer_id, issuer_manifest
+        )
+        if expected_entry is None:
+            warnings.append(_WARN_TRANSPARENCY_CLAIM_UNRESOLVABLE)
+            return _TRANSPARENCY_NOT_CHECKED, _CORROBORATION_NONE, _MANIFEST_FRESHNESS_NOT_CHECKED
+
+        result = transparency_module.evaluate_transparency(
+            materialized_evidence,
+            log_keys=log_keys,
+            expected_origin=origin,
+            policy=anchor_policy,
+            expected_entry=expected_entry,
+        )
+        warnings.extend(result.warnings)
+
+        transparency_state = result.transparency
+        corroboration_state = result.corroboration
+        manifest_freshness_state = _MANIFEST_FRESHNESS_NOT_CHECKED
+
+        reached_logged_or_better = transparency_state not in (
+            transparency_module.TRANSPARENCY_NOT_CHECKED,
+            transparency_module.TRANSPARENCY_EQUIVOCATION_DETECTED,
+        )
+        if claim_type == _CLAIM_TYPE_KEY_MANIFEST and reached_logged_or_better:
+            if tree_size is not None:
+                manifest_freshness_state = f"verified_as_of:{tree_size}"
+            manifest_version = issuer_manifest.get("manifest_version") if issuer_manifest else None
+            if (
+                isinstance(manifest_version, int)
+                and not isinstance(manifest_version, bool)
+                and manifest_version > 1
+                and not rotation_chain_ok
+            ):
+                corroboration_state = _CORROBORATION_NONE
+                warnings.append(_WARN_ROTATION_CHAIN_REQUIRED)
+
+        return transparency_state, corroboration_state, manifest_freshness_state
+    # This intentionally encloses every untrusted claim phase above, including
+    # post-evaluation freshness/rotation logic. It confines hostile mapping
+    # access and equality implementations; never catch BaseException so
+    # interrupts and process-control exceptions still propagate.
+    except Exception:
+        warnings.append(_WARN_TRANSPARENCY_CLAIM_UNRESOLVABLE)
+        return _TRANSPARENCY_NOT_CHECKED, _CORROBORATION_NONE, _MANIFEST_FRESHNESS_NOT_CHECKED
 
 
 def _parse_iso(value: object) -> datetime | None:
@@ -476,11 +736,29 @@ def verify(
     revocation_view: list[dict[str, Any]] | None = None,
     disclosure: Disclosure | None = None,
     max_revocation_records: int = _MAX_REVOCATION_RECORDS,
+    *,
+    transparency: dict[str, Any] | None = None,
+    log_keys: list[tlog.LogKey] | None = None,
+    anchor_policy: anchor.AnchorPolicy | None = None,
 ) -> VerificationResult:
     """§6 steps 0-7. `max_revocation_records` bounds the untrusted revocation
     view: a larger view is not evaluated (revocation `"unknown"`). It fails
     closed for revocable receipts (`policy`/`refund_window`: an error, so
-    `ok` is false) and warns for irrevocable `none` receipts."""
+    `ok` is false) and warns for irrevocable `none` receipts.
+
+    `transparency`/`log_keys`/`anchor_policy` are Stage 2 additions (design
+    doc "transparency/corroboration layer"), all keyword-only and defaulting
+    to `None` — an existing caller who never passes them sees ZERO behavior
+    change: `signature`/`schema`/`revocation`/`binding`/`trust`/`ok` are
+    entirely unaffected by these three, which only ever populate the new
+    `transparency`/`corroboration`/`manifest_freshness` result components.
+    `transparency` carries one untrusted evidence bundle (see
+    `attest.transparency.evaluate_transparency`); `log_keys`/`anchor_policy`
+    are the verifier's trusted, pinned configuration for evaluating it. A
+    malformed `log_keys`/`anchor_policy` raises `attest.transparency.
+    TransparencyError` (a config bug); malformed/absent `transparency`
+    evidence never raises, only degrades the three new components.
+    """
     # Caller-contract enforcement (security): a non-list `revocation_view`
     # must fail loud. If a lone record OBJECT slipped through here,
     # `_classify_revocation` would iterate its string keys, authenticate
@@ -495,6 +773,13 @@ def verify(
     # Conservative default: never claim "verified" trust until we've resolved
     # a manifest whose provenance is actually "tls".
     trust = _TRUST_TOFU
+    # Stage 2 defaults — the ZERO-behavior-change values (updated below, once,
+    # right after trust is resolved; see the module docstring on
+    # `_evaluate_transparency_claim` for why this runs before any pass/fail
+    # branching).
+    transparency_state = _TRANSPARENCY_NOT_CHECKED
+    corroboration_state = _CORROBORATION_NONE
+    manifest_freshness_state = _MANIFEST_FRESHNESS_NOT_CHECKED
 
     def _invalid(message: str, *, schema: str = _SCHEMA_NOT_CHECKED) -> VerificationResult:
         errors.append(message)
@@ -504,6 +789,9 @@ def verify(
             revocation=_REVOCATION_UNKNOWN,
             binding=_BINDING_NOT_CHECKED,
             trust=trust,
+            transparency=transparency_state,
+            corroboration=corroboration_state,
+            manifest_freshness=manifest_freshness_state,
             warnings=tuple(warnings),
             errors=tuple(errors),
         )
@@ -537,17 +825,40 @@ def verify(
     # verifiers MUST NOT auto-accept a rotation they can't chain to a root.
     issuer_block = payload.get("issuer")
     issuer_id = issuer_block.get("id") if isinstance(issuer_block, dict) else None
+    issuer_manifest: dict[str, Any] | None = None
     if isinstance(issuer_id, str):
         provenance = trust_store.provenance.get(issuer_id)
         trust = _TRUST_VERIFIED if provenance == _PROVENANCE_TLS else _TRUST_TOFU
+        issuer_manifest = trust_store.manifests.get(issuer_id)
         chain = trust_store.chains.get(issuer_id)
-        if chain and (
-            not _chain_continuous(chain) or chain[-1] != trust_store.manifests.get(issuer_id)
-        ):
+        if chain and (not _chain_continuous(chain) or chain[-1] != issuer_manifest):
             # A chain that does not actually end at the manifest being used proves
             # nothing about it — treat it as a discontinuous rotation (2026-07-13
             # review, finding 8).
             trust = _TRUST_UNVERIFIED_ROTATION
+
+    # --- Transparency/corroboration (Stage 2, informational only): resolved
+    # here, before any pass/fail branching below, so a receipt that later
+    # turns out invalid (e.g. a compromised key) still reports whatever
+    # standing the evidence actually earns. Corroboration must never be able
+    # to rescue an otherwise-rejected receipt, and demonstrating that
+    # requires computing it regardless of the eventual verdict (design fix 6
+    # / vector 28i's property) — see `_evaluate_transparency_claim`.
+    transparency_state, corroboration_state, manifest_freshness_state = (
+        _evaluate_transparency_claim(
+            envelope,
+            issuer_id if isinstance(issuer_id, str) else None,
+            issuer_manifest,
+            _rotation_chain_verified(
+                trust_store.chains.get(issuer_id) if isinstance(issuer_id, str) else None,
+                issuer_manifest,
+            ),
+            transparency,
+            log_keys,
+            anchor_policy,
+            warnings,
+        )
+    )
 
     # --- Step 1: envelope well-formed; attest_version supported; signatures
     # length == 1 (v0.1) or exactly the hybrid pair (v0.2); alg checked against
@@ -741,6 +1052,9 @@ def verify(
         revocation=revocation_result,
         binding=binding_result,
         trust=trust,
+        transparency=transparency_state,
+        corroboration=corroboration_state,
+        manifest_freshness=manifest_freshness_state,
         warnings=tuple(warnings),
         errors=tuple(errors),
     )
