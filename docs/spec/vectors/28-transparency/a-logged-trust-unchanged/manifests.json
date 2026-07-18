@@ -21,6 +21,6 @@
     }
   },
   "provenance": {
-    "store.example.com": "tls"
+    "store.example.com": "bundle"
   }
 }

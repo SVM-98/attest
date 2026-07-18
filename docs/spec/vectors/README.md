@@ -101,7 +101,7 @@ The cross-core corpus for `verify()`'s Stage 2 `transparency`/`corroboration`/`m
 
 | Leaf | Name | Checks |
 | --- | --- | --- |
-| 28a | `a-logged-trust-unchanged` | The baseline: a receipt genuinely logged (hybrid-signed checkpoint, valid inclusion proof) — `transparency: "logged"`, `corroboration: "logged"`, `trust` untouched. |
+| 28a | `a-logged-trust-unchanged` | A genuinely logged receipt (hybrid-signed checkpoint, valid inclusion proof) with TOFU/bundle provenance — `transparency: "logged"` and `corroboration: "logged"` MUST leave `trust: "unauthenticated_tofu"` unchanged; log evidence never upgrades trust. |
 | 28b | `b-wrong-root` | A validly hybrid-signed checkpoint, but for a Merkle root that does not actually contain this entry — inclusion proof fails, `transparency: "not_checked"`. |
 | 28c | `c-ed-only-checkpoint` | A checkpoint carrying only the Ed25519 signature line, no ML-DSA-65 leg — checkpoint auth is hybrid, MANDATORY (design doc), so a genuine Ed25519-only signature grants no standing at all. |
 | 28d | `d-origin-mismatch-log-key` | A genuinely hybrid-signed checkpoint by the pinned log key material, but claiming a different `origin` than the one pinned in `log-keys.json` — no candidate verifies. |
