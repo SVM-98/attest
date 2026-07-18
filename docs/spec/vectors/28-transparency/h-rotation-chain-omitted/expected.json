@@ -1,0 +1,15 @@
+{
+  "binding": "not_checked",
+  "corroboration": "none",
+  "errors": [],
+  "manifest_freshness": "verified_as_of:1",
+  "ok": true,
+  "revocation": "unknown",
+  "schema": "valid",
+  "signature": "valid",
+  "transparency": "logged",
+  "trust": "verified",
+  "warnings": [
+    "corroboration_requires_rotation_chain"
+  ]
+}
