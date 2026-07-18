@@ -3,7 +3,11 @@
 Minimal by design (§8): a record carries only `receipt_id`, `status`,
 `revoked_at`, and the issuer's signature over the rest — signed exactly like
 receipts and manifests (Ed25519 over `canon.canonical_bytes(record)` with
-the `signature` member itself excluded from the signed body).
+the `signature` member itself excluded from the signed body). A hybrid
+signer (v0.2 profile, `pq.HybridSigningKeys`) adds a second `sig_ml_dsa_65`
+leg over the same bytes, AND-verified fail-closed exactly like key and
+artifact manifests — see `manifests.sign_signature_block`/
+`verify_signature_block`.
 
 This module only builds records and checks a record's own signature
 self-consistency against an issuer's key manifest. It has no opinion on
@@ -18,7 +22,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from attest import canon, keys, manifests
+from attest import canon, keys, manifests, pq
 
 _DATE_FMT = "%Y-%m-%dT%H:%M:%SZ"
 _ACTIVE = "active"
@@ -32,17 +36,24 @@ def build_record(
     receipt_id: str,
     status: str,
     revoked_at: str,
-    signing_kp: keys.SigningKeyPair,
+    signing_kp: keys.SigningKeyPair | pq.HybridSigningKeys,
     kid: str,
 ) -> dict[str, Any]:
-    """Build an issuer-signed revocation record `{receipt_id, status, revoked_at, signature}`."""
+    """Build an issuer-signed revocation record `{receipt_id, status, revoked_at, signature}`.
+
+    `signing_kp` mirrors `manifests.build_key_manifest`: a `pq.HybridSigningKeys`
+    produces a `signature` block with both the Ed25519 `sig` leg and the
+    `sig_ml_dsa_65` leg (see `manifests.sign_signature_block`); a plain
+    `keys.SigningKeyPair` keeps the v0.1 Ed25519-only shape unchanged.
+    """
     record: dict[str, Any] = {
         "receipt_id": receipt_id,
         "status": status,
         "revoked_at": revoked_at,
     }
-    sig = keys.sign(canon.canonical_bytes(record), signing_kp)
-    record["signature"] = {"kid": kid, "sig": keys.b64u(sig)}
+    record["signature"] = manifests.sign_signature_block(
+        canon.canonical_bytes(record), signing_kp, kid
+    )
     return record
 
 
@@ -55,6 +66,14 @@ def verify_record_signature(record: dict[str, Any], key_manifest: dict[str, Any]
     record's own signed `revoked_at`, and the signature must verify against
     that key's `pub`. Fails closed on every malformed/wrong-typed/unsigned/
     out-of-window input — never raises.
+
+    AND rule (v0.2, mirrors `manifests.verify_key_manifest`): if the signer's
+    `key_manifest` entry is hybrid (carries `pub_ml_dsa_65`), `signature` MUST
+    also carry a valid `sig_ml_dsa_65` leg over the same signed bytes, or
+    verification fails closed; an Ed25519-only entry with a stray
+    `sig_ml_dsa_65` leg likewise fails closed (see
+    `manifests.verify_signature_block`). Ed25519-only signers keep v0.1
+    behavior byte-for-byte.
 
     PRECONDITION: the caller has already established
     `manifests.verify_key_manifest(key_manifest)` is True. Callers checking
@@ -77,11 +96,7 @@ def verify_record_signature(record: dict[str, Any], key_manifest: dict[str, Any]
         valid_to = entry.get("valid_to")
         if valid_to is not None and revoked_at > _parse_date(valid_to):
             return False
-        return keys.verify_strict(
-            canon.canonical_bytes(body),
-            keys.b64u_decode(sig_block["sig"]),
-            keys.b64u_decode(entry["pub"]),
-        )
+        return manifests.verify_signature_block(canon.canonical_bytes(body), sig_block, entry)
     except (KeyError, ValueError, TypeError):
         return False
 
