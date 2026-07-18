@@ -140,6 +140,13 @@ def _write_secret_text(path: Path, text: str) -> None:
         fh.write(text)
 
 
+def _publishable_mode(base_mode: int) -> int:
+    """Mode bits a plain ``open()``/``mkdir()`` would produce under the umask."""
+    mask = os.umask(0)
+    os.umask(mask)
+    return base_mode & ~mask
+
+
 def _stage_text(path: Path, text: str) -> Path:
     """Write text to a sibling temporary file and return that file.
 
@@ -153,6 +160,10 @@ def _stage_text(path: Path, text: str) -> Path:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(text)
+        # mkstemp creates the file owner-only, but every _stage_text target is
+        # a public log artifact meant for static hosting — os.replace keeps the
+        # staged mode, so restore what a plain open() would have produced.
+        os.chmod(staged, _publishable_mode(0o666))
     except Exception:
         staged.unlink(missing_ok=True)
         raise
@@ -363,6 +374,9 @@ def _stage_tiles(log_dir: Path, leaf_hashes: list[bytes]) -> Path:
     tile_parent.mkdir(parents=True, exist_ok=True)
     staged = Path(tempfile.mkdtemp(prefix=".0.", dir=tile_parent))
     try:
+        # mkdtemp creates the directory owner-only, but it becomes the public
+        # LOG/tile/0 on install — restore what a plain mkdir() would produce.
+        os.chmod(staged, _publishable_mode(0o777))
         for start in range(0, len(leaf_hashes), _TILE_FULL_WIDTH):
             chunk = leaf_hashes[start : start + _TILE_FULL_WIDTH]
             index = start // _TILE_FULL_WIDTH
