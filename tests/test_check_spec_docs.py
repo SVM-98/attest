@@ -296,6 +296,73 @@ def test_unsupported_spec_version_in_verdict_is_an_error() -> None:
     assert any("unsupported spec version v0.3" in e for e in errors)
 
 
+def test_tilde_fenced_matrix_rows_do_not_cover_sections() -> None:
+    fenced = "~~~text\n" + _minimal_matrix_rows() + "~~~\n"
+    docs = _base_docs()
+    docs["threat_model"] = _minimal_threat_model(matrix=fenced)
+
+    errors = collect_errors(**docs)
+
+    assert any("required section v0.1 §2" in e for e in errors)
+
+
+def test_indented_fenced_matrix_rows_do_not_cover_sections() -> None:
+    # Up to three leading spaces still opens a fence in CommonMark.
+    fenced = "   ```text\n" + _minimal_matrix_rows() + "   ```\n"
+    docs = _base_docs()
+    docs["threat_model"] = _minimal_threat_model(matrix=fenced)
+
+    errors = collect_errors(**docs)
+
+    assert any("required section v0.1 §2" in e for e in errors)
+
+
+def test_dangling_spec_ref_after_oxford_comma_is_an_error() -> None:
+    entries = _tm_entry(1, "- **Verdict:** Mitigated — v0.2 §2, §3, and §99.  Nonexistent.")
+    docs = _base_docs()
+    docs["threat_model"] = _minimal_threat_model(entries=entries)
+
+    errors = collect_errors(**docs)
+
+    assert any("§99" in e for e in errors)
+
+
+def test_non_spec_version_token_is_not_flagged() -> None:
+    # A version that is not a spec citation is ordinary prose. Flagging it would
+    # fail a legitimate edit, which is worse than the gap it would close.
+    entries = _tm_entry(1, "- **Verdict:** Mitigated — v0.1 §2.  Delivery over TLS v1.3.")
+    docs = _base_docs()
+    docs["threat_model"] = _minimal_threat_model(entries=entries)
+
+    errors = collect_errors(**docs)
+
+    assert not any("unsupported spec version" in e for e in errors)
+
+
+def test_pc_01_pattern_pin_naming_the_wrong_fields_is_an_error() -> None:
+    pc_row = _minimal_pc_row().replace(
+        "`commitment` and `pubkey` are", "`commitment` and `commitment` are"
+    )
+    docs = _base_docs()
+    docs["privacy"] = _minimal_privacy(pc_rows=pc_row)
+
+    errors = collect_errors(**docs)
+
+    assert any("PC-01" in e and "pubkey" in e for e in errors)
+
+
+def test_pc_01_identifier_type_enum_drift_is_an_error() -> None:
+    schema = _minimal_schema()
+    buyer = schema["properties"]["buyer"]  # type: ignore[index]
+    buyer["properties"]["identifier_type"] = {"type": "string"}  # type: ignore[index]
+    docs = _base_docs()
+    docs["schema"] = schema
+
+    errors = collect_errors(**docs)
+
+    assert any("PC-01" in e and "identifier_type" in e for e in errors)
+
+
 def test_pc_row_with_invalid_check_type_is_an_error() -> None:
     pc_row = (
         "| PC-01 | The signed payload schema defines no plaintext "
@@ -347,7 +414,21 @@ def test_pc_01_pattern_pin_diverging_from_schema_is_an_error() -> None:
 
     errors = collect_errors(**docs)
 
-    assert any("PC-01" in e and "pattern" in e.lower() for e in errors)
+    assert any("PC-01" in e and "commitment" in e for e in errors)
+
+
+def test_pc_01_pattern_pin_diverging_on_the_pubkey_leg_is_an_error() -> None:
+    # Drifting only the second field: a checker that validated the first name it
+    # captured and stopped would pass this.
+    schema = _minimal_schema()
+    buyer = schema["properties"]["buyer"]  # type: ignore[index]
+    buyer["properties"]["pubkey"]["pattern"] = "^[A-Za-z0-9_-]{42}$"  # type: ignore[index]
+    docs = _base_docs()
+    docs["schema"] = schema
+
+    errors = collect_errors(**docs)
+
+    assert any("PC-01" in e and "pubkey" in e for e in errors)
 
 
 def test_well_formed_fixtures_are_clean() -> None:
