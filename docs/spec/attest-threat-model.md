@@ -30,6 +30,7 @@ This document reuses, without redefining, the conformance language established i
 | Date | Change |
 | --- | --- |
 | 2026-07-18 | Initial publication: §1 status and scope, §2 system model, §3 attacker model. |
+| 2026-07-18 | Attack catalog (§4, Groups A–I), traceability matrix (§5), forward-looking requirements (§6), consolidated out-of-scope register (§7). |
 
 ## 2. System model
 
@@ -87,7 +88,7 @@ The following actor names are canonical for this document and every attack-catal
 
 ## 4. Attack catalog
 
-Entries are grouped by the lifecycle stage at which the attack is mounted: issuance (Group A), delivery (Group B), storage and sharing (Group C), verification (Group D), rotation and key compromise (Group E), and revocation, refund, and end-of-life (Group F). Every entry uses the format fixed in §1 — actor and precondition, impact, exactly one verdict from the §1 vocabulary with the specification sections that carry it, and a residual-risk line — and every entry names actors using the §2 canonical names verbatim.
+Entries are grouped by the lifecycle stage at which the attack is mounted: issuance (Group A), delivery (Group B), storage and sharing (Group C), verification (Group D), rotation and key compromise (Group E), revocation, refund, and end-of-life (Group F), the transparency log (Group G), anchoring (Group H), and coercion and supply chain (Group I). Every entry uses the format fixed in §1 — actor and precondition, impact, exactly one verdict from the §1 vocabulary with the specification sections that carry it, and a residual-risk line — and every entry names actors using the §2 canonical names verbatim.
 
 An entry's verdict describes only what `attest-v0.1.md` and `attest-v0.2.md` currently implement. Where a mechanism bounds one slice of an attack and leaves another open, the open slice is named in the residual-risk line rather than absorbed into the verdict; where the residual is a gap with no mechanism behind it, the line says so in those words.
 
@@ -431,3 +432,173 @@ An entry's verdict describes only what `attest-v0.1.md` and `attest-v0.2.md` cur
 - **Impact:** A revocable receipt is invalidated with a false signed revocation time, or every receipt using a marked key is invalidated despite no actual compromise.
 - **Verdict:** Out of scope — v0.1 §7.3, v0.1 §12.1, v0.1 §12.2. The specifications authenticate `revoked_at` and key status but do not establish their truthfulness or distinguish coercion from voluntary signing. A signed refund-window time can be backdated inside the key-validity window, policy-class records are honored as signed, and a compelled `compromised` marking invalidates every signature under that key. This is a tracked protocol gap.
 - **Residual risk:** TM-41 separately mitigates a matching compelled record against a `revocability: "none"` receipt. It does not protect revocable classes or counter a compelled key-status publication.
+
+### Group G — Transparency log
+
+#### TM-48 — Self-signed manifest logged to manufacture issuer standing
+
+- **Actor / precondition:** `network attacker` publishes a key manifest naming a victim domain, submits it to a Stage 2 log, and presents the resulting inclusion evidence to a `verifier`.
+- **Impact:** An attacker-controlled manifest would acquire the appearance of issuer standing from the log itself, converting an open-ingestion host into a domain-control authority.
+- **Verdict:** Mitigated — v0.2 §7.1, v0.2 §10, v0.2 §10.4, v0.2 §15.  The specifications name this exact confusion and close it structurally: key manifests are self-signed (v0.1 §7.1) and a log is an open-ingestion host, so inclusion says nothing about who controls a domain; the log NEVER upgrades `trust`, which continues to require the v0.1 §7.4 domain-control root and nothing else, ever (v0.2 §15 item 4); and a claim for a manifest whose own `manifest_version` is greater than 1 has `corroboration` forced back down to `none`, with the warning `corroboration_requires_rotation_chain`, unless the verifier's own trust store independently holds a validated, gapless rotation chain from version 1 through that manifest — a rule deliberately stricter than v0.1 §7.3 continuity, because publication is not a rotation history (v0.2 §16, leaf 28h).
+- **Residual risk:** The rotation-chain rule is scoped to `manifest_version` greater than 1, so a freshly minted attacker manifest at version 1 still reaches `transparency: "logged"` and `corroboration: "logged"` on its own merits — honestly, since those components only ever assert observability. What prevents the confusion is the consumer reading `trust`, the same reading dependency as TM-11 and TM-26; nothing in the result vocabulary is misstated, and nothing forces a UI to show it.
+
+#### TM-49 — Split view against a verifier that has seen only one branch
+
+- **Actor / precondition:** `log operator` maintains two self-consistent branches and serves each audience only its own; the `verifier` holds checkpoints from one branch only.
+- **Impact:** Inclusion evidence stops meaning "in the one true log" without any verifier being able to notice, so a receipt can be logged for one audience and invisible to another indefinitely.
+- **Verdict:** Out of scope — v0.2 §10.3, v0.2 §15, v0.2 §10.1. This is the discovery half of equivocation, and the specifications state as a normative limitation that Stage 2 does not address it: Stage 2 defines no mechanism for a verifier that has seen only one branch to discover a second, and a keyed log with no independent witness quorum can maintain parallel self-consistent branches indefinitely. Anchors bound time, not branching. The answer is an independent witness quorum whose wire contract is deliberately frozen but whose operation is not delivered here — `corroboration: "witnessed"` is defined and a conforming Stage 2 implementation MUST NOT emit it.
+- **Residual risk:** TM-34 mitigates only the detection half, and only once the verifier already holds both inconsistent checkpoints. Until witness federation exists (§6.2), a verifier's confidence that a log has not branched rests on nothing the protocol supplies.
+
+#### TM-50 — Stale manifest laundered into apparent currency by an inclusion proof
+
+- **Actor / precondition:** `mirror operator` or `network attacker` pairs a genuinely `issuer`-signed but superseded key manifest with genuine, correctly verifying transparency evidence for it.
+- **Impact:** A verifier that reads inclusion as recency treats a superseded manifest — potentially one whose successor marks a key `compromised` — as the issuer's current key state.
+- **Verdict:** Mitigated — v0.2 §10.4, v0.2 §10.1, v0.2 §15.  The result vocabulary refuses to express currency at all: `manifest_freshness: verified_as_of:<N>` proves only that the manifest existed unmodified as of a point in the log's history, MUST NOT by itself be read as a claim about a key's current status — the specification names the exact case, a later manifest version having since marked the same key `compromised` — and `<N>` is a tree size, not a wall-clock time, so it cannot be misread as recency; `corroboration` says an artifact was independently observable and never who was entitled to write it (v0.2 §15 item 3).
+- **Residual risk:** Refusing to assert currency is not establishing it. Nothing here lets a `verifier` discover that a newer manifest exists, which is TM-29's tracked gap; the mechanisms bound how the evidence may be *described*, leaving the underlying rollback exposure exactly where TM-29 leaves it.
+
+#### TM-51 — Log entry poisoning through admitted content
+
+- **Actor / precondition:** `network attacker` submits entries to a Stage 2 log that admits submissions from parties other than the `issuer` named in them.
+- **Impact:** Attacker-chosen content inside the log would be replicated by every mirror and could carry attribution, payloads, or schema extensions that consumers act on.
+- **Verdict:** Mitigated — v0.2 §8, v0.2 §7.2.  Entries are content-free and closed by construction: exactly two versioned entry types are defined, each with exactly the required member set and no more, unknown members are rejected outright rather than silently tolerated, and every member is a domain name, a version integer, or a lowercase-hex hash — there is nowhere in an entry for attacker-chosen content to live. The `issuer` member of a `receipt` entry is normatively a NON-AUTHENTICATED hint for log browsing that a conforming verifier MUST NOT read as attribution, and an entry whose type or member set does not match resolves to `transparency: "not_checked"` rather than being partially trusted. `entries.jsonl` is the sole source of truth and the tile cache carries no authority, so a poisoned cache cannot outlive a rebuild.
+- **Residual risk:** This bounds *what* may be admitted, not *how much*. Neither specification defines submitter authentication, admission quotas, or rate limits, so nothing bounds the volume of well-formed entries an adversary may submit to an openly-ingesting log. As in TM-27 and TM-39, log availability is not a protocol property; a flooded log denies no verifier a verdict, because evidence evaluation degrades to `not_checked` rather than failing.
+
+#### TM-52 — Mirror serving a truncated or stale tree
+
+- **Actor / precondition:** `mirror operator` or `network attacker` republishes a log's static file set at an earlier or rewritten tree state.
+- **Impact:** Entries appended after the truncation point vanish from view, and a verifier could be steered onto a history the log never signed.
+- **Verdict:** Mitigated — v0.2 §10.2, v0.2 §9.2, v0.2 §7.3.  Truncation cannot manufacture standing and cannot be silently rewritten: the checkpoint MUST verify under a `LogKey` pinned out-of-band in the verifier's own trust store under the fail-closed Ed25519 **and** ML-DSA-65 rule, the evidence's declared `tree_size` MUST equal that verified checkpoint's own, and the inclusion proof MUST verify against its root — so a rewritten tree requires the ceremony-side signing keys, not merely control of the served files. Where the verifier supplies a validly-signed prior checkpoint plus a consistency proof, a truncation that is not RFC 6962-consistent is the hard verdict `transparency: "equivocation_detected"`, and the ceremony-side signer MUST itself refuse to sign any successor that is not a valid consistency extension of the prior signed tree.
+- **Residual risk:** A `verifier` holding no prior checkpoint cannot distinguish a truncated tree from a genuinely small one; serving an old but internally consistent checkpoint is undetectable and confers genuine, merely older, standing. Withholding evidence outright is TM-27, and a signer able to produce a consistent rewrite is TM-33.
+
+#### TM-53 — Side-documents outside transparency coverage
+
+- **Actor / precondition:** `issuer`, `mirror operator`, or `coercive third party` alters, withholds, or backdates an artifact manifest or a revocation record, for which no log evidence can exist.
+- **Impact:** The two document classes that carry post-issuance state — what artifacts are current, and what is revoked — get none of the existence, ordering, or anti-equivocation properties Stage 2 gives receipts and key manifests.
+- **Verdict:** Out of scope — v0.2 §8, v0.2 §15, v0.2 §13. The log defines exactly two entry types, `key-manifest` and `receipt`; artifact manifests and revocation records are not loggable entry types, and v0.2 §15 item 5 states the boundary directly — the v0.2 §13 hybrid AND-rule closes the specific hybrid-downgrade gap in side-document *authentication* and extends neither transparency-log coverage, inclusion proofs, nor anti-equivocation guarantees to those documents.
+- **Residual risk:** Two catalogued exposures rest on precisely this absence: TM-36's artifact-manifest rollback has no log-ordering evidence available to close it, and TM-37's residual — that no transparency evidence can corroborate when a revocation record actually appeared — is a direct consequence. Authentication of these documents is unaffected and remains as strong as TM-37 and TM-38 describe.
+
+### Group H — Anchoring
+
+#### TM-54 — Forged OpenTimestamps attestation
+
+- **Actor / precondition:** `mirror operator` or `network attacker` supplies fabricated `ots` anchor evidence alongside otherwise genuine transparency evidence.
+- **Impact:** A fabricated anchor would manufacture `anchored_before:<T>`, the one component that carries post-horizon evidentiary weight, converting unanchored material into apparently pre-CRQC standing.
+- **Verdict:** Mitigated — v0.2 §11.1, v0.2 §11.2, v0.2 §10.2.  The anchor path is hash-only and terminates in the verifier's own trust store rather than in anything the evidence asserts: starting from `SHA-256(checkpoint.note_bytes)`, an op-chain of `sha256`/`append`/`prepend` operations is replayed and MUST land on the `header_merkle_root` of a Bitcoin block header pinned by header hash in the verifier's own `AnchorPolicy.pinned_headers` — never fetched live, never trusted from the evidence's own claimed header time — so forging one means finding a preimage against a pinned header's Merkle root, and a proof naming a header absent from that map contributes nothing at all. `anchored_before` is the minimum pinned header time across every verified proof, never a single authority's self-asserted time.
+- **Residual risk:** `anchored_before:<T>` is an upper bound on the earliest provable existence time, never a lower bound (v0.2 §11.1): it can establish that the checkpoint bytes existed by `T` and can never establish that they did not exist earlier, nor that they are recent. Coverage also depends entirely on the verifier's own header store, whose distribution and refresh neither specification defines — a gap in that store is fail-safe (no standing) rather than fail-open. What the anchor commits to is `note_bytes` alone, which is TM-33.
+
+#### TM-55 — Post-CRQC break of the classical RFC 3161 leg
+
+- **Actor / precondition:** `network attacker` with CRQC capability forges, or simply fabricates, an RFC 3161 timestamp token presented as anchor evidence.
+- **Impact:** If the classical timestamping leg carried evidentiary weight, breaking it would re-open exactly the retroactive-fabrication path the anchoring layer exists to close.
+- **Verdict:** Mitigated — v0.2 §11.1, v0.2 §11.3, v0.2 §16.  RFC 3161 is defined as optional classical convenience carrying no post-horizon weight, and the specification enforces that by refusing to derive anything from it: the token is accepted as OPAQUE evidence, parsed only far enough to note its presence and never validated as a certificate chain, it carries a fixed warning stating it has no post-horizon weight, and an `rfc3161` proof alone NEVER sets `pq_surviving` and NEVER sets `anchored_before`. A verdict resting on it can never pass a configured `crqc_horizon`, regardless of how early its claimed time is (v0.2 §16, leaf 28k). OpenTimestamps is the required post-quantum leg precisely because it is hash-based.
+- **Residual risk:** Because the token is never validated, a fabricated one is indistinguishable from a genuine one; it sets `anchored: true` while contributing nothing to `transparency`, so a consumer reading `anchored` in isolation rather than `transparency` can still be misled by a token that proves nothing. The horizon gate that formalizes this is also inert until configured — `crqc_horizon` is `null` by default (v0.2 §11.2).
+
+#### TM-56 — Horizon manipulation to claim pre-CRQC standing
+
+- **Actor / precondition:** `network attacker` assembles evidence intended to place post-horizon material on the pre-horizon side of a verifier's configured `crqc_horizon`.
+- **Impact:** Post-CRQC forgeries would inherit the standing reserved for material demonstrably predating the quantum transition.
+- **Verdict:** Mitigated — v0.2 §11.3, v0.2 §10.2, v0.2 §12.  The horizon is mechanized rather than advisory: a verdict passes only if the policy declares no horizon, or the verdict is PQ-surviving **and** its `anchored_before` is strictly earlier than the horizon; when it does not pass, the whole result caps back down to `(transparency: "not_checked", corroboration: "none")` — a checkpoint signature alone does not survive a declared cutoff. The times compared are pinned-header times from the verifier's own store, not attacker-supplied claims, and the only accepted receipt-entry hash domain commits to the signature bytes themselves, so early standing cannot be obtained for a signature that did not yet exist (TM-04).
+- **Residual risk:** The horizon is verifier-local policy and `null` by default, so the gate protects only operators who configure it. It also gates `transparency` and `corroboration` alone: as TM-03 records, no horizon setting can ever make a post-CRQC Ed25519-only forgery report `signature: "invalid"`, so discrimination still rests entirely on the presence of anchored-before-horizon evidence — which un-logged stock, by definition, does not have (v0.2 §15 item 2).
+
+### Group I — Coercion and supply chain
+
+#### TM-57 — Compelled issuer denial of an issued receipt
+
+- **Actor / precondition:** `coercive third party` compels an `issuer` to deny that a purchase occurred, to erase its own records of it, or to withdraw the verification material behind it.
+- **Impact:** The buyer's evidence would evaporate with the seller's cooperation, which is precisely the failure mode a buyer-held receipt exists to prevent.
+- **Verdict:** Mitigated — v0.1 §14.1, v0.1 §11.1, v0.1 §11.2, v0.2 §7.2.  Evidence is user-held and does not depend on the issuer's continued cooperation: the shareable bundle carries the receipts, the key and artifact manifests, and the license, mirror-policy, and end-of-life texts, each verified against its signed hash binding at export time, so the terms survive alongside the signature; offline verification MUST work from a local trust store with no issuer endpoint reachable, reporting `revocation: "unknown"` honestly rather than failing closed; the layered result never collapses, so even a receipt driven to `ok: false` still reports `signature: "valid"` and keeps its signed terms readable; and a Stage 2 log is a static file set whose root is recomputable by any independent party.
+- **Residual risk:** What survives is the evidence, not the entitlement. A compelled revocation of a `refund_window` or `policy` receipt still drives `ok: false` with no in-protocol counter-evidence path (TM-40, TM-47), a `verifier` with no previously established TLS root can never reach `trust: "verified"` afterwards (TM-43), and whether preserved evidence produces any remedy is a legal question this protocol does not adjudicate (§7).
+
+#### TM-58 — Compelled transparency-log takedown
+
+- **Actor / precondition:** `coercive third party` compels a `log operator` to withdraw a Stage 2 log, or seizes the infrastructure serving it.
+- **Impact:** Every artifact whose corroboration depended on that log loses its standing, retroactively erasing the transparency layer's contribution.
+- **Verdict:** Mitigated — v0.2 §7.2, v0.2 §14, v0.2 §10.2.  Standing already obtained is portable and does not require the log to be reachable: the log is a static, mirrorable file set that any independent party may republish, `entries.jsonl` is the sole source of truth from which the tree root and checkpoint body are recomputable by anyone, an `.attest` bundle MAY carry each receipt's evidence as a `proofs/<ULID>.json` member so verification stays offline, and evidence is evaluated as untrusted input regardless of where it came from — a mirror's copy is worth exactly what the log's own host's copy is worth.
+- **Residual risk:** Nothing new can be corroborated while the log is down: no entries are admitted, no successor checkpoints are signed, and no anchors accrue. Recovery onto a successor log is not a protocol operation either, since `LogKey` trust stores are pinned out-of-band and a conforming verifier MUST NOT take log keys from a bundle (v0.2 §7.3) — adopting a replacement requires an out-of-band trust-store update. Mirrors are permitted by the substrate but not required to exist, so portability is an opportunity, not a guarantee.
+
+#### TM-59 — Compromise of an implementation's dependency, build, or release pipeline
+
+- **Actor / precondition:** `supply chain` compromise of a dependency, build step, or published package of a verifier or issuer implementation, with no cryptographic primitive attest defines being broken.
+- **Impact:** A verifier that reports whatever verdict the attacker chooses — accepting forgeries, suppressing revocation, or exfiltrating disclosed identifiers and salts — while every document it handles remains perfectly well-formed.
+- **Verdict:** Out of scope — v0.1 §2, v0.1 §15, v0.2 §6, v0.2 §16. `attest-v0.1.md` and `attest-v0.2.md` define document formats, a canonicalization profile, a signing and verification algorithm, and a conformance corpus; they define no build, packaging, or distribution requirement for any implementation, so a compromised toolchain is not something these specifications constrain. What they do supply is structural rather than preventive: conformance is defined as producing the expected `VerificationResult` for every leaf of a 66-leaf corpus run against every runner from shared golden files, so no single implementation is a required trust root and an independently written verifier is checkable against the same fixtures.
+- **Residual risk:** A relying party running a compromised verifier gets that verifier's answer, and no amount of conformance testing changes it. The corpus establishes conformance of an implementation as tested, never of the artifact a user actually installed; nothing in either specification binds a published package to the source that passed the corpus, and an implementation's own release provenance, where it publishes any, is a property of that distribution rather than a conformance requirement. Reducing the exposure is a matter of running independent implementations from different supply chains against the same artifact — available because the corpus makes independent implementations practical, but not required by anything normative.
+
+## 5. Traceability
+
+Every numbered section of the two normative specifications maps to at least one catalog entry. Rows cover `attest-v0.1.md` §2–§15 and `attest-v0.2.md` §2–§16, excluding each document's §1 (status and conformance language) and v0.2 §5 (a worked example of §2–§4, carrying no mechanism of its own). Sections whose own text defines no attack surface map to the entry that scopes them, or to the out-of-scope register in §7; no cell is empty.
+
+| Spec feature | TM entries |
+| --- | --- |
+| v0.1 §2 — Scope and out-of-scope boundaries | TM-05, TM-13, TM-43, TM-44, TM-59; §7 register |
+| v0.1 §3 — Terminology and actors | TM-02, TM-05, TM-06; §2 actor table |
+| v0.1 §4 — Envelope structure (`signatures`, `delivery`) | TM-09, TM-12, TM-13, TM-20, TM-22 |
+| v0.1 §5 — Payload field registry | TM-08, TM-17, TM-18, TM-21, TM-40 |
+| v0.1 §6 — Legal-weight field semantics | TM-05, TM-40, TM-41; §7 register |
+| v0.1 §7 — Issuer identity, keys, and manifests | TM-07, TM-11, TM-28, TM-29, TM-32, TM-36, TM-43, TM-46 |
+| v0.1 §8 — Buyer commitment and binding | TM-14, TM-18, TM-19, TM-35, TM-44 |
+| v0.1 §9 — attest-JCS canonicalization profile | TM-20, TM-22, TM-25 |
+| v0.1 §10 — Cryptography and pinned ruleset | TM-01, TM-03, TM-25 |
+| v0.1 §11 — Verification algorithm and result vocabulary | TM-01, TM-07, TM-09, TM-11, TM-21, TM-25, TM-26, TM-39 |
+| v0.1 §12 — Revocation records | TM-37, TM-38, TM-39, TM-40, TM-42, TM-47 |
+| v0.1 §13 — Delivery member and single-receipt sharing | TM-12, TM-13, TM-16 |
+| v0.1 §14 — Export bundle formats | TM-14, TM-15, TM-16, TM-24, TM-43, TM-45, TM-57 |
+| v0.1 §15 — Test vectors and conformance | TM-25, TM-59 |
+| v0.2 §2 — Hybrid signature profile | TM-10, TM-30, TM-31, TM-32 |
+| v0.2 §3 — Verification algorithm, hybrid path | TM-01, TM-10, TM-31 |
+| v0.2 §4 — Manifest continuity and trust | TM-28, TM-30 |
+| v0.2 §6 — Conformance, group 26 | TM-25, TM-59 |
+| v0.2 §7 — Stage 2 architecture and substrate | TM-27, TM-33, TM-48, TM-51, TM-52, TM-58 |
+| v0.2 §8 — Log entry schemas | TM-51, TM-53 |
+| v0.2 §9 — Checkpoints, hybrid signed-note profile | TM-23, TM-25, TM-27, TM-33, TM-52 |
+| v0.2 §10 — Result contract and decision order | TM-26, TM-27, TM-34, TM-48, TM-49, TM-50, TM-52 |
+| v0.2 §11 — Anchoring, `AnchorPolicy`, CRQC horizon | TM-03, TM-33, TM-54, TM-55, TM-56 |
+| v0.2 §12 — Signed-receipt-core commitment | TM-04, TM-56 |
+| v0.2 §13 — Hybrid AND-rule for side-documents | TM-31, TM-36, TM-38, TM-53 |
+| v0.2 §14 — Bundle transparency evidence (`proofs/`) | TM-23, TM-24, TM-26, TM-45, TM-58 |
+| v0.2 §15 — Limitations (normative) | TM-03, TM-26, TM-34, TM-48, TM-49, TM-53 |
+| v0.2 §16 — Conformance, group 28 | TM-25, TM-26, TM-34 |
+
+## 6. Forward-looking requirements
+
+This section states requirements for work not yet in the normative specifications, and gaps the current specifications do not close. It is not part of the attack catalog: it carries no entries and no verdicts, and nothing in it may be read as a mitigation available today.
+
+### 6.1 Transfer records
+
+`license.transferable` is a reserved field, and v0.1 §2 requires that implementations MUST NOT read `transferable: true` as authorization to resell or transfer a license; issuer-mediated transfer records remain forthcoming in a later revision of `attest-v0.2.md` (v0.2 §1). When that revision defines them, it MUST address the following, each of which the current documents leave undefined because the record type they would attach to does not exist:
+
+- **Transfer-record forgery.** A transfer record MUST be authenticated at least as strongly as the receipt it moves, which under v0.2 §13's existing discipline means the hybrid AND-rule applies whenever the signing key entry carries `pub_ml_dsa_65`; a classical-only transfer record against a hybrid key MUST fail closed exactly as revocation records now do.
+- **Chain-of-title hijack.** A chain of transfers MUST be evaluable as a chain, not as isolated records: the revision MUST define how a verifier establishes that the party transferring is the party who last received, since neither `buyer.commitment` nor the optional `buyer.pubkey` currently carries ordering, and v0.1 §8.2 forbids treating `buyer.pubkey` equality across receipts as proof of buyer identity.
+- **Double assignment.** The revision MUST define what a verifier reports when two records transfer the same receipt to different parties. Detecting that condition requires an ordering source the current documents do not provide for side-documents, since artifact manifests and revocation records are not loggable entry types (v0.2 §8, §15 item 5) — extending the log's closed entry schema to transfer records, or defining an equivalent ordering mechanism, is a precondition rather than an optimization.
+- **Revocation interplay after transfer.** The revision MUST state whose receipt a post-transfer revocation record affects and how `revocability` classes survive a transfer, including whether a `refund_window` remains anchored to the original `issued_at` (v0.1 §12.2) once the holder has changed.
+- **Coerced transfer.** The revision MUST NOT claim to distinguish a compelled transfer from a voluntary one. A signature establishes what was signed, not why, and TM-47 already records that limitation for revocation; a transfer profile inherits it and MUST scope its claims accordingly.
+
+### 6.2 Witness federation (Stage 2b)
+
+Stage 2 detects equivocation only when a verifier already holds two inconsistent, validly-signed checkpoints for the same origin (v0.2 §10.3); it defines no mechanism for discovering a second branch, so a keyed log with no independent witness quorum can maintain parallel self-consistent branches indefinitely (v0.2 §15 item 1, TM-49). Until an independent witness quorum exists, documentation and implementations MUST NOT describe split view as prevented — only as detectable in the two-checkpoint case — and a conforming Stage 2 implementation MUST NOT emit `corroboration: "witnessed"` (v0.2 §10.1). The wire contract is already C2SP tlog-cosignature compatible, so what is missing is federation and operations, not format: standing up independent witnesses does not require a change to the checkpoint or evidence shapes this document analyzes.
+
+### 6.3 Tracked protocol gaps
+
+The following are attacks the current specifications genuinely do not stop, as distinct from concerns attest deliberately excludes (§7). They are recorded here rather than resolved, and they are candidates for the versioning-and-evolution work of a future revision of these specifications. Each names the entries that carry it and what would close it.
+
+| Gap | Entries | What closes it |
+| --- | --- | --- |
+| No normative resource ceilings — envelope size, nesting depth, proof-list and op-chain length, checkpoint text, archive expansion, manifest arrays, revocation-view scans — so bounds are implementation-local and outside the conformance surface | TM-22, TM-23, TM-24, TM-46 | Normative limits stated in the conformance surface |
+| Artifact-manifest rollback — v0.1 §7.2 requires accepting any issuer-signed manifest for the series, with no monotonicity or recency rule | TM-36 | A normative manifest-currency (monotonicity/recency) rule |
+| Key-manifest rollback — a verifier cannot discover a newer manifest, so an old one keeps a compromised key effective; v0.2 §10.4 freshness proves historical inclusion, never current status | TM-29 | The same manifest-currency rule, plus a status-freshness mechanism |
+| OpenTimestamps pre-anchoring — the anchor commits to `checkpoint.note_bytes` while the signature lines are excluded (v0.2 §9.1, §11.1), so a chosen unsigned note can be pre-anchored and signed later by a holder of both log keys | TM-33 | Anchor coverage extended over the signature, or a normative note about what the anchor does not prove |
+
+Three further entries describe themselves in the same words but are gaps of a different kind, and belong to the register in §7 rather than to this table: TM-12 and TM-15 turn on custody of buyer secrets, which v0.1 §8.2 places outside the specification by declaring mandatory key custody out of scope, and TM-47 turns on the truthfulness of a signed statement, which no signature scheme can establish. They await a scope decision, not a mechanism. TM-49's split-view discovery problem is likewise absent from this table because the specifications already declare it normatively and route it to witness federation (§6.2), rather than leaving it implicit.
+
+## 7. Out-of-scope register
+
+Concerns that attest deliberately does not address, consolidated from the verdicts above and from the founding constraints of `attest-v0.1.md` §2. Exclusion here is a scope decision, not an oversight, and is distinct from the gaps recorded in §6.3.
+
+| Concern | Why out of scope |
+| --- | --- |
+| DRM circumvention | v0.1 §2 forbids it outright — attest defines no DRM-stripping functionality and MUST NOT be used, marketed, or implemented as a means of circumventing protection — so defeating an artifact's protection is never treated here as an attack the protocol should answer. |
+| Content hosting, indexing, and distribution | attest is content-free by design and a conforming implementation MUST NOT host or index the works a receipt refers to (v0.1 §2), so the availability of an artifact, and the integrity of whatever host serves it beyond the signed `sha256` binding, lie outside the protocol. |
+| Issuer honesty and reputation | attest proves what an issuer signed, not that the issuer is honest (TM-05, TM-06): a dishonest issuer's receipts are cryptographically indistinguishable from an honest one's, and reputation is a marketplace and client concern the specifications deliberately do not adjudicate. |
+| Buyer endpoint compromise | Malware on the buyer's device defeats every buyer-held secret at once — salts, binding keys, and the private bundle — and neither specification defines endpoint security, attestation, or a secure-element requirement; the two-file export split reduces accidental sharing, never device compromise (TM-15). |
+| Legal evidentiary weight | A receipt is evidence of a license grant and its terms, and even the strongest conditional v0.1 defines is explicitly "evidence, not a compliance determination" (v0.1 §6.1), so what weight a verified receipt carries before any court or regulator is outside what a signature scheme can determine (TM-40, TM-47, TM-57). |
+| Transport security of delivery channels | v0.1 and v0.2 define document formats, canonicalization, and verification, but no delivery transport and therefore no confidentiality property for one; TLS appears solely as the manifest-fetch trust root (v0.1 §7.4), not as a delivery requirement, so channel confidentiality belongs to the deploying party (TM-13). |
+| Key-custody UX beyond the bundle split | Mandatory key custody is explicitly out of scope for v0.1 (v0.1 §8.2), and the specifications' obligations stop at naming the private file, documenting it as unshareable, and warning whenever a conforming CLI accesses it — no backup, escrow, rotation, or recovery mechanism is defined (TM-15, TM-35, TM-44). |
