@@ -376,11 +376,52 @@ def _cmd_manifest_rotate(args: argparse.Namespace) -> int:
 def _cmd_manifest_artifacts(args: argparse.Namespace) -> int:
     if _same_file_target(args.signing_seed, args.out):
         raise CliUsageError("--signing-seed and --out must be different paths")
+    if _same_file_target(args.manifest_in, args.out):
+        raise CliUsageError("--in and --out must be different paths")
+    if args.mldsa_key is not None and _same_file_target(args.mldsa_key, args.out):
+        raise CliUsageError("--mldsa-key and --out must be different paths")
+
+    key_manifest = _read_json(args.manifest_in)
+    if not isinstance(key_manifest, dict) or "keys" not in key_manifest:
+        raise CliUsageError(f"{args.manifest_in} is not a key manifest")
     artifacts = _read_json(args.artifacts)
     if not isinstance(artifacts, list):
         raise CliUsageError(f"{args.artifacts} must contain a JSON array of artifact entries")
 
-    signing_kp = _load_seed_kp(args.signing_seed)
+    # The signature shape MUST follow the signing entry's own hybrid-ness, not
+    # whether the operator happened to pass --mldsa-key. The shared verifier
+    # requires the manifest_signature shape to match "pub_ml_dsa_65" in the
+    # entry, so any mismatch would otherwise create an invalid artifact
+    # manifest at exit 0.
+    signer_entry = manifests.find_key(key_manifest, args.signing_kid)
+    if signer_entry is None:
+        raise CliUsageError(f"signing key {args.signing_kid!r} is not in {args.manifest_in}")
+    is_hybrid_signer = "pub_ml_dsa_65" in signer_entry
+    mldsa_kp: pq.MLDSAKeyPair | None = None
+    if is_hybrid_signer and args.mldsa_key is None:
+        raise CliUsageError(f"signing key {args.signing_kid!r} is hybrid; --mldsa-key is required")
+    if not is_hybrid_signer and args.mldsa_key is not None:
+        raise CliUsageError(
+            f"signing key {args.signing_kid!r} is Ed25519-only; --mldsa-key is not allowed"
+        )
+    if is_hybrid_signer and args.mldsa_key is not None:
+        mldsa_kp = _load_mldsa_kp(args.mldsa_key)
+        try:
+            entry_mldsa_pub = keys.b64u_decode(signer_entry["pub_ml_dsa_65"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CliUsageError(
+                f"{args.manifest_in} has a malformed pub_ml_dsa_65 for "
+                f"{args.signing_kid!r}: {exc}"
+            ) from exc
+        if mldsa_kp.pub != entry_mldsa_pub:
+            raise CliUsageError(
+                "--mldsa-key does not match the signing key's ML-DSA-65 public key in the manifest"
+            )
+
+    ed_signing_kp = _load_seed_kp(args.signing_seed)
+    signing_kp: keys.SigningKeyPair | pq.HybridSigningKeys = ed_signing_kp
+    if mldsa_kp is not None:
+        signing_kp = pq.HybridSigningKeys(ed=ed_signing_kp, mldsa=mldsa_kp)
     manifest = manifests.build_artifact_manifest(
         args.issuer,
         args.series,
@@ -390,6 +431,11 @@ def _cmd_manifest_artifacts(args: argparse.Namespace) -> int:
         signing_kp,
         args.signing_kid,
     )
+    if not manifests.verify_artifact_manifest(manifest, key_manifest):
+        raise CliUsageError(
+            "built artifact manifest does not self-verify against --in; check that "
+            "--signing-seed, --mldsa-key, issuer, signer status, and released-at match it"
+        )
     _write_json_file(args.out, manifest)
     _print_json(
         {
@@ -790,6 +836,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=_cmd_manifest_rotate)
 
     p = manifest_sub.add_parser("artifacts", help="Build and sign an artifact manifest")
+    p.add_argument(
+        "--in", dest="manifest_in", required=True, type=Path, help="signer's key manifest"
+    )
     p.add_argument("--issuer", required=True)
     p.add_argument("--series", required=True)
     p.add_argument("--version", required=True, type=int)
@@ -797,6 +846,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--artifacts", required=True, type=Path, help="JSON file: array of artifacts")
     p.add_argument("--signing-kid", required=True)
     p.add_argument("--signing-seed", required=True, type=Path)
+    p.add_argument(
+        "--mldsa-key",
+        type=Path,
+        default=None,
+        help="ML-DSA-65 leg of the signing key; required exactly for a hybrid key entry",
+    )
     p.add_argument("--out", required=True, type=Path)
     p.set_defaults(func=_cmd_manifest_artifacts)
 
