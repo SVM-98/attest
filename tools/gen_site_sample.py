@@ -120,6 +120,8 @@ def main(out_dir: Path = DEFAULT_OUT_DIR) -> dict[str, Any]:
             [
                 "manifest",
                 "artifacts",
+                "--in",
+                str(manifest_path),
                 "--issuer",
                 ISSUER,
                 "--series",

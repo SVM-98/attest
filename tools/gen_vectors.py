@@ -53,6 +53,7 @@ above, following the same fixed-input determinism discipline:
 
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
 import json
@@ -65,7 +66,19 @@ from dilithium_py.ml_dsa import (
     ML_DSA_65,
 )  # DEV-ONLY oracle: deterministic vector material; runtime uses pqcrypto/@noble
 
-from attest import canon, commitment, issue, keys, manifests, pq, revocation, ulid, validate
+from attest import (
+    anchor,
+    canon,
+    commitment,
+    issue,
+    keys,
+    manifests,
+    pq,
+    revocation,
+    tlog,
+    ulid,
+    validate,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 VECTORS_DIR = REPO_ROOT / "docs" / "spec" / "vectors"
@@ -169,6 +182,26 @@ SUPPLEMENTARY_TITLE = (
 # scheme used for Ed25519 keys above (1/2/3/4/5/6/9 already taken).
 
 HYBRID_MLDSA_PK, HYBRID_MLDSA_SK = ML_DSA_65.key_derive(bytes([26]) * 32)
+
+
+# --- vector 28 (transparency/corroboration conformance corpus) additional
+# fixed inputs -----------------------------------------------------------
+#
+# The transparency log's own pinned identity: an ML-DSA-65 leg via the same
+# deterministic `key_derive` oracle used above (seed `bytes([28]) * 32`,
+# continuing the numbering scheme), plus a genuine Ed25519 leg from seed
+# `bytes([29]) * 32` — both fixed, never wall-clock/CSPRNG derived. A second,
+# unrelated ML-DSA-65 keypair (`bytes([30]) * 32`) is used only by vector 28m,
+# which needs its OWN hybrid issuer key distinct from the log's key material.
+
+LOG_MLDSA_PK, LOG_MLDSA_SK = ML_DSA_65.key_derive(bytes([28]) * 32)
+LOG_ED_SEED = bytes([29]) * 32
+LOG_ED_KP = keys.from_seed(LOG_ED_SEED)
+LOG_ORIGIN = "attest-transparency-log.example/2026"
+LOG_NAME = "attest-log-2026"
+WRONG_LOG_ORIGIN = "attest-transparency-log.example/rogue"  # vector 28d: origin-mismatch log key
+
+VECTOR_28M_MLDSA_PK, VECTOR_28M_MLDSA_SK = ML_DSA_65.key_derive(bytes([30]) * 32)
 
 
 # --- generic helpers --------------------------------------------------------
@@ -290,6 +323,101 @@ def _flip_sig_byte(sig_b64u: str) -> str:
     return keys.b64u(bytes(raw))
 
 
+# --- vector 28 helpers: transparency-log checkpoints ------------------------
+#
+# `tlog.sign_checkpoint` cannot produce reproducible vector material: like
+# `pq.sign` (see `_oracle_sign` above), it signs the ML-DSA-65 leg through
+# pqcrypto, which is non-deterministic. These two helpers mirror
+# `tlog.sign_checkpoint`'s note-construction exactly, byte for byte, but
+# substitute the deterministic dilithium_py oracle for that one leg — the
+# same oracle-sign-then-splice technique `_hybrid_manifest` above already
+# uses for manifest signatures. Both reach into `tlog`'s module-private
+# `_key_hash`/`_ED25519_SIG_TYPE`/`_ML_DSA_65_SIG_TYPE` — the same "generator
+# reaches into the reference package's private helpers" pattern already used
+# elsewhere in this file (e.g. `manifests._signable` in `gen_14_rotation_
+# continuity`).
+
+
+def _log_oracle_sign(msg: bytes) -> bytes:
+    """DEV-ONLY: deterministic ML-DSA-65 signing for the transparency log's
+    own checkpoint key material (never `pq.sign`/pqcrypto — see module note
+    above)."""
+    return ML_DSA_65.sign(LOG_MLDSA_SK, msg, deterministic=True)
+
+
+def _checkpoint_note_bytes(origin: str, tree_size: int, root: bytes) -> bytes:
+    header = [origin, str(tree_size), base64.b64encode(root).decode("ascii")]
+    return ("\n".join(header) + "\n").encode()
+
+
+def _sign_checkpoint_oracle(origin: str, tree_size: int, root: bytes) -> str:
+    """A hybrid (Ed25519 + ML-DSA-65) signed checkpoint note over
+    `(origin, tree_size, root)`, signed by the fixed log key material
+    (`LOG_ED_KP` / `LOG_MLDSA_SK`) — the reproducible-vector twin of
+    `tlog.sign_checkpoint`."""
+    note_bytes = _checkpoint_note_bytes(origin, tree_size, root)
+    ed_blob = tlog._key_hash(LOG_NAME, tlog._ED25519_SIG_TYPE, LOG_ED_KP.pub) + keys.sign(
+        note_bytes, LOG_ED_KP
+    )
+    mldsa_blob = tlog._key_hash(
+        LOG_NAME, tlog._ML_DSA_65_SIG_TYPE, LOG_MLDSA_PK
+    ) + _log_oracle_sign(note_bytes)
+    ed_line = f"— {LOG_NAME} {base64.b64encode(ed_blob).decode('ascii')}\n"
+    mldsa_line = f"— {LOG_NAME} {base64.b64encode(mldsa_blob).decode('ascii')}\n"
+    return note_bytes.decode() + "\n" + ed_line + mldsa_line
+
+
+def _sign_checkpoint_ed_only(origin: str, tree_size: int, root: bytes) -> str:
+    """A DEGRADED checkpoint note carrying only the Ed25519 leg — used by
+    vector 28c to pin that a log's checkpoint auth is hybrid, MANDATORY
+    (design doc "checkpoint auth is hybrid, mandatory"): an otherwise
+    well-formed, genuinely-signed Ed25519 leg alone must never grant
+    standing."""
+    note_bytes = _checkpoint_note_bytes(origin, tree_size, root)
+    ed_blob = tlog._key_hash(LOG_NAME, tlog._ED25519_SIG_TYPE, LOG_ED_KP.pub) + keys.sign(
+        note_bytes, LOG_ED_KP
+    )
+    ed_line = f"— {LOG_NAME} {base64.b64encode(ed_blob).decode('ascii')}\n"
+    return note_bytes.decode() + "\n" + ed_line
+
+
+def _log_key(origin: str = LOG_ORIGIN) -> tlog.LogKey:
+    return tlog.LogKey(
+        origin=origin, name=LOG_NAME, ed25519_pub=LOG_ED_KP.pub, mldsa_pub=LOG_MLDSA_PK
+    )
+
+
+def _log_key_json(log_key: tlog.LogKey) -> dict[str, Any]:
+    return {
+        "origin": log_key.origin,
+        "name": log_key.name,
+        "ed25519_pub_b64u": keys.b64u(log_key.ed25519_pub),
+        "mldsa_pub_b64u": keys.b64u(log_key.mldsa_pub),
+    }
+
+
+def _empty_anchor_policy() -> anchor.AnchorPolicy:
+    return anchor.AnchorPolicy(pinned_headers={}, crqc_horizon=None)
+
+
+def _anchor_policy_json(policy: anchor.AnchorPolicy) -> dict[str, Any]:
+    return {
+        "pinned_headers": {
+            header_hash: {
+                "header_hash": header.header_hash,
+                "merkle_root": header.merkle_root,
+                "time": header.time,
+            }
+            for header_hash, header in policy.pinned_headers.items()
+        },
+        "crqc_horizon": policy.crqc_horizon,
+    }
+
+
+def _hex_proof(proof: list[bytes]) -> list[str]:
+    return [item.hex() for item in proof]
+
+
 def _trust_material(
     *issuer_manifest_provenance: tuple[str, dict[str, Any], str],
     chains: dict[str, list[dict[str, Any]]] | None = None,
@@ -353,7 +481,18 @@ def write_vector(
     manifest_pristine: dict[str, Any] | None = None,
     revocation_record: dict[str, Any] | None = None,
     canonical: bytes | None = None,
+    transparency: dict[str, Any] | None = None,
+    log_keys: list[tlog.LogKey] | None = None,
+    anchor_policy: anchor.AnchorPolicy | None = None,
 ) -> None:
+    """`transparency`/`log_keys`/`anchor_policy` (group 28 only, design doc
+    "transparency/corroboration layer") are the untrusted evidence bundle and
+    the verifier's trusted, pinned configuration for evaluating it — see
+    `verify.verify()`'s keyword-only arguments of the same names. Every
+    existing leaf (groups 01-27) omits all three, so `expected.json` gains no
+    new members there; only group 28 leaves carry `transparency`/
+    `corroboration`/`manifest_freshness` in `expected.json`, fed by the new
+    `transparency.json`/`log-keys.json`/`anchor-policy.json` files below."""
     vector_dir = VECTORS_DIR / name
     if payload is not None:
         _write_json(vector_dir / "payload.json", payload)
@@ -371,6 +510,12 @@ def write_vector(
         _write_json(vector_dir / "revocation.json", revocation_record)
     if canonical is not None:
         _write_bytes(vector_dir / "canonical.json", canonical)
+    if transparency is not None:
+        _write_json(vector_dir / "transparency.json", transparency)
+    if log_keys is not None:
+        _write_json(vector_dir / "log-keys.json", [_log_key_json(k) for k in log_keys])
+    if anchor_policy is not None:
+        _write_json(vector_dir / "anchor-policy.json", _anchor_policy_json(anchor_policy))
 
 
 # --- vector 01: valid-minimal ------------------------------------------------
@@ -1972,6 +2117,646 @@ def gen_27_valid_to_absent() -> None:
     )
 
 
+def gen_28_transparency() -> None:
+    """v0.2 transparency/corroboration conformance corpus (Stage 2, design doc
+    "transparency/corroboration layer") — the cross-core corpus pinning
+    Tasks 1-7's `tlog`/`anchor`/`transparency` layer end to end, replayed by
+    all three runners (Python, TS, site).
+
+    `transparency`/`corroboration`/`manifest_freshness` are ALWAYS
+    informational (never affect `ok`/`errors`/`trust`/key-status — design
+    fix 6): every leaf below demonstrates that independently, most sharply
+    in 28i, where a compromised-key rejection stays fully intact regardless
+    of what the log says. Leaves a-g/j-l/n share one v0.1 receipt/issuer-
+    manifest pair (`payload`/`envelope`/`entry_a`, built once at the top of
+    this function) so only the transparency evidence itself varies between
+    them, following this file's existing convention of reusing one payload/
+    envelope across many otherwise-independent vectors.
+    Leaves h/i/m need their own issuer-manifest material (a v2 manifest with
+    no rotation chain, a compromised key, and a hybrid key respectively) and
+    build it locally.
+
+    Two leaves are deliberate ADAPTATIONS from the original design vector
+    list, documented here and in `docs/spec/vectors/README.md` (2026-07-18
+    review should treat these as intentional scope decisions, not gaps):
+
+    - 28k ("rfc3161-only anchor"): the original intent ties this to a
+      declared `crqc_horizon` showing "no post-horizon standing". No leaf
+      here actually needs `policy.crqc_horizon` set — an rfc3161-only proof
+      never sets `pq_surviving`, so `transparency` already stays `"logged"`
+      (never upgrades to `anchored_before:<T>`) regardless of horizon
+      configuration. What IS pinned: the exact warning literal
+      (`RFC3161_WARNING`) and the "no PQ standing" property, which is the
+      testable substance of "no post-horizon standing" — a horizon value
+      would add configuration, not test coverage, since nothing here reaches
+      `anchor.passes_horizon`.
+    - 28m ("post-horizon ed-only revocation -> ignored, ties Task 6"):
+      `verify.py`'s revocation classification (`_classify_revocation`) has NO
+      `crqc_horizon`-shaped parameter anywhere — revocation records and the
+      transparency/anchor horizon cap are entirely separate subsystems, so a
+      literal "post-horizon revocation" cannot be expressed through any
+      `verify()` input. Adapted to the mechanism that would have to exist for
+      that framing to hold: an Ed25519-only-signed revocation record against
+      a HYBRID (`pub_ml_dsa_65`-carrying) issuer key fails the Task 6/8
+      AND-rule fail-closed, unconditionally — "ignored" is exactly the
+      Task-6 sibling-hybrid property, pinned here at the conformance level
+      instead of only in `tests/test_sibling_hybrid_sidedocs.py` /
+      `verifiers/ts/test/sibling-hybrid.test.ts`.
+    """
+    payload = issue.build_payload(**_base_payload_kwargs())
+    _assert_schema_valid(payload)
+    envelope = issue.issue(payload, ISSUER_KP, ISSUER_KID)
+    trust = _issuer_only_trust()
+
+    entry_a = {
+        "type": "receipt",
+        "issuer": ISSUER_ID,
+        "core_sha256": tlog.receipt_core_hash(envelope),
+    }
+    entry_bytes_a = tlog.encode_entry(entry_a)
+    root_a = tlog.build_tree([entry_bytes_a])
+    checkpoint_a = _sign_checkpoint_oracle(LOG_ORIGIN, 1, root_a)
+    inclusion_a = _hex_proof(tlog.inclusion_proof([entry_bytes_a], 0))
+
+    def _evidence_a(**overrides: Any) -> dict[str, Any]:
+        base: dict[str, Any] = {
+            "entry": entry_a,
+            "leaf_index": 0,
+            "tree_size": 1,
+            "inclusion_proof": inclusion_a,
+            "checkpoint": checkpoint_a,
+        }
+        base.update(overrides)
+        return base
+
+    # Generation-time sanity checks: confirm the hand-built Merkle/checkpoint
+    # material actually has the narrow cryptographic property each leaf
+    # relies on, BEFORE any of it is asserted (via hand-derived expected.json
+    # values, independently reasoned about below) to be committed as a
+    # vector. Mirrors this file's existing narrow self-checks (e.g.
+    # `assert manifests.check_continuity(v1, v2) is False` in
+    # `gen_14_rotation_continuity`) — this checks generator correctness, not
+    # `verify()`'s; `expected.json` below is never copied from a live
+    # `verify()`/`evaluate_transparency()` call.
+    assert tlog.verify_inclusion(tlog.leaf_hash(entry_bytes_a), 0, 1, [], root_a)
+
+    # --- (a) logged, trust-unchanged: the baseline "this receipt is in the
+    # log" claim, everything valid. Deliberately use TOFU/bundle provenance:
+    # glowing, valid log evidence MUST NOT upgrade trust, so this leaf pins
+    # `unauthenticated_tofu` staying TOFU even when the receipt is logged. ---
+    trust_a = _trust_material(
+        (ISSUER_ID, _manifest_material(ISSUER_ID, ISSUER_KID, ISSUER_KP), "bundle")
+    )
+    write_vector(
+        "28-transparency/a-logged-trust-unchanged",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust_a,
+        expected={
+            "signature": "valid",
+            "schema": "valid",
+            "revocation": "unknown",
+            "binding": "not_checked",
+            "trust": "unauthenticated_tofu",
+            "transparency": "logged",
+            "corroboration": "logged",
+            "manifest_freshness": "not_checked",
+            "ok": True,
+            "errors": [],
+            "warnings": [],
+        },
+        transparency=_evidence_a(),
+        log_keys=[_log_key()],
+        anchor_policy=_empty_anchor_policy(),
+    )
+
+    # --- (b) wrong root: a validly hybrid-signed checkpoint, but for a tree
+    # that does not actually contain this entry -> inclusion proof fails. ---
+    wrong_root = hashlib.sha256(b"attest-vectors-28b-wrong-root-v1").digest()
+    checkpoint_b = _sign_checkpoint_oracle(LOG_ORIGIN, 1, wrong_root)
+    assert not tlog.verify_inclusion(tlog.leaf_hash(entry_bytes_a), 0, 1, [], wrong_root)
+    write_vector(
+        "28-transparency/b-wrong-root",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected={
+            "signature": "valid",
+            "schema": "valid",
+            "revocation": "unknown",
+            "binding": "not_checked",
+            "trust": "verified",
+            "transparency": "not_checked",
+            "corroboration": "none",
+            "manifest_freshness": "not_checked",
+            "ok": True,
+            "errors": [],
+            "warnings": ["inclusion_proof_invalid"],
+        },
+        transparency=_evidence_a(checkpoint=checkpoint_b),
+        log_keys=[_log_key()],
+        anchor_policy=_empty_anchor_policy(),
+    )
+
+    # --- (c) ed-only checkpoint: a genuine Ed25519 signature line, but no
+    # ML-DSA-65 leg at all -> checkpoint auth is hybrid, MANDATORY (design
+    # doc), so this grants no standing whatsoever. ---
+    checkpoint_c = _sign_checkpoint_ed_only(LOG_ORIGIN, 1, root_a)
+    write_vector(
+        "28-transparency/c-ed-only-checkpoint",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected={
+            "signature": "valid",
+            "schema": "valid",
+            "revocation": "unknown",
+            "binding": "not_checked",
+            "trust": "verified",
+            "transparency": "not_checked",
+            "corroboration": "none",
+            "manifest_freshness": "not_checked",
+            "ok": True,
+            "errors": [],
+            "warnings": ["checkpoint_verification_failed"],
+        },
+        transparency=_evidence_a(checkpoint=checkpoint_c),
+        log_keys=[_log_key()],
+        anchor_policy=_empty_anchor_policy(),
+    )
+
+    # --- (d) origin-mismatch log key: a genuinely hybrid-signed checkpoint
+    # by the SAME log key material, but claiming a different origin than the
+    # one pinned in log_keys -> no pinned candidate verifies. ---
+    checkpoint_d = _sign_checkpoint_oracle(WRONG_LOG_ORIGIN, 1, root_a)
+    write_vector(
+        "28-transparency/d-origin-mismatch-log-key",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected={
+            "signature": "valid",
+            "schema": "valid",
+            "revocation": "unknown",
+            "binding": "not_checked",
+            "trust": "verified",
+            "transparency": "not_checked",
+            "corroboration": "none",
+            "manifest_freshness": "not_checked",
+            "ok": True,
+            "errors": [],
+            "warnings": ["checkpoint_verification_failed"],
+        },
+        transparency=_evidence_a(checkpoint=checkpoint_d),
+        log_keys=[_log_key(LOG_ORIGIN)],
+        anchor_policy=_empty_anchor_policy(),
+    )
+
+    # --- (e) valid consistency: a two-leaf tree, entry_a at index 1, plus a
+    # verifying prior checkpoint (tree_size 1) and a genuine consistency
+    # proof against the current (tree_size 2) checkpoint -> still just
+    # "logged" (consistency alone never upgrades standing, it only rules out
+    # equivocation). ---
+    filler_entry = {
+        "type": "receipt",
+        "issuer": ISSUER_ID,
+        "core_sha256": hashlib.sha256(b"attest-vectors-28e-filler-leaf-v1").hexdigest(),
+    }
+    leaves_e = [tlog.encode_entry(filler_entry), entry_bytes_a]
+    root1_e = tlog.build_tree(leaves_e[:1])
+    root2_e = tlog.build_tree(leaves_e)
+    inclusion_e = _hex_proof(tlog.inclusion_proof(leaves_e, 1))
+    consistency_e = _hex_proof(tlog.consistency_proof(leaves_e, 1))
+    prior_checkpoint_e = _sign_checkpoint_oracle(LOG_ORIGIN, 1, root1_e)
+    checkpoint_e = _sign_checkpoint_oracle(LOG_ORIGIN, 2, root2_e)
+    assert tlog.verify_inclusion(
+        tlog.leaf_hash(entry_bytes_a), 1, 2, tlog.inclusion_proof(leaves_e, 1), root2_e
+    )
+    assert tlog.verify_consistency(1, root1_e, 2, root2_e, tlog.consistency_proof(leaves_e, 1))
+    write_vector(
+        "28-transparency/e-consistency-ok",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected={
+            "signature": "valid",
+            "schema": "valid",
+            "revocation": "unknown",
+            "binding": "not_checked",
+            "trust": "verified",
+            "transparency": "logged",
+            "corroboration": "logged",
+            "manifest_freshness": "not_checked",
+            "ok": True,
+            "errors": [],
+            "warnings": [],
+        },
+        transparency=_evidence_a(
+            leaf_index=1,
+            tree_size=2,
+            inclusion_proof=inclusion_e,
+            checkpoint=checkpoint_e,
+            prior_checkpoint=prior_checkpoint_e,
+            consistency_proof=consistency_e,
+        ),
+        log_keys=[_log_key()],
+        anchor_policy=_empty_anchor_policy(),
+    )
+
+    # --- (f) equivocation_detected: a validly hybrid-signed prior checkpoint
+    # claiming the SAME tree_size (1) as the current checkpoint but a
+    # DIFFERENT root -> proof the log signed two incompatible histories for
+    # the same size (a hard verdict, not fail-safe degradation). ---
+    equivocation_root = hashlib.sha256(b"attest-vectors-28f-equivocation-root-v1").digest()
+    prior_checkpoint_f = _sign_checkpoint_oracle(LOG_ORIGIN, 1, equivocation_root)
+    assert equivocation_root != root_a
+    write_vector(
+        "28-transparency/f-equivocation-detected",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected={
+            "signature": "valid",
+            "schema": "valid",
+            "revocation": "unknown",
+            "binding": "not_checked",
+            "trust": "verified",
+            "transparency": "equivocation_detected",
+            "corroboration": "none",
+            "manifest_freshness": "not_checked",
+            "ok": True,
+            "errors": [],
+            "warnings": ["log_equivocation_detected"],
+        },
+        transparency=_evidence_a(prior_checkpoint=prior_checkpoint_f, consistency_proof=[]),
+        log_keys=[_log_key()],
+        anchor_policy=_empty_anchor_policy(),
+    )
+
+    # --- (g) entry hash mismatch: the evidence's `entry` disagrees with the
+    # hash verify() independently computes from the actual receipt ->
+    # transparency_entry_mismatch, regardless of an otherwise-valid
+    # checkpoint/proof. ---
+    wrong_hash_g = hashlib.sha256(b"attest-vectors-28g-unrelated-v1").hexdigest()
+    entry_g = dict(entry_a, core_sha256=wrong_hash_g)
+    assert wrong_hash_g != tlog.receipt_core_hash(envelope)
+    write_vector(
+        "28-transparency/g-entry-hash-mismatch",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected={
+            "signature": "valid",
+            "schema": "valid",
+            "revocation": "unknown",
+            "binding": "not_checked",
+            "trust": "verified",
+            "transparency": "not_checked",
+            "corroboration": "none",
+            "manifest_freshness": "not_checked",
+            "ok": True,
+            "errors": [],
+            "warnings": ["transparency_entry_mismatch"],
+        },
+        transparency=_evidence_a(entry=entry_g),
+        log_keys=[_log_key()],
+        anchor_policy=_empty_anchor_policy(),
+    )
+
+    # --- (h) rotation-chain omitted: a self-consistent manifest_version=2
+    # issuer manifest, logged as a key-manifest claim, but the trust store
+    # holds NO rotation chain for this issuer at all -> corroboration cannot
+    # validate the rotation, downgraded to "none" with a warning, even
+    # though the log standing itself ("logged") and manifest_freshness are
+    # unaffected. ---
+    v2_manifest = manifests.build_key_manifest(
+        ISSUER_ID,
+        2,
+        MANIFEST_ISSUED_AT,
+        [manifests.key_entry(ISSUER_KID, ISSUER_KP.pub, KEY_VALID_FROM, None, "active")],
+        ISSUER_KP,
+        ISSUER_KID,
+    )
+    assert manifests.verify_key_manifest(v2_manifest)
+    manifest_sha256_h = hashlib.sha256(canon.canonical_bytes(v2_manifest)).hexdigest()
+    entry_h = {
+        "type": "key-manifest",
+        "issuer": ISSUER_ID,
+        "manifest_version": 2,
+        "manifest_sha256": manifest_sha256_h,
+    }
+    entry_bytes_h = tlog.encode_entry(entry_h)
+    root_h = tlog.build_tree([entry_bytes_h])
+    checkpoint_h = _sign_checkpoint_oracle(LOG_ORIGIN, 1, root_h)
+    trust_h = _trust_material((ISSUER_ID, v2_manifest, "tls"))  # chains omitted (Task-8 default)
+    write_vector(
+        "28-transparency/h-rotation-chain-omitted",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust_h,
+        expected={
+            "signature": "valid",
+            "schema": "valid",
+            "revocation": "unknown",
+            "binding": "not_checked",
+            "trust": "verified",
+            "transparency": "logged",
+            "corroboration": "none",
+            "manifest_freshness": "verified_as_of:1",
+            "ok": True,
+            "errors": [],
+            "warnings": ["corroboration_requires_rotation_chain"],
+        },
+        transparency={
+            "entry": entry_h,
+            "leaf_index": 0,
+            "tree_size": 1,
+            "inclusion_proof": _hex_proof(tlog.inclusion_proof([entry_bytes_h], 0)),
+            "checkpoint": checkpoint_h,
+        },
+        log_keys=[_log_key()],
+        anchor_policy=_empty_anchor_policy(),
+    )
+
+    # --- (i) old logged manifest vs compromised key: transparency/
+    # corroboration are resolved BEFORE the receipt's own pass/fail verdict
+    # (design fix 6) — a receipt rejected outright for a compromised
+    # signing key must still report whatever standing its OWN evidence
+    # earns, proving corroboration can never rescue an otherwise-invalid
+    # receipt. Reuses entry_a/checkpoint_a (the SAME envelope as (a)); only
+    # the issuer manifest's key status differs. ---
+    manifest_compromised = _manifest_material(
+        ISSUER_ID, ISSUER_KID, ISSUER_KP, status="compromised"
+    )
+    assert manifests.verify_key_manifest(manifest_compromised)  # self-consistent, unlike vector 11
+    trust_i = _trust_material((ISSUER_ID, manifest_compromised, "tls"))
+    write_vector(
+        "28-transparency/i-compromised-key-fail-closed",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust_i,
+        expected={
+            "signature": "invalid",
+            "schema": "not_checked",
+            "revocation": "unknown",
+            "binding": "not_checked",
+            "trust": "verified",
+            "transparency": "logged",
+            "corroboration": "logged",
+            "manifest_freshness": "not_checked",
+            "ok": False,
+            "errors_contains": ["compromised"],
+            "warnings": [],
+        },
+        transparency=_evidence_a(),
+        log_keys=[_log_key()],
+        anchor_policy=_empty_anchor_policy(),
+    )
+
+    # --- (j) receipt core + OTS anchor: a PQ-surviving `ots` proof replaying
+    # from SHA-256(checkpoint.note_bytes) to a pinned Bitcoin header ->
+    # transparency upgrades to anchored_before:<ISO-8601 UTC>. header_time
+    # 1700000000 is transparency.py's own documented KAT
+    # (_iso8601: 1700000000 -> "2023-11-14T22:13:20Z"). ---
+    header_hash_j = hashlib.sha256(b"attest-vectors-28j-anchor-header-v1").hexdigest()
+    accumulator_start_j = hashlib.sha256(tlog.parse_checkpoint(checkpoint_a).note_bytes).digest()
+    header_merkle_root_j = hashlib.sha256(accumulator_start_j).digest().hex()
+    header_time_j = 1700000000
+    ots_proof_j = {
+        "kind": "ots",
+        "ops": [["sha256"]],
+        "header_merkle_root": header_merkle_root_j,
+        "header_hash": header_hash_j,
+        "header_time": header_time_j,
+    }
+    policy_j = anchor.AnchorPolicy(
+        pinned_headers={
+            header_hash_j: anchor.PinnedHeader(
+                header_hash=header_hash_j, merkle_root=header_merkle_root_j, time=header_time_j
+            )
+        },
+        crqc_horizon=None,
+    )
+    write_vector(
+        "28-transparency/j-ots-anchor",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected={
+            "signature": "valid",
+            "schema": "valid",
+            "revocation": "unknown",
+            "binding": "not_checked",
+            "trust": "verified",
+            "transparency": "anchored_before:2023-11-14T22:13:20Z",
+            "corroboration": "logged",
+            "manifest_freshness": "not_checked",
+            "ok": True,
+            "errors": [],
+            "warnings": [],
+        },
+        transparency=_evidence_a(anchors={"checkpoint": checkpoint_a, "proofs": [ots_proof_j]}),
+        log_keys=[_log_key()],
+        anchor_policy=policy_j,
+    )
+
+    # --- (k) rfc3161-only anchor: opaque classical corroboration only ->
+    # never sets pq_surviving, so transparency stays "logged" (no PQ/
+    # post-horizon standing) — see the ADAPTATION note in this function's
+    # docstring for why no crqc_horizon is needed to demonstrate that. ---
+    rfc3161_proof_k = {
+        "kind": "rfc3161",
+        "token_b64": base64.b64encode(b"attest-vectors-28k-fake-tsa-token").decode("ascii"),
+    }
+    write_vector(
+        "28-transparency/k-rfc3161-only",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected={
+            "signature": "valid",
+            "schema": "valid",
+            "revocation": "unknown",
+            "binding": "not_checked",
+            "trust": "verified",
+            "transparency": "logged",
+            "corroboration": "logged",
+            "manifest_freshness": "not_checked",
+            "ok": True,
+            "errors": [],
+            "warnings": [anchor._RFC3161_WARNING],
+        },
+        transparency=_evidence_a(anchors={"checkpoint": checkpoint_a, "proofs": [rfc3161_proof_k]}),
+        log_keys=[_log_key()],
+        anchor_policy=_empty_anchor_policy(),
+    )
+
+    # --- (l) payload-only precommit hash: the entry's core_sha256 is hashed
+    # over the PAYLOAD alone (no domain separation, no signature
+    # commitment) — exactly the "pre-sign, log now, sign later" attack
+    # `tlog.receipt_core_hash`'s domain separation defeats (design vector
+    # 28l's property, named in that function's own docstring). Same
+    # observable outcome as (g) (transparency_entry_mismatch), different
+    # attacker narrative: this is not an arbitrary wrong hash, it is
+    # SPECIFICALLY the hash an attacker could have computed before the
+    # receipt was ever signed. ---
+    payload_only_hash_l = hashlib.sha256(canon.canonical_bytes(payload)).hexdigest()
+    entry_l = dict(entry_a, core_sha256=payload_only_hash_l)
+    assert payload_only_hash_l != tlog.receipt_core_hash(envelope)
+    write_vector(
+        "28-transparency/l-payload-only-precommit",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected={
+            "signature": "valid",
+            "schema": "valid",
+            "revocation": "unknown",
+            "binding": "not_checked",
+            "trust": "verified",
+            "transparency": "not_checked",
+            "corroboration": "none",
+            "manifest_freshness": "not_checked",
+            "ok": True,
+            "errors": [],
+            "warnings": ["transparency_entry_mismatch"],
+        },
+        transparency=_evidence_a(entry=entry_l),
+        log_keys=[_log_key()],
+        anchor_policy=_empty_anchor_policy(),
+    )
+
+    # --- (m) ADAPTED — post-horizon ed-only revocation, expressed as the
+    # Task 6/8 sibling-hybrid AND-rule property (see this function's
+    # docstring): an Ed25519-only-signed revocation record against a HYBRID
+    # issuer key is unconditionally rejected/ignored, no horizon config
+    # involved. Uses its own hybrid manifest/envelope (distinct ML-DSA-65
+    # key material, seed bytes([30])*32, from the log's own key material). ---
+    m_hybrid_entry = manifests.key_entry(
+        ISSUER_KID, ISSUER_KP.pub, KEY_VALID_FROM, None, "active", pub_ml_dsa_65=VECTOR_28M_MLDSA_PK
+    )
+    m_manifest_body: dict[str, Any] = {
+        "issuer": ISSUER_ID,
+        "manifest_version": 1,
+        "issued_at": MANIFEST_ISSUED_AT,
+        "keys": [m_hybrid_entry],
+    }
+    m_signable = manifests._signable(m_manifest_body)
+    m_hybrid_manifest = dict(m_manifest_body)
+    m_hybrid_manifest["manifest_signature"] = {
+        "kid": ISSUER_KID,
+        "sig": keys.b64u(keys.sign(m_signable, ISSUER_KP)),
+        "sig_ml_dsa_65": keys.b64u(
+            ML_DSA_65.sign(VECTOR_28M_MLDSA_SK, m_signable, deterministic=True)
+        ),
+    }
+    assert manifests.verify_key_manifest(m_hybrid_manifest)
+
+    payload_m = issue.build_payload(
+        **_base_payload_kwargs(attest_version="0.2", revocability="policy")
+    )
+    _assert_schema_valid(payload_m)
+    # NOT `_hybrid_envelope`: that helper signs the ML-DSA-65 leg with the
+    # shared group-26 oracle key (`HYBRID_MLDSA_SK`, seed bytes([26])*32),
+    # which does not match this leaf's OWN issuer key material
+    # (`VECTOR_28M_MLDSA_SK`, seed bytes([30])*32) — signing with the wrong
+    # secret key here would make the receipt's own ML-DSA-65 leg invalid
+    # against `m_hybrid_manifest`, unrelated to what this leaf tests.
+    canonical_m = canon.canonical_bytes(payload_m)
+    envelope_m = {
+        "payload": payload_m,
+        "signatures": [
+            {
+                "kid": ISSUER_KID,
+                "alg": "Ed25519",
+                "sig": keys.b64u(keys.sign(canonical_m, ISSUER_KP)),
+            },
+            {
+                "kid": ISSUER_KID,
+                "alg": pq.ML_DSA_65_ALG,
+                "sig": keys.b64u(
+                    ML_DSA_65.sign(VECTOR_28M_MLDSA_SK, canonical_m, deterministic=True)
+                ),
+            },
+        ],
+    }
+    trust_m = _trust_material((ISSUER_ID, m_hybrid_manifest, "tls"))
+
+    ed_only_record_m = revocation.build_record(
+        RECEIPT_ID, "revoked", REVOKED_AT, ISSUER_KP, ISSUER_KID
+    )
+    assert "sig_ml_dsa_65" not in ed_only_record_m["signature"]
+    assert (
+        revocation.verify_record(ed_only_record_m, m_hybrid_manifest) is False
+    )  # AND rule, fail-closed
+
+    write_vector(
+        "28-transparency/m-hybrid-revocation-and-rule",
+        payload=payload_m,
+        envelope=envelope_m,
+        envelope_raw=None,
+        trust=trust_m,
+        expected={
+            "signature": "valid",
+            "schema": "valid",
+            "revocation": "unknown",
+            "binding": "not_checked",
+            "trust": "verified",
+            # No transparency evidence fed for this leaf (it tests the
+            # revocation AND rule, not transparency) — these stay at their
+            # ZERO-behavior-change defaults, asserted explicitly for
+            # consistency with every other group-28 leaf.
+            "transparency": "not_checked",
+            "corroboration": "none",
+            "manifest_freshness": "not_checked",
+            "ok": True,
+            "errors": [],
+            "warnings": [f"revocation record for {RECEIPT_ID!r} failed verification, ignored"],
+        },
+        revocation_record=ed_only_record_m,
+    )
+
+    # --- (n) unknown entry type: an entry whose `type` the log's closed
+    # schema doesn't recognize -> the claim is unresolvable before any
+    # checkpoint/proof is even consulted; the receipt itself is untouched
+    # ("rest verifies": ok stays True). ---
+    write_vector(
+        "28-transparency/n-unknown-entry-type",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected={
+            "signature": "valid",
+            "schema": "valid",
+            "revocation": "unknown",
+            "binding": "not_checked",
+            "trust": "verified",
+            "transparency": "not_checked",
+            "corroboration": "none",
+            "manifest_freshness": "not_checked",
+            "ok": True,
+            "errors": [],
+            "warnings": ["transparency_claim_unresolvable"],
+        },
+        transparency={"entry": {"type": "witness-cosignature"}},
+        log_keys=[_log_key()],
+        anchor_policy=_empty_anchor_policy(),
+    )
+
+
 def main() -> None:
     _clear_leaf_dirs(VECTORS_DIR)
     VECTORS_DIR.mkdir(parents=True, exist_ok=True)
@@ -2003,6 +2788,7 @@ def main() -> None:
     gen_25_schema_parity()
     gen_26_hybrid()
     gen_27_valid_to_absent()
+    gen_28_transparency()
     leaf_count = sum(1 for _ in VECTORS_DIR.rglob("expected.json"))
     print(f"generated {leaf_count} vector cases under {VECTORS_DIR}")
 
