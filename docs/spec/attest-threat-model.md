@@ -88,7 +88,7 @@ The following actor names are canonical for this document and every attack-catal
 
 ## 4. Attack catalog
 
-Entries are grouped by the lifecycle stage at which the attack is mounted: issuance (Group A), delivery (Group B), storage and sharing (Group C), verification (Group D), rotation and key compromise (Group E), revocation, refund, and end-of-life (Group F), the transparency log (Group G), anchoring (Group H), and coercion and supply chain (Group I). Every entry uses the format fixed in §1 — actor and precondition, impact, exactly one verdict from the §1 vocabulary with the specification sections that carry it, and a residual-risk line — and every entry names actors using the §2 canonical names verbatim.
+Entries are grouped by the lifecycle stage at which the attack is mounted: issuance (Group A), delivery (Group B), storage and sharing (Group C), verification (Group D), rotation and key compromise (Group E), revocation, refund, and end-of-life (Group F), the transparency log (Group G), anchoring (Group H), coercion and supply chain (Group I), and checkpoint freshness (Group J). Every entry uses the format fixed in §1 — actor and precondition, impact, exactly one verdict from the §1 vocabulary with the specification sections that carry it, and a residual-risk line — and every entry names actors using the §2 canonical names verbatim.
 
 An entry's verdict describes only what `attest-v0.1.md` and `attest-v0.2.md` currently implement. Where a mechanism bounds one slice of an attack and leaves another open, the open slice is named in the residual-risk line rather than absorbed into the verdict; where the residual is a gap with no mechanism behind it, the line says so in those words.
 
