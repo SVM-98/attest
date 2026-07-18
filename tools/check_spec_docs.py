@@ -37,12 +37,24 @@ _SUB_HEADING_RE = re.compile(r"^### (\d+\.\d+)\s")
 _TM_HEADING_RE = re.compile(r"^#### TM-(\d+)\b.*$", re.MULTILINE)
 _VERDICT_LINE_RE = re.compile(r"^- \*\*Verdict:\*\*.*$", re.MULTILINE)
 _VERDICT_GRAMMAR_RE = re.compile(r"^- \*\*Verdict:\*\* (Mitigated|Out of scope) — .+$")
-_REF_GROUP_RE = re.compile(r"(v0\.[12]) (§\d+(?:\.\d+)?(?:[,;]\s*§\d+(?:\.\d+)?)*)")
+_REF_GROUP_RE = re.compile(r"(v0\.[12]) (§\d+(?:\.\d+)?(?:(?:[,;]\s*|\s+and\s+)§\d+(?:\.\d+)?)*)")
 _REF_SECTION_RE = re.compile(r"§\d+(?:\.\d+)?")
 _MATRIX_ROW_RE = re.compile(r"^\| (v0\.[12]) §(\d+) — [^|]*\|([^|]*)\|\s*$", re.MULTILINE)
 _MATRIX_TM_REF_RE = re.compile(r"TM-(\d+)")
+# A cell may name a TM entry only in the canonical form. Anything else that reads
+# as a citation — an en dash, an underscore, a missing number — must be reported
+# rather than skipped, or a malformed citation silently covers nothing.
+_MATRIX_TM_TOKEN_RE = re.compile(r"TM\S*")
+_CANONICAL_TM_REF_RE = re.compile(r"TM-\d+")
+# Only v0.1 and v0.2 exist. A reference to any other version is drift, not prose.
+_ANY_SPEC_VERSION_RE = re.compile(r"\bv\d+\.\d+\b")
+_FENCED_BLOCK_RE = re.compile(r"^```.*?^```", re.MULTILINE | re.DOTALL)
 _PC_ROW_RE = re.compile(r"^\| PC-(\d+) \| ([^|]*) \| ([^|]*) \| ([^|]*) \|\s*$", re.MULTILINE)
 _PC01_PIN_RE = re.compile(r"key set exactly `?\{([^}]*)\}")
+_PC01_REQUIRED_PIN_RE = re.compile(r"`properties\.buyer\.required` equals `?(\[[^`]*\])`?")
+_PC01_PATTERN_PIN_RE = re.compile(
+    r"`([^`]+)` and `([^`]+)` are pattern-constrained to (\d+) base64url characters"
+)
 
 
 class TmEntry(NamedTuple):
@@ -105,6 +117,11 @@ def parse_pc_rows(privacy: str) -> list[PcRow]:
     return rows
 
 
+def _strip_fenced_blocks(text: str) -> str:
+    """Blank out fenced code blocks, preserving line count so nothing shifts."""
+    return _FENCED_BLOCK_RE.sub(lambda m: "\n" * m.group(0).count("\n"), text)
+
+
 def check_ids(tm_ids: list[int]) -> list[str]:
     """Duplicate ids, and gaps in the contiguous-ascending-from-01 sequence."""
     errors: list[str] = []
@@ -121,6 +138,13 @@ def check_ids(tm_ids: list[int]) -> list[str]:
         missing = sorted(set(range(1, max(seen) + 1)) - seen)
         for tm_id in missing:
             errors.append(f"gap in TM sequence: TM-{tm_id:02d} is missing")
+
+    for index, current in enumerate(tm_ids[1:], start=1):
+        previous = tm_ids[index - 1]
+        if current < previous:
+            errors.append(
+                f"TM id sequence is not ascending: TM-{current:02d} appears after TM-{previous:02d}"
+            )
 
     return errors
 
@@ -152,6 +176,10 @@ def check_spec_refs(
         if len(lines) != 1 or not _VERDICT_GRAMMAR_RE.match(lines[0]):
             continue  # already reported by check_verdicts
         verdict_line = lines[0]
+        for version_match in _ANY_SPEC_VERSION_RE.finditer(verdict_line):
+            version = version_match.group(0)
+            if version not in ("v0.1", "v0.2"):
+                errors.append(f"{label}: unsupported spec version {version} in Verdict line")
         for group_match in _REF_GROUP_RE.finditer(verdict_line):
             version, group_text = group_match.group(1), group_match.group(2)
             headings = headings_v01 if version == "v0.1" else headings_v02
@@ -167,13 +195,21 @@ def check_matrix(threat_model: str, tm_ids: set[int]) -> list[str]:
     covered_sections: set[str] = set()
     for match in _MATRIX_ROW_RE.finditer(threat_model):
         version, number, row_rest = match.group(1), match.group(2), match.group(3)
-        covered_sections.add(f"{version} §{number}")
+        has_known_tm = False
+        for token_match in _MATRIX_TM_TOKEN_RE.finditer(row_rest):
+            token = token_match.group(0).rstrip(",;.")
+            if not _CANONICAL_TM_REF_RE.fullmatch(token):
+                errors.append(f"malformed TM citation {token!r} (row {version} §{number})")
         for tm_ref in _MATRIX_TM_REF_RE.finditer(row_rest):
             cited = int(tm_ref.group(1))
             if cited not in tm_ids:
                 errors.append(
                     f"traceability matrix cites unknown TM-{cited:02d} (row {version} §{number})"
                 )
+            else:
+                has_known_tm = True
+        if has_known_tm:
+            covered_sections.add(f"{version} §{number}")
 
     for section in REQUIRED_SECTIONS:
         if section not in covered_sections:
@@ -195,16 +231,23 @@ def check_claims(pc_rows: list[PcRow]) -> list[str]:
 
 
 def check_schema_pins(pc_rows: list[PcRow], schema: dict[str, object]) -> list[str]:
-    """PC-01's pinned buyer-property set matches the schema's actual set."""
+    """PC-01's pinned buyer schema constraints match the actual schema."""
     errors: list[str] = []
     pc01_rows = [row for row in pc_rows if row.pc_id == 1]
     if not pc01_rows:
-        return errors  # absence is reported elsewhere (no PC-01 row at all)
+        errors.append("PC-01: required testable-claim row is missing")
+        return errors
 
     properties = schema.get("properties")
     buyer = properties.get("buyer") if isinstance(properties, dict) else None
     buyer_properties = buyer.get("properties") if isinstance(buyer, dict) else None
     actual = sorted(buyer_properties) if isinstance(buyer_properties, dict) else []
+    buyer_required = buyer.get("required") if isinstance(buyer, dict) else None
+    actual_required = (
+        sorted(item for item in buyer_required if isinstance(item, str))
+        if isinstance(buyer_required, list)
+        else []
+    )
 
     for row in pc01_rows:
         pin_match = _PC01_PIN_RE.search(row.detail)
@@ -217,6 +260,36 @@ def check_schema_pins(pc_rows: list[PcRow], schema: dict[str, object]) -> list[s
                 f"PC-01: pinned buyer-property set {pinned} diverges from "
                 f"schema's actual set {actual}"
             )
+
+        required_match = _PC01_REQUIRED_PIN_RE.search(row.detail)
+        if required_match is None:
+            errors.append("PC-01: no 'properties.buyer.required' pin found in check detail")
+        else:
+            pinned_required = json.loads(required_match.group(1))
+            if not isinstance(pinned_required, list) or not all(
+                isinstance(item, str) for item in pinned_required
+            ):
+                errors.append("PC-01: invalid 'properties.buyer.required' pin in check detail")
+            elif sorted(pinned_required) != actual_required:
+                errors.append(
+                    f"PC-01: pinned buyer required list {sorted(pinned_required)} diverges from "
+                    f"schema's actual list {actual_required}"
+                )
+
+        pattern_match = _PC01_PATTERN_PIN_RE.search(row.detail)
+        if pattern_match is None:
+            errors.append("PC-01: no base64url pattern-constraint pin found in check detail")
+            continue
+        first_name, second_name, length_text = pattern_match.groups()
+        expected_pattern = rf"^[A-Za-z0-9_-]{{{length_text}}}$"
+        for name in (first_name, second_name):
+            field = buyer_properties.get(name) if isinstance(buyer_properties, dict) else None
+            actual_pattern = field.get("pattern") if isinstance(field, dict) else None
+            if actual_pattern != expected_pattern:
+                errors.append(
+                    f"PC-01: pinned buyer pattern constraint for {name!r} "
+                    f"diverges from schema's actual pattern {actual_pattern!r}"
+                )
 
     return errors
 
@@ -234,6 +307,12 @@ def collect_errors(
     the documents are internally consistent and in sync with the specs and
     schema they cite.
     """
+    # Illustrative tables and sample entries live in code fences throughout both
+    # documents. They read exactly like the real thing, so scanning them would let
+    # a fenced example stand in for a real matrix row or catalog entry.
+    threat_model = _strip_fenced_blocks(threat_model)
+    privacy = _strip_fenced_blocks(privacy)
+
     headings_v01 = parse_headings(spec_v01)
     headings_v02 = parse_headings(spec_v02)
     tm_entries = _parse_tm_entries(threat_model)
