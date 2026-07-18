@@ -255,6 +255,25 @@ def test_encode_entry_accepts_valid_receipt_entry() -> None:
     assert isinstance(encoded, bytes)
 
 
+def test_encode_entry_accepts_an_at_bound_scalar() -> None:
+    entry = _valid_receipt_entry()
+    # Repeated one-character DNS labels plus a final two-character label make
+    # this exact (even) length while remaining a valid issuer grammar.
+    entry["issuer"] = "a." * ((tlog._MAX_ENTRY_SCALAR_LEN - 2) // 2) + "aa"
+    assert len(entry["issuer"]) == tlog._MAX_ENTRY_SCALAR_LEN
+    assert tlog.encode_entry(entry)
+
+
+def test_encode_entry_rejects_an_over_bound_scalar_with_parity_literal() -> None:
+    entry = _valid_receipt_entry()
+    entry["issuer"] = "a" * (tlog._MAX_ENTRY_SCALAR_LEN + 1)
+
+    with pytest.raises(tlog.TlogError) as exc_info:
+        tlog.encode_entry(entry)
+
+    assert str(exc_info.value) == f"entry scalar exceeds {tlog._MAX_ENTRY_SCALAR_LEN} chars"
+
+
 def test_encode_entry_rejects_unknown_type() -> None:
     entry = _valid_receipt_entry()
     entry["type"] = "bogus"

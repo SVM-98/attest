@@ -15,7 +15,15 @@ import { sha256 } from '@noble/hashes/sha2'
 import { JsonValue, canonicalBytes } from './canon.js'
 import { verifyStrict as verifyEd25519Strict } from './ed25519.js'
 import { verifyStrict as verifyMldsaStrict, ML_DSA_65_PK_LEN, ML_DSA_65_SIG_LEN } from './mldsa.js'
-import { ERR, codePointLength, pyRepr, pyStage2StringRepr, pyTypeName, sliceCodePoints } from './messages.js'
+import {
+  ERR,
+  codePointLength,
+  entryScalarExceeds,
+  pyRepr,
+  pyStage2StringRepr,
+  pyTypeName,
+  sliceCodePoints,
+} from './messages.js'
 
 const HASH_LEN = 32 // SHA-256 digest length in bytes
 const MAX_JCS_INTEGER = 2 ** 53 - 1
@@ -26,6 +34,9 @@ const TYPE_KEY_MANIFEST = 'key-manifest'
 const TYPE_RECEIPT = 'receipt'
 const KEY_MANIFEST_FIELDS = new Set(['type', 'issuer', 'manifest_version', 'manifest_sha256'])
 const RECEIPT_FIELDS = new Set(['type', 'issuer', 'core_sha256'])
+// Mirrors tlog.py's `_MAX_ENTRY_SCALAR_LEN`: both cores bound free-text
+// entry scalars before regex matching, diagnostic rendering, or JCS work.
+const MAX_ENTRY_SCALAR_LEN = 500_000
 
 // Same lowercase-DNS shape as the receipt schema's `issuer.id` pattern
 // (src/attest/schema/attest-receipt.schema.json) — kept in sync by hand,
@@ -193,6 +204,18 @@ function requireFields(entry: Record<string, unknown>, expected: Set<string>): v
   }
 }
 
+function requireEntryScalarBounds(entry: Record<string, unknown>): void {
+  for (const field of Object.keys(entry)) {
+    const value = entry[field]
+    if (
+      codePointLength(field) > MAX_ENTRY_SCALAR_LEN ||
+      (typeof value === 'string' && codePointLength(value) > MAX_ENTRY_SCALAR_LEN)
+    ) {
+      throw new TlogError(entryScalarExceeds(MAX_ENTRY_SCALAR_LEN))
+    }
+  }
+}
+
 function requireIssuer(entry: Record<string, unknown>): void {
   const issuer = entry['issuer']
   if (typeof issuer !== 'string' || !ISSUER_RE.test(issuer)) {
@@ -233,6 +256,7 @@ export function encodeEntry(entry: unknown): Uint8Array {
     throw new TlogError(`entry must be an object, got ${pyTypeName(entry)}`)
   }
 
+  requireEntryScalarBounds(entry)
   const entryType = entry['type']
   if (entryType === TYPE_KEY_MANIFEST) {
     requireFields(entry, KEY_MANIFEST_FIELDS)
@@ -331,6 +355,7 @@ export const MAX_NOTE_TEXT_LEN_ = MAX_NOTE_TEXT_LEN
 export const MAX_NOTE_SIGNATURES_ = MAX_NOTE_SIGNATURES
 export const MAX_SIG_B64_LEN_ = MAX_SIG_B64_LEN
 export const MAX_ROOT_B64_LEN_ = MAX_ROOT_B64_LEN
+export const MAX_ENTRY_SCALAR_LEN_ = MAX_ENTRY_SCALAR_LEN
 
 /** Bound an untrusted string's repr for an error message — slice BEFORE
  * repr so a multi-megabyte hostile field is never fully rendered. */

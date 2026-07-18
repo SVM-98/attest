@@ -34,6 +34,7 @@ import {
   keyHash,
   TlogError,
   LogKey,
+  MAX_ENTRY_SCALAR_LEN_,
   MAX_NOTE_TEXT_LEN_,
 } from '../src/tlog.js'
 
@@ -253,6 +254,17 @@ describe('encodeEntry', () => {
 
   it('accepts a valid receipt entry', () => {
     expect(encodeEntry(validReceiptEntry())).toBeInstanceOf(Uint8Array)
+  })
+
+  it('accepts an at-bound scalar', () => {
+    const entry = { ...validReceiptEntry(), issuer: 'a.'.repeat((MAX_ENTRY_SCALAR_LEN_ - 2) / 2) + 'aa' }
+    expect(entry.issuer).toHaveLength(MAX_ENTRY_SCALAR_LEN_)
+    expect(encodeEntry(entry)).toBeInstanceOf(Uint8Array)
+  })
+
+  it('rejects an over-bound scalar with the Python-parity literal', () => {
+    const entry = { ...validReceiptEntry(), issuer: 'a'.repeat(MAX_ENTRY_SCALAR_LEN_ + 1) }
+    expect(() => encodeEntry(entry)).toThrow(`entry scalar exceeds ${MAX_ENTRY_SCALAR_LEN_} chars`)
   })
 
   it('rejects an unknown type', () => {
