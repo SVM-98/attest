@@ -8,6 +8,6 @@
   "schema": "valid",
   "signature": "valid",
   "transparency": "logged",
-  "trust": "verified",
+  "trust": "unauthenticated_tofu",
   "warnings": []
 }

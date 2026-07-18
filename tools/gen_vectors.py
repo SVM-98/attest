@@ -2201,19 +2201,24 @@ def gen_28_transparency() -> None:
     assert tlog.verify_inclusion(tlog.leaf_hash(entry_bytes_a), 0, 1, [], root_a)
 
     # --- (a) logged, trust-unchanged: the baseline "this receipt is in the
-    # log" claim, everything valid. ---
+    # log" claim, everything valid. Deliberately use TOFU/bundle provenance:
+    # glowing, valid log evidence MUST NOT upgrade trust, so this leaf pins
+    # `unauthenticated_tofu` staying TOFU even when the receipt is logged. ---
+    trust_a = _trust_material(
+        (ISSUER_ID, _manifest_material(ISSUER_ID, ISSUER_KID, ISSUER_KP), "bundle")
+    )
     write_vector(
         "28-transparency/a-logged-trust-unchanged",
         payload=payload,
         envelope=envelope,
         envelope_raw=None,
-        trust=trust,
+        trust=trust_a,
         expected={
             "signature": "valid",
             "schema": "valid",
             "revocation": "unknown",
             "binding": "not_checked",
-            "trust": "verified",
+            "trust": "unauthenticated_tofu",
             "transparency": "logged",
             "corroboration": "logged",
             "manifest_freshness": "not_checked",
