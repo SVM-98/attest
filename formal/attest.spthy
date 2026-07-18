@@ -1,7 +1,7 @@
 theory attest
 begin
 
-builtins: signing
+builtins: signing, natural-numbers
 
 /* Fresh-key registration, minimal, just to make the toolchain sanity trace runnable. */
 rule Register_Key:
@@ -10,24 +10,59 @@ rule Register_Key:
     [ !Ltk($A, ~sk), !Pk($A, pk(~sk)), Out(pk(~sk)) ]
 
 /* ============================================================================
-   Task 2 - v0.1 authority model (issuance, rotation, verifier bootstrap,
-   acceptance). Design 2026-07-18 section 3 (architecture) and 5a (restriction
-   discipline). Spec attest-v0.1 sections 7.1, 7.3, 7.4, 11.
+   Task 2 (FIX WAVE) - v0.1 authority model (issuance, rotation, verifier
+   bootstrap, acceptance). Design 2026-07-18 section 3 (architecture) and 5a
+   (restriction discipline). Spec attest-v0.1 sections 7.1, 7.3, 7.4, 11.
 
-   Fact shapes (consumed verbatim by later tasks - do not rename):
-     !ManifestKey(I, ver, kid, alg, pk_ed, pk_pq, status)
-         one persistent fact per manifest key-entry.
-         alg    in {'ed_only', 'hybrid'};  pk_pq = 'none' for Ed-only.
-         status in {'active', 'retired', 'compromised'}.
-         kid    = <I, name>  -- the kid-domain is structurally the issuer I,
-                                so "kid-domain == issuer" is a unification premise.
-     IssuerState(I, ver, keyset)      -- linear; threads the current manifest gen.
-     VerifierTrust(V, I, ver, keyset) -- linear; the verifier's trust-store entry.
-     !AuthManifest(I, ver)            -- the section 7.4 authentic (TLS) channel;
-                                         consumed ONLY by the BOOTSTRAP rules.
-   In this task keyset mirrors the manifest generation `ver` (key membership is
-   resolved through the !ManifestKey facts keyed by (I, ver)); later tasks may
-   enrich it.
+   This is the re-architecture demanded by the Task-2 review (findings F1-F6):
+   trust binds to a SPECIFIC manifest's contents (per-manifest identity nonce
+   `mid`), versions succeed N -> N+1 over natural numbers, and every transition
+   carries the FULL keyset (bounded to <=2 co-active entries) forward.
+
+   FACT SHAPES (consumed by later tasks - do not rename):
+
+     !Manifest(mid, I, ver)
+         a published manifest: identity `mid` (fresh nonce), issuer `I`, natural
+         version `ver`. `mid` is what trust binds to (F1); two manifests NEVER
+         share a `mid` (each minted by Fr).
+
+     !ManifestEntry(mid, kid, alg, pubkey, pk_pq, status)
+         one key-entry BELONGING to manifest `mid`. Field tuple shape and domains
+         are preserved from the v1 model:
+           alg    in {'ed_only', 'hybrid'};  pk_pq = 'none' for Ed-only.
+           status in {'active', 'retired', 'compromised'}.
+           kid    = <I, name>  -- kid-domain is structurally the issuer I.
+         The ONLY change vs v1's `!ManifestKey(I, ver, kid, ...)` is that
+         membership is now scoped to the manifest identity `mid`, not to the
+         global (I, ver) namespace: an attacker manifest at the same (I, ver) but
+         different contents gets a DIFFERENT `mid` and so can never alias verified
+         trust (F1). To keep source computation finite, transitions NEVER re-read
+         `!ManifestEntry`; they thread the full keyset through the linear
+         `IssuerState` term and re-emit fresh entries under the successor `mid`.
+
+     !KeyMat(kid, sk)             -- persistent Ed secret material for `kid`
+                                     (minted fresh per key -> F6: a rotation's new
+                                     key secret can never equal the signer's).
+
+     !AuthManifest(mid, I, ver)   -- the section 7.4 authentic (TLS root) channel;
+                                     emitted ONLY by honest issuer rules, consumed
+                                     ONLY by the VERIFIED bootstrap. An attacker
+                                     manifest carries no !AuthManifest, so a
+                                     'verified' verifier's trust is always bound to
+                                     an honest manifest identity.
+
+     IssuerState(I, ver, mid, e1, e2) -- linear; the issuer's CURRENT manifest
+                                     generation. e1, e2 are the (<=2) current key
+                                     ENTRY TUPLES  <kid, alg, pubkey, pk_pq, status>
+                                     ('none' for an empty slot). Issuance and every
+                                     transition consume+thread it, so a receipt can
+                                     only be issued under the CURRENT manifest's
+                                     active key (F5) and transitions carry the full
+                                     keyset forward without re-reading persistent
+                                     entry facts.
+
+     VerifierTrust(V, I, ver, mid)-- linear; the verifier trust-store entry, bound
+                                     to the exact `mid` (F1).
 
    MODELLING DISCIPLINE (design 5a, non-negotiable): every acceptance /
    authorization check is a RULE PREMISE that can fail in-trace, NEVER a
@@ -35,178 +70,337 @@ rule Register_Key:
      - signature verifies    -> action Eq(verify(sig, payload, pubkey), true) on an
                                 OPAQUE In(<payload, sig>), discharged by the local
                                 crypto-primitive equality restriction signature_eq
-                                (5a-permitted: it prunes only cryptographically
+                                (5a-permitted: prunes only cryptographically
                                 impossible traces, never a revealed-key forgery).
+     - key resolved from mid -> the accept rules read !ManifestEntry(mid, ...) with
+                                `mid` taken from VerifierTrust, NEVER a global
+                                (I, ver) lookup (F1).
      - status != compromised -> the accept rules pattern-match 'active' / 'retired'
                                 only; a 'compromised' entry can never fire them, yet
                                 the (rejected) submission trace is NOT deleted.
-     - kid-domain == issuer  -> kid unified as <I, name>.
-     - version dispatch      -> payload's first term matched to the literal '0.1';
-                                a non-'0.1' payload cannot fire the v0.1 accept rule.
-   The only restriction below is genesis uniqueness (local well-formedness).
+     - kid-domain == issuer  -> kid unified as <$I, kname>.
+     - version dispatch      -> payload's first term matched to the literal '0.1'.
+   The only restrictions below are genesis uniqueness and the crypto-primitive
+   equality (both local well-formedness).
    ========================================================================== */
 
-/* Genesis: issuer $I publishes manifest version 1 with a single Ed-only active
-   key (its signing material comes from Register_Key: !Ltk / !Pk). The genesis
-   manifest is authentically served at the issuer's own domain (section 7.4 root
-   of trust) -> !AuthManifest. */
-rule Genesis_v01:
-    let kid = <$I, ~name> in
-    [ !Ltk($I, ~sk), !Pk($I, pk(~sk)), Fr(~name), Fr(~ver) ]
-  --[ Genesis($I) ]->
-    [ !ManifestKey($I, ~ver, kid, 'ed_only', pk(~sk), 'none', 'active')
-    , !AuthManifest($I, ~ver)
-    , IssuerState($I, ~ver, ~ver) ]
+/* ---------------------------------------------------------------------------
+   ISSUER SIDE
+   --------------------------------------------------------------------------- */
 
-/* Receipt issuance: signs the v0.1 payload <'0.1','receipt',rid,I> with a key that
-   is active in some manifest version (section 7.3: a receipt signed while the key
-   was active stays valid after later retirement). Emitted onto the Dolev-Yao
-   channel. */
+/* Genesis: issuer $I publishes manifest version %1 with a single Ed-only active
+   key, minted fresh here (F6). The manifest gets a fresh identity ~mid and is
+   authentically served at the issuer's own domain (section 7.4 root of trust)
+   -> !AuthManifest. */
+rule Genesis_v01:
+    let kid = <$I, ~name>
+        e1  = <kid, 'ed_only', pk(~sk), 'none', 'active'>
+    in
+    [ Fr(~name), Fr(~sk), Fr(~mid) ]
+  --[ Genesis($I), GenesisMid($I, ~mid) ]->
+    [ !ManifestEntry(~mid, kid, 'ed_only', pk(~sk), 'none', 'active')
+    , !KeyMat(kid, ~sk)
+    , !Manifest(~mid, $I, %1)
+    , !AuthManifest(~mid, $I, %1)
+    , IssuerState($I, %1, ~mid, e1, 'none') ]
+
+/* Receipt issuance (F5): consumes-and-restores the CURRENT IssuerState and signs
+   with the key that is 'active in slot 1 of THAT current manifest (not any
+   historical entry). Section 7.3: a receipt signed while the key was active stays
+   valid after a later retirement. Emitted onto the Dolev-Yao channel. */
 rule Issue_Receipt_v01:
-    let payload = <'0.1', 'receipt', ~rid, $I> in
-    [ !Ltk($I, ~sk)
-    , !ManifestKey($I, ver, kid, alg, pk(~sk), pk_pq, 'active')
+    let payload = <'0.1', 'receipt', ~rid, $I>
+        e1 = <kid, alg, pk(~sk), pq, 'active'>
+    in
+    [ IssuerState($I, %ver, mid, e1, e2)
+    , !KeyMat(kid, ~sk)
     , Fr(~rid) ]
   --[ Issued($I, ~rid), UsesKey($I, kid) ]->
-    [ Out(<payload, sign(payload, ~sk)>) ]
+    [ IssuerState($I, %ver, mid, e1, e2)
+    , Out(<payload, sign(payload, ~sk)>) ]
 
-/* Rotation (section 7.3 continuity): mint version N+1 signed by a key that is
-   active in the current manifest N; the new version introduces a fresh Ed-only
-   active key. The signed candidate manifest is emitted over the ADVERSARIAL
-   channel (Out) so the section 7.3 continuity check (a later task) governs its
-   adoption; the authentic channel stays reserved for bootstrap. */
-rule Rotate_v01:
-    let kid_new   = <$I, ~name2>
-        manifest2 = <'manifest', $I, ~ver2, kid_new, 'ed_only', pk(~sk2), 'none', 'active'>
+/* Add-key rotation (section 7.3 continuity; F2, F3, F6): mints successor version
+   %ver %+ %1 with a FRESH identity ~mid2 that carries the FULL keyset - the
+   existing active entry E is PRESERVED and a SECOND active entry (a fresh hybrid
+   key H) is introduced, giving a mixed keyset (Ed-only E + hybrid H both active
+   in ~mid2). The candidate is signed by E (an 'active key in the PARENT manifest)
+   and emitted over the ADVERSARIAL channel (Out) carrying the full keyset by
+   public key + status; the authentic channel copy (!AuthManifest) still lets a
+   FRESH verifier bootstrap the new version. The new secret ~skH is minted fresh
+   (F6) and is necessarily distinct from the signer's ~skE. Verifier-side N->N+1
+   adoption is Task 3 - not modeled here. */
+rule AddKey_Rotate_v01:
+    let kidH = <$I, ~name2>
+        e1   = <kidE, algE, pk(~skE), pqE, 'active'>
+        eH   = <kidH, 'hybrid', pk(~skH), ~pqH, 'active'>
+        manifest2 = <'manifest', $I, %ver %+ %1, ~mid2,
+                     <pk(~skE), 'active'>, <pk(~skH), 'active'>>
     in
-    [ IssuerState($I, ver, ks)
-    , !ManifestKey($I, ver, signerKid, algS, pk(~sk), pqS, 'active')
-    , !Ltk($I, ~sk)
-    , !Ltk($I, ~sk2), !Pk($I, pk(~sk2))
-    , Fr(~name2), Fr(~ver2) ]
-  --[ Rotate($I, ver, ~ver2, signerKid) ]->
-    [ !ManifestKey($I, ~ver2, kid_new, 'ed_only', pk(~sk2), 'none', 'active')
-    , !AuthManifest($I, ~ver2)
-    , IssuerState($I, ~ver2, ~ver2)
+    [ IssuerState($I, %ver, mid, e1, 'none')
+    , !KeyMat(kidE, ~skE)
+    , Fr(~name2), Fr(~skH), Fr(~pqH), Fr(~mid2) ]
+  --[ Rotate($I, %ver, %ver %+ %1, kidE)
+    , NewManifest($I, %ver, %ver %+ %1)
+    , HybridActiveIn($I, ~mid2) ]->
+    [ !ManifestEntry(~mid2, kidE, algE, pk(~skE), pqE, 'active')
+    , !ManifestEntry(~mid2, kidH, 'hybrid', pk(~skH), ~pqH, 'active')
+    , !KeyMat(kidH, ~skH)
+    , !Manifest(~mid2, $I, %ver %+ %1)
+    , !AuthManifest(~mid2, $I, %ver %+ %1)
+    , IssuerState($I, %ver %+ %1, ~mid2, e1, eH)
+    , Out(<manifest2, sign(manifest2, ~skE)>) ]
+
+/* Retire (single-entry manifest): flip the sole active key to 'retired in a fresh
+   successor, signed by that key while still 'active in the PARENT. Section 7.3:
+   receipts made while active remain acceptable (with a warning). */
+rule Retire_Key_v01:
+    let e1  = <kid, alg, pk(~sk), pq, 'active'>
+        e1r = <kid, alg, pk(~sk), pq, 'retired'>
+        manifest2 = <'manifest', $I, %ver %+ %1, ~mid2, <pk(~sk), 'retired'>>
+    in
+    [ IssuerState($I, %ver, mid, e1, 'none')
+    , !KeyMat(kid, ~sk)
+    , Fr(~mid2) ]
+  --[ Retire($I, kid), NewManifest($I, %ver, %ver %+ %1) ]->
+    [ !ManifestEntry(~mid2, kid, alg, pk(~sk), pq, 'retired')
+    , !Manifest(~mid2, $I, %ver %+ %1)
+    , !AuthManifest(~mid2, $I, %ver %+ %1)
+    , IssuerState($I, %ver %+ %1, ~mid2, e1r, 'none')
     , Out(<manifest2, sign(manifest2, ~sk)>) ]
 
-/* Retire: flip an active key to retired by re-issuing it at the next manifest
-   version. Section 7.3: receipts made while active remain acceptable (with a
-   warning). */
-rule Retire_Key_v01:
-    [ IssuerState($I, ver, ks)
-    , !ManifestKey($I, ver, kid, alg, pkE, pkP, 'active')
-    , Fr(~ver2) ]
-  --[ Retire($I, kid), NewManifest($I, ver, ~ver2) ]->
-    [ !ManifestKey($I, ~ver2, kid, alg, pkE, pkP, 'retired')
-    , !AuthManifest($I, ~ver2)
-    , IssuerState($I, ~ver2, ~ver2) ]
+/* Retire (two-entry manifest; F2 sibling preservation): flip the slot-1 entry to
+   'retired while PRESERVING the slot-2 sibling 'active, in a fresh successor
+   carrying both. Signed by the surviving sibling S (an 'active parent key). */
+rule Retire_One_Preserve_Sibling_v01:
+    let eR  = <kidR, algR, pk(~skR), pqR, 'active'>
+        eS  = <kidS, algS, pk(~skS), pqS, 'active'>
+        eRr = <kidR, algR, pk(~skR), pqR, 'retired'>
+        manifest3 = <'manifest', $I, %ver %+ %1, ~mid3,
+                     <pk(~skR), 'retired'>, <pk(~skS), 'active'>>
+    in
+    [ IssuerState($I, %ver, mid, eR, eS)
+    , !KeyMat(kidR, ~skR)
+    , !KeyMat(kidS, ~skS)
+    , Fr(~mid3) ]
+  --[ Retire($I, kidR), NewManifest($I, %ver, %ver %+ %1) ]->
+    [ !ManifestEntry(~mid3, kidR, algR, pk(~skR), pqR, 'retired')
+    , !ManifestEntry(~mid3, kidS, algS, pk(~skS), pqS, 'active')
+    , !Manifest(~mid3, $I, %ver %+ %1)
+    , !AuthManifest(~mid3, $I, %ver %+ %1)
+    , IssuerState($I, %ver %+ %1, ~mid3, eRr, eS)
+    , Out(<manifest3, sign(manifest3, ~skS)>) ]
 
-/* Compromise-marking (section 7.3 fail-closed): flip an active key to compromised
-   at the next manifest version. Any receipt resolving to it must be rejected --
-   the accept rules below simply never match a compromised entry. */
+/* Compromise-marking (section 7.3 fail-closed, single-entry manifest): flip the
+   sole active key to 'compromised in a fresh successor. Any receipt resolving to
+   it must be rejected -- the accept rules never match a compromised entry. */
 rule Compromise_Key_v01:
-    [ IssuerState($I, ver, ks)
-    , !ManifestKey($I, ver, kid, alg, pkE, pkP, 'active')
-    , Fr(~ver2) ]
-  --[ Compromise($I, kid), NewManifest($I, ver, ~ver2) ]->
-    [ !ManifestKey($I, ~ver2, kid, alg, pkE, pkP, 'compromised')
-    , !AuthManifest($I, ~ver2)
-    , IssuerState($I, ~ver2, ~ver2) ]
+    let e1  = <kid, alg, pk(~sk), pq, 'active'>
+        e1c = <kid, alg, pk(~sk), pq, 'compromised'>
+        manifest2 = <'manifest', $I, %ver %+ %1, ~mid2, <pk(~sk), 'compromised'>>
+    in
+    [ IssuerState($I, %ver, mid, e1, 'none')
+    , !KeyMat(kid, ~sk)
+    , Fr(~mid2) ]
+  --[ Compromise($I, kid), NewManifest($I, %ver, %ver %+ %1) ]->
+    [ !ManifestEntry(~mid2, kid, alg, pk(~sk), pq, 'compromised')
+    , !Manifest(~mid2, $I, %ver %+ %1)
+    , !AuthManifest(~mid2, $I, %ver %+ %1)
+    , IssuerState($I, %ver %+ %1, ~mid2, e1c, 'none')
+    , Out(<manifest2, sign(manifest2, ~sk)>) ]
+
+/* Compromise-marking (two-entry manifest; F2 sibling preservation): flip the
+   slot-1 entry to 'compromised while PRESERVING the slot-2 sibling 'active.
+   Signed by the surviving sibling S. */
+rule Compromise_One_Preserve_Sibling_v01:
+    let eC  = <kidC, algC, pk(~skC), pqC, 'active'>
+        eS  = <kidS, algS, pk(~skS), pqS, 'active'>
+        eCc = <kidC, algC, pk(~skC), pqC, 'compromised'>
+        manifest3 = <'manifest', $I, %ver %+ %1, ~mid3,
+                     <pk(~skC), 'compromised'>, <pk(~skS), 'active'>>
+    in
+    [ IssuerState($I, %ver, mid, eC, eS)
+    , !KeyMat(kidC, ~skC)
+    , !KeyMat(kidS, ~skS)
+    , Fr(~mid3) ]
+  --[ Compromise($I, kidC), NewManifest($I, %ver, %ver %+ %1) ]->
+    [ !ManifestEntry(~mid3, kidC, algC, pk(~skC), pqC, 'compromised')
+    , !ManifestEntry(~mid3, kidS, algS, pk(~skS), pqS, 'active')
+    , !Manifest(~mid3, $I, %ver %+ %1)
+    , !AuthManifest(~mid3, $I, %ver %+ %1)
+    , IssuerState($I, %ver %+ %1, ~mid3, eCc, eS)
+    , Out(<manifest3, sign(manifest3, ~skS)>) ]
+
+/* ---------------------------------------------------------------------------
+   ATTACKER SIDE
+   --------------------------------------------------------------------------- */
 
 /* Key theft: the Dolev-Yao attacker learns a key's private material. */
 rule Reveal_Key:
-    [ !Ltk($I, ~sk), !ManifestKey($I, ver, kid, alg, pk(~sk), pkP, status) ]
+    [ !KeyMat(kid, ~sk) ]
   --[ RevealKey(kid) ]->
     [ Out(~sk) ]
 
-/* Verifier BOOTSTRAP over the authentic channel (section 7.4 TLS root): the
-   verifier's first / only trust-store fetch of an issuer manifest. Fresh ~vid =
-   one verifier session, so trust is established once and later authority changes
-   go through the section 7.3 continuity path (later task). trust = verified. This
-   is the ONLY consumer of !AuthManifest. */
-rule Bootstrap_verified_v01:
-    [ Fr(~vid), !AuthManifest($I, ver) ]
-  --[ TrustVerified(~vid, $I) ]->
-    [ VerifierTrust(~vid, $I, ver, ver) ]
+/* Attacker-published manifest (representational hook for F1 / DoD 3b): the
+   attacker forges a manifest for issuer $I with its OWN fresh key (secret leaked
+   over Out) and a DISTINCT fresh identity ~midA, at the same version %1 as
+   genesis (a same-version conflict). It carries NO !AuthManifest, so a 'verified
+   verifier can never bootstrap it; and because ~midA is a fresh nonce distinct
+   from every honest `mid`, and acceptance resolves entries by the `mid` bound in
+   VerifierTrust, this manifest can never alias a verified verifier's trust. The
+   full attacker-adoption-into-trust surface (TOFU forgery TM-11) is Task 6. */
+rule Attacker_Manifest_v01:
+    let kid_att = <$I, ~nameA> in
+    [ In(<'forge', $I>), Fr(~nameA), Fr(~midA), Fr(~skA) ]
+  --[ AttackerManifest($I, ~midA) ]->
+    [ !Manifest(~midA, $I, %1)
+    , !ManifestEntry(~midA, kid_att, 'ed_only', pk(~skA), 'none', 'active')
+    , !KeyMat(kid_att, ~skA)
+    , Out(~skA) ]
 
-/* Verifier BOOTSTRAP over an unauthenticated path (section 7.4 TOFU): the verifier
-   adopts an issuer manifest reached by some non-TLS path (e.g. embedded in an
-   export bundle), so the provenance is attacker-triggerable (In) even though this
-   task installs no new key material -- it does NOT read the authentic channel
-   (!AuthManifest is reserved for the verified bootstrap). trust =
-   unauthenticated_tofu. The later TOFU-attack task extends this into the full
-   attacker-key forgery surface. */
+/* ---------------------------------------------------------------------------
+   VERIFIER SIDE
+   --------------------------------------------------------------------------- */
+
+/* Verifier BOOTSTRAP over the authentic channel (section 7.4 TLS root): the
+   verifier's first/only trust-store fetch. Fresh ~vid = one verifier session;
+   trust = verified, bound to the exact `mid`. This is the ONLY consumer of
+   !AuthManifest, which only honest issuer rules produce -> a 'verified verifier
+   always trusts an honest manifest identity. */
+rule Bootstrap_verified_v01:
+    [ Fr(~vid), !AuthManifest(mid, $I, %ver) ]
+  --[ TrustVerified(~vid, $I), VerifiedTrustMid(~vid, $I, mid) ]->
+    [ VerifierTrust(~vid, $I, %ver, mid) ]
+
+/* Verifier BOOTSTRAP over an unauthenticated path (section 7.4 TOFU): the
+   verifier adopts a published manifest reached over a non-TLS path (In token,
+   attacker-triggerable). trust = unauthenticated_tofu, bound to that manifest's
+   `mid`. */
 rule Bootstrap_tofu_v01:
     [ Fr(~vid)
-    , !ManifestKey($I, ver, kid, alg, pubkey, pk_pq, status)
-    , In(<'tofu_fetch', $I, ver>) ]
+    , !Manifest(mid, $I, %ver)
+    , In(<'tofu_fetch', $I>) ]
   --[ TrustTOFU(~vid, $I) ]->
-    [ VerifierTrust(~vid, $I, ver, ver) ]
+    [ VerifierTrust(~vid, $I, %ver, mid) ]
 
-/* ACCEPT (v0.1) -- signer key active in the trusted manifest.
-   Signature verification uses the canonical Tamarin idiom: the receipt arrives as
-   an OPAQUE In(<payload, sig>), the manifest carries an OPAQUE public-key term
-   `pubkey`, and the check is the action Eq(verify(sig, payload, pubkey), true)
-   discharged by the local-equality restriction `signature_eq`. This is design-5a
-   compliant: it is a local equality modelling the crypto primitive, not a
-   security-decision restriction. A forged sig cannot satisfy verify=true without
-   the key, yet an attacker who ran Reveal_Key CAN (verify becomes true), so
-   forgery attack traces are preserved. The other authorization checks stay
-   structural premises: version dispatch (payload literal '0.1'), issuer binding
-   ($I unified across payload/trust/manifest), kid-domain (<$I,kname>), and status
-   (pattern-match 'active' -- a 'compromised' entry can never fire this rule while
-   the rejected-submission trace is NOT deleted). VerifierTrust is read-and-restored
-   so a verifier can validate more than one receipt. */
+/* ACCEPT (v0.1) -- signer key 'active in the EXACT trusted manifest `mid` (F1).
+   The receipt arrives as an OPAQUE In(<payload, sig>); the entry is resolved from
+   !ManifestEntry(mid, ...) with `mid` taken from VerifierTrust (never a global
+   (I, ver) lookup); verify(sig, payload, pubkey)=true is the local-equality action
+   discharged by signature_eq. Structural premises: version dispatch (payload
+   literal '0.1'), issuer binding ($I unified across payload/trust/manifest),
+   kid-domain (<$I, kname>), and status (pattern-match 'active -- a 'compromised
+   entry can never fire this rule while the rejected-submission trace is NOT
+   deleted). VerifierTrust is read-and-restored so a verifier can validate more
+   than one receipt. AcceptInfo carries the accepted manifest's ver/mid/alg for
+   the tightened sanity lemmas. */
 rule Accept_v01:
-    let payload = <'0.1', 'receipt', rid, $I> in
-    [ VerifierTrust(V, $I, ver, ks)
-    , !ManifestKey($I, ver, <$I, kname>, alg, pubkey, pk_pq, 'active')
+    let payload = <'0.1', 'receipt', rid, $I>
+        kid     = <$I, kname>
+    in
+    [ VerifierTrust(V, $I, %ver, mid)
+    , !ManifestEntry(mid, kid, alg, pubkey, pq, 'active')
     , In(<payload, sig>) ]
   --[ Eq(verify(sig, payload, pubkey), true)
-    , SignatureValid(V, $I, rid, <$I, kname>)
-    , Accept_v01(V, $I, rid, <$I, kname>)
+    , SignatureValid(V, $I, rid, kid)
+    , Accept_v01(V, $I, rid, kid)
+    , AcceptInfo(V, $I, rid, kid, %ver, mid, alg)
     , Ok(V, rid) ]->
-    [ VerifierTrust(V, $I, ver, ks) ]
+    [ VerifierTrust(V, $I, %ver, mid) ]
 
-/* ACCEPT (v0.1) -- retired-key branch (section 11 step 3 asymmetry): a key retired
-   in the trusted manifest still validates receipts, but MUST raise a warning. Same
-   signature idiom as Accept_v01. */
+/* ACCEPT (v0.1) -- retired-key branch (section 11 step 3 asymmetry): a key
+   'retired in the trusted manifest still validates receipts, but MUST raise a
+   warning. Same signature idiom, same mid-bound resolution as Accept_v01. */
 rule Accept_v01_retired:
-    let payload = <'0.1', 'receipt', rid, $I> in
-    [ VerifierTrust(V, $I, ver, ks)
-    , !ManifestKey($I, ver, <$I, kname>, alg, pubkey, pk_pq, 'retired')
+    let payload = <'0.1', 'receipt', rid, $I>
+        kid     = <$I, kname>
+    in
+    [ VerifierTrust(V, $I, %ver, mid)
+    , !ManifestEntry(mid, kid, alg, pubkey, pq, 'retired')
     , In(<payload, sig>) ]
   --[ Eq(verify(sig, payload, pubkey), true)
-    , SignatureValid(V, $I, rid, <$I, kname>)
-    , Accept_v01(V, $I, rid, <$I, kname>)
+    , SignatureValid(V, $I, rid, kid)
+    , Accept_v01(V, $I, rid, kid)
+    , AcceptInfo(V, $I, rid, kid, %ver, mid, alg)
     , Ok(V, rid)
-    , RetiredKeyWarning(V, $I, <$I, kname>) ]->
-    [ VerifierTrust(V, $I, ver, ks) ]
+    , RetiredKeyWarning(V, $I, kid) ]->
+    [ VerifierTrust(V, $I, %ver, mid) ]
 
-/* Local well-formedness / crypto-primitive equalities only (design 5a). */
+/* ---------------------------------------------------------------------------
+   RESTRICTIONS -- local well-formedness / crypto-primitive equalities only (5a)
+   --------------------------------------------------------------------------- */
 restriction genesis_unique:
   "All I #i #j. Genesis(I) @ #i & Genesis(I) @ #j ==> #i = #j"
 
 restriction signature_eq:
   "All a b #i. Eq(a, b) @ #i ==> a = b"
 
+/* ---------------------------------------------------------------------------
+   GROUP-A SANITY LEMMAS (exists-trace) -- each pinned to its INTENDED witness
+   --------------------------------------------------------------------------- */
+
 lemma sanity_toolchain:
   exists-trace
   "Ex A key #i. KeyRegistered(A, key) @ #i"
 
+/* F4a: acceptance witness must be an HONESTLY issued receipt (prior Issued),
+   not a reveal-and-forge. Pinned to the canonical honest path -- acceptance of an
+   honestly-issued receipt under the GENESIS manifest that the verifier trusts as
+   'verified (the extra conjuncts strengthen the existential and pin the intended
+   witness). */
 lemma sanity_v01_accept:
   exists-trace
-  "Ex V I rid kid #a. Accept_v01(V, I, rid, kid) @ #a & (Ex #o. Ok(V, rid) @ #o)"
+  "Ex V I rid kid mid alg #a #i #t #g.
+     Accept_v01(V, I, rid, kid) @ #a
+   & Ok(V, rid) @ #a
+   & AcceptInfo(V, I, rid, kid, %1, mid, alg) @ #a
+   & VerifiedTrustMid(V, I, mid) @ #t
+   & GenesisMid(I, mid) @ #g
+   & Issued(I, rid) @ #i
+   & #i < #a"
 
+/* F4b: the acceptance must be under the ROTATED (successor) manifest version
+   %v2 = the version the Rotate produced -- an accept under the old version does
+   not satisfy AcceptInfo(..., %v2, ...). */
 lemma sanity_rotate_then_accept:
   exists-trace
-  "Ex I v1 v2 sk #r. Rotate(I, v1, v2, sk) @ #r
-     & (Ex V rid kid #a. Accept_v01(V, I, rid, kid) @ #a & #r < #a)"
+  "Ex I %v1 %v2 sk V rid kid mid alg #r #a #t.
+     Rotate(I, %v1, %v2, sk) @ #r
+   & Accept_v01(V, I, rid, kid) @ #a
+   & AcceptInfo(V, I, rid, kid, %v2, mid, alg) @ #a
+   & VerifiedTrustMid(V, I, mid) @ #t
+   & #r < #a"
 
+/* F4c: genuine post-retirement acceptance via the retired-key branch --
+   BOTH #ret < #a ordering AND the RetiredKeyWarning emitted at #a. */
 lemma sanity_retired_key_receipt_still_accepts:
   exists-trace
-  "Ex I kid #ret V rid #a.
-     Retire(I, kid) @ #ret & Accept_v01(V, I, rid, kid) @ #a"
+  "Ex I kid V rid mid alg %v #ret #a #t.
+     Retire(I, kid) @ #ret
+   & Accept_v01(V, I, rid, kid) @ #a
+   & AcceptInfo(V, I, rid, kid, %v, mid, alg) @ #a
+   & VerifiedTrustMid(V, I, mid) @ #t
+   & RetiredKeyWarning(V, I, kid) @ #a
+   & #ret < #a"
+
+/* DoD 3a (representation admits a MIXED keyset): one manifest `mid` holds BOTH
+   an 'active Ed-only key (used to accept a receipt -> AcceptInfo alg 'ed_only)
+   AND an 'active hybrid key (HybridActiveIn) at the same time. */
+lemma sanity_mixed_keyset:
+  exists-trace
+  "Ex I V rid kid mid %v #a #h #t.
+     AcceptInfo(V, I, rid, kid, %v, mid, 'ed_only') @ #a
+   & HybridActiveIn(I, mid) @ #h
+   & VerifiedTrustMid(V, I, mid) @ #t"
+
+/* DoD 3b (representation admits an attacker manifest with a DISTINCT mid): a
+   'verified verifier's trusted manifest `mid_h` and an attacker-published
+   manifest `mid_a` coexist with mid_h != mid_a -- so the attacker manifest can
+   never alias the verified verifier's trust. */
+lemma sanity_attacker_distinct_mid:
+  exists-trace
+  "Ex I V mid_h mid_a #b #f.
+     VerifiedTrustMid(V, I, mid_h) @ #b
+   & AttackerManifest(I, mid_a) @ #f
+   & not (mid_h = mid_a)"
 
 end
