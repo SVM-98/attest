@@ -715,7 +715,8 @@ lemma reach_rotation_same_version_flagged:
    & AttackerManifestVer(I, midA, v2) @ #f
    & DiscontinuousRotation(V, I, mid, midA) @ #d
    & DiscontinuousVer(V, I, v1, v2) @ #d
-   & UnverifiedRotation(V, I) @ #d"
+   & UnverifiedRotation(V, I) @ #d
+   & #r < #d"
 
 /* I4 witness 3/3 (rotation, STRUCTURAL GAP): the candidate's version is the
    DOUBLE successor vnext(vnext(v)) of the version the verifier's head currently
@@ -751,6 +752,10 @@ lemma reach_compromised_receipt_submitted:
    & Rejected(V, I, rid2, kid) @ #j
    & RejectInfo(V, I, rid2, kid, ver, mid) @ #j
    & not (rid2 = rid)
+   /* Re-review fix: rid2 must NEVER have been honestly issued -- without this
+      the witness could be satisfied by REPLAYING a second honest receipt
+      instead of the claimed stolen-key forgery. */
+   & not (Ex #i2. Issued(I, rid2) @ #i2)
    & #i < #c
    & #r < #j"
 
