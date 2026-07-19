@@ -481,6 +481,185 @@ rule Verifier_Rotation_Discontinuous_v01:
     , !HeadState(V, $I, ver2, mid2, prov, 'flagged') ]
 
 /* ---------------------------------------------------------------------------
+   TASK 4 -- REVOCATION
+   Revocation records (issuer-signed <'revoke', rid, recTime>), a per-receipt
+   revocability CLASS fixed at issuance, an ABSTRACT nondeterministic window
+   predicate, and the verifier HONOR / IGNORE dispatch. All security decisions
+   are RULE PREMISES (§5a) -- the only restrictions remain the two crypto/WF ones.
+   --------------------------------------------------------------------------- */
+
+/* Revocability class MINT (§ receipt semantics -- a receipt's revocability class
+   is fixed when the receipt id is created). A fresh receipt id ~rid is minted with
+   EXACTLY ONE class from {'none, 'refund_window, 'policy} (three enabled rules =
+   nondeterministic choice; the fresh ~rid guarantees UNIQUENESS -- each id gets one
+   class, one persistent !Revocability, one RevClass action).
+   TRACTABILITY (decisive): the class is minted STANDALONE on a fresh id, NOT
+   threaded off Issue_Receipt_v01. Tying it to receipt issuance forced every
+   revocation trace to resolve TWO independent 'active signing keys (the receipt's
+   AND the revocation's), each with ~8 lifecycle producers of !ManifestEntry --
+   a combinatorial blow-up that made even a 6-step issuance witness cost 114s.
+   Standalone mint removes the redundant receipt-signer resolution. The rid remains
+   a valid receipt identifier -- the revocation record and the (fabricable) receipt
+   envelope both bind it -- and no property needs the receipt's own acceptance
+   machinery to reason about its revocation. */
+rule Mint_Revocable_none:
+    [ Fr(~rid) ]
+  --[ RevClass(~rid, 'none'), NewRevocable(~rid) ]->
+    [ !Revocability(~rid, 'none') ]
+
+rule Mint_Revocable_refund_window:
+    [ Fr(~rid) ]
+  --[ RevClass(~rid, 'refund_window'), NewRevocable(~rid) ]->
+    [ !Revocability(~rid, 'refund_window') ]
+
+rule Mint_Revocable_policy:
+    [ Fr(~rid) ]
+  --[ RevClass(~rid, 'policy'), NewRevocable(~rid) ]->
+    [ !Revocability(~rid, 'policy') ]
+
+/* Revocation-record ISSUANCE (§ revocation): the honest issuer signs the small
+   record body <'revoke', rid, recTime> with a key 'active in SOME published
+   manifest (reads ONLY persistent facts, exactly like Issue_Receipt_v01 -- no
+   linear state on the signing path). rid is bound to a real revocable receipt via
+   !Revocability(rid, class); recTime is an OPAQUE fresh term (Fr, no arithmetic --
+   the window is an abstract predicate decided by the coin below). The record
+   travels on the adversarial Out channel as the signed tuple <body, kid,
+   sign(body, ~sk)>, mirroring the receipt-envelope shape so the verifier's In()
+   deconstruction stays small. */
+rule Issue_Revocation_v01:
+    let body = <'revoke', rid, ~recTime>
+        kid  = <$I, kname>
+    in
+    [ !Revocability(rid, class)
+    , !ManifestEntry(mid, kid, alg, pk(~sk), pq, 'active')
+    , !KeyMat(kid, ~sk)
+    , Fr(~recTime) ]
+  --[ RevocationIssued($I, rid, kid, ~recTime)
+    , RevSignerMid($I, rid, kid, mid) ]->
+    [ Out(<body, kid, sign(body, ~sk)>) ]
+
+/* Abstract window predicate -- NONDETERMINISTIC coin per (rid, recTime). The
+   record body <'revoke', rid, recTime> is in the clear on the wire (only the
+   signature is over it), so In(<'revoke', rid, recTime>) is attacker-derivable
+   from the issued record. Two enabled rules flip the coin: BOTH branches are
+   reachable, time entirely out of scope (no clock, no arithmetic). Reading In
+   (a plaintext tuple, no signature) keeps the window source decoupled from the
+   crypto. InWindowActive / OutWindowMark are the independent witnesses
+   refund_window_bound quantifies over (emitted at the coin, not at the honor). */
+rule Window_In:
+    [ In(<'revoke', rid, recTime>) ]
+  --[ InWindowActive(rid, recTime) ]->
+    [ !InWindow(rid, recTime) ]
+
+rule Window_Out:
+    [ In(<'revoke', rid, recTime>) ]
+  --[ OutWindowMark(rid, recTime) ]->
+    [ !NotInWindow(rid, recTime) ]
+
+/* Verifier HONOR (refund_window branch) -- §5a premise discipline, ALL checks are
+   rule premises: (1) signer key resolved 'active from the verifier's TRUSTED
+   manifest (!HeadState + !ManifestEntry(mid, kid, ..., 'active') -- SAME trust
+   source as Accept_v01, C1 unified head); (2) the revocation signature verifies
+   over the body <'revoke', rid, recTime> (Eq/verify idiom discharged by
+   signature_eq); (3) class 'refund_window; (4) window admits (!InWindow). Crypto is
+   INLINE (an intermediate cached !Valid fact, read by many dispatch rules,
+   poisoned the co-emission proofs -- measured worse). Emits RevocationHonored + the
+   soundness witnesses; produces the persistent !HonoredRevocation(V, rid) the
+   reject-revoked path reads (Ok-linkage). WindowOk(rid, recTime) binds the honored
+   record's recTime for refund_window_bound; AuthMatchingInClassInWindow is the
+   completeness co-label for revocation_effectiveness. */
+rule Honor_Revocation_refund_window:
+    let body = <'revoke', rid, recTime>
+        kid  = <$I, kname>
+    in
+    [ !HeadState(V, $I, ver, mid, prov, flag)
+    , !ManifestEntry(mid, kid, alg, pubkey, pq, 'active')
+    , !Revocability(rid, 'refund_window')
+    , !InWindow(rid, recTime)
+    , In(<body, kid, sig>) ]
+  --[ Eq(verify(sig, body, pubkey), true)
+    , RevocationHonored(V, rid)
+    , RevHonorInfo(V, $I, rid, kid, recTime, mid)
+    , ClassHonorable(rid)
+    , WindowOk(rid, recTime)
+    , HonoredClass(rid, 'refund_window')
+    , AuthMatchingInClassInWindow(V, rid, recTime) ]->
+    [ !HonoredRevocation(V, $I, rid, kid, recTime, mid) ]
+
+/* Verifier HONOR (policy branch) -- same signer-active + signature premises; the
+   'policy class carries NO window constraint (a policy revocation is honorable
+   regardless of any window), so there is no !InWindow premise. WindowOk is still
+   emitted (soundness's window conjunct is vacuously satisfied for 'policy: no
+   window applies), but HonoredClass names 'policy so refund_window_bound does not
+   apply to it. */
+rule Honor_Revocation_policy:
+    let body = <'revoke', rid, recTime>
+        kid  = <$I, kname>
+    in
+    [ !HeadState(V, $I, ver, mid, prov, flag)
+    , !ManifestEntry(mid, kid, alg, pubkey, pq, 'active')
+    , !Revocability(rid, 'policy')
+    , In(<body, kid, sig>) ]
+  --[ Eq(verify(sig, body, pubkey), true)
+    , RevocationHonored(V, rid)
+    , RevHonorInfo(V, $I, rid, kid, recTime, mid)
+    , ClassHonorable(rid)
+    , WindowOk(rid, recTime)
+    , HonoredClass(rid, 'policy')
+    , AuthMatchingInClassInWindow(V, rid, recTime) ]->
+    [ !HonoredRevocation(V, $I, rid, kid, recTime, mid) ]
+
+/* Verifier IGNORE (class 'none): a revocation for a 'none-class receipt is IGNORED
+   -- NO !HonoredRevocation, so acceptance is left untouched (brief §4). The IGNORE
+   rules are signature-FREE (ignoring is harmless -- it never changes acceptance --
+   so re-verifying the presented record buys no security and only inflates the
+   source/proof cost); the security-critical signature check lives in the HONOR
+   rules. In(<'revoke', rid, recTime>) is the presented plaintext record;
+   RevIgnoreInfo carries (recTime, mid) for witness anchoring. */
+rule Ignore_Revocation_none:
+    [ !HeadState(V, $I, ver, mid, prov, flag)
+    , !Revocability(rid, 'none')
+    , In(<'revoke', rid, recTime>) ]
+  --[ RevocationIgnored(V, rid, 'class_none')
+    , RevIgnoreInfo(V, $I, rid, recTime, mid) ]->
+    [ ]
+
+/* Verifier IGNORE (out of window): a 'refund_window record whose window does NOT
+   admit (!NotInWindow) is IGNORED with reason 'out_of_window -- acceptance
+   untouched. Coin-flipped mirror; also signature-free. */
+rule Ignore_Revocation_out_of_window:
+    [ !HeadState(V, $I, ver, mid, prov, flag)
+    , !Revocability(rid, 'refund_window')
+    , !NotInWindow(rid, recTime)
+    , In(<'revoke', rid, recTime>) ]
+  --[ RevocationIgnored(V, rid, 'out_of_window')
+    , RevIgnoreInfo(V, $I, rid, recTime, mid) ]->
+    [ ]
+
+/* REJECT-revoked (Ok-linkage, WEAKER honest encoding -- see task-4-report.md).
+   Once V has honored a revocation for rid (!HonoredRevocation(V, rid)), a LATER
+   submission referencing rid to V hits THIS explicit reject path instead of
+   producing an Ok -- a first-class, mutation-visible REJECT event. The submission
+   is modeled by the distinct-tagged token In(<'submit', rid>) rather than the
+   full receipt envelope <'0.1','receipt',rid,...>: the receipt-payload SHAPE
+   collides with Issue_Receipt_v01's output, which made Tamarin explore the whole
+   receipt-issuance machinery for this witness (>300s); the distinct tag preserves
+   the security content (a post-revocation submission of rid reaches the explicit
+   reject, not Accept) while staying tractable. No signature is re-verified -- the
+   honored revocation status ALONE triggers rejection. Emits NO Ok and no state.
+   HONEST NOTE: this does not PROVE later Accept_v01 is unreachable (that would
+   require coupling revocation state into the acceptance hot path -- forbidden by
+   the T2 lesson -- or a global trace restriction -- forbidden by §5a); it
+   witnesses that the reject-revoked route exists and is taken. */
+rule Reject_v01_revoked:
+    [ !HonoredRevocation(V, $I, rid, kid, recTime, mid)
+    , In(<'submit', rid>) ]
+  --[ RevokedSubmission(V, rid)
+    , RejectRevokedInfo(V, $I, rid, kid, recTime, mid)
+    , Rejected_revoked(V, $I, rid) ]->
+    [ ]
+
+/* ---------------------------------------------------------------------------
    RESTRICTIONS -- local well-formedness / crypto-primitive equalities only (5a)
    --------------------------------------------------------------------------- */
 restriction genesis_unique:
@@ -842,5 +1021,151 @@ lemma old_key_powerless:
    & RevealKey(signerKid) @ #k
    & not (Ex #s. EntryActive(mid, signerKid) @ #s)
    ==> UnverifiedRotation(V, I) @ #c"
+
+/* ---------------------------------------------------------------------------
+   TASK 4 -- REVOCATION SANITY (exists-trace) -- TDD RED FIRST
+   These are added BEFORE any revocation rule exists: both must be FALSIFIED
+   (no rule emits RevocationHonored / RevocationIgnored yet). After the rules
+   are added they must turn verified.
+   --------------------------------------------------------------------------- */
+/* Anchored honest HONOR witness (T3 anchored-witness lesson -- the bare
+   `Ex V rid #h. RevocationHonored` form wanders past the plain-prover budget).
+   Positive anchors pin the intended trace: verified trust on the GENESIS manifest
+   `mid`, a 'policy-class receipt (the branch with no window premise), an honest
+   RevocationIssued signing under a mid-resolvable key, and RevHonorInfo binding
+   the honor to that same mid -- so the search is guided straight to
+   bootstrap -> issue-receipt -> assign-policy -> issue-revocation -> verify ->
+   honor, not explored blindly. */
+lemma sanity_revocation_honored:
+  exists-trace
+  "Ex V I rid kid recTime mid #g #b #p #vi #h.
+     GenesisMid(I, mid) @ #g
+   & VerifiedTrustMid(V, I, mid) @ #b
+   & RevClass(rid, 'policy') @ #p
+   & RevocationIssued(I, rid, kid, recTime) @ #vi
+   & RevSignerMid(I, rid, kid, mid) @ #vi
+   & RevocationHonored(V, rid) @ #h
+   & RevHonorInfo(V, I, rid, kid, recTime, mid) @ #h
+   & #vi < #h"
+
+/* Anchored 'none-class IGNORE witness: same honest chain, but the receipt's class
+   is 'none, so a valid signed revocation record for it is IGNORED
+   (reason 'class_none). RevRecordValid pins the validated record's mid to the
+   genesis manifest. */
+lemma sanity_none_ignored:
+  exists-trace
+  "Ex V I rid rec mid #g #b #p #ig.
+     GenesisMid(I, mid) @ #g
+   & VerifiedTrustMid(V, I, mid) @ #b
+   & RevClass(rid, 'none') @ #p
+   & RevocationIgnored(V, rid, 'class_none') @ #ig
+   & RevIgnoreInfo(V, I, rid, rec, mid) @ #ig
+   & #p < #ig"
+
+/* Anchored out-of-window IGNORE witness: a 'refund_window record whose coin landed
+   OUT of window (OutWindowMark) is ignored with reason 'out_of_window (the other
+   coin branch is reachable). */
+lemma reach_revocation_out_of_window:
+  exists-trace
+  "Ex V I rid rec mid #g #b #p #o #ig.
+     GenesisMid(I, mid) @ #g
+   & VerifiedTrustMid(V, I, mid) @ #b
+   & RevClass(rid, 'refund_window') @ #p
+   & OutWindowMark(rid, rec) @ #o
+   & RevocationIgnored(V, rid, 'out_of_window') @ #ig
+   & RevIgnoreInfo(V, I, rid, rec, mid) @ #ig
+   & #p < #ig"
+
+/* Ok-linkage WITNESS (weaker encoding, brief §5), anchored: after V HONORS a
+   'policy revocation for rid, a LATER submission of the receipt rid to V hits the
+   explicit reject-revoked route (RevokedSubmission), NOT Accept -- ordered
+   #h < #j. Honest demonstration that the reject-revoked path exists and is taken;
+   see task-4-report.md for why the STRONG "later Accept unreachable" theorem is
+   not encodable within the §5a / no-hot-path-linear-state discipline. */
+lemma reach_revoked_then_rejected:
+  exists-trace
+  "Ex V I rid kid recTime mid #g #b #p #vi #j.
+     GenesisMid(I, mid) @ #g
+   & VerifiedTrustMid(V, I, mid) @ #b
+   & RevClass(rid, 'policy') @ #p
+   & RevocationIssued(I, rid, kid, recTime) @ #vi
+   & RevSignerMid(I, rid, kid, mid) @ #vi
+   & RevokedSubmission(V, rid) @ #j
+   & RejectRevokedInfo(V, I, rid, kid, recTime, mid) @ #j"
+
+/* ---------------------------------------------------------------------------
+   TASK 4 -- REVOCATION THEOREMS (all-traces) -- the four required
+   --------------------------------------------------------------------------- */
+
+/* THEOREM 1 -- revocation AUTHORIZATION SOUNDNESS. Every honored revocation was
+   signed by a key that is INDEPENDENTLY witnessed 'active in the manifest the
+   verifier resolved it against (EntryActive(mid, kid) is emitted at entry
+   CREATION by the manifest-producing rules, NOT by the honor rule -- so it is not
+   a tautology of the honor premise), its class is honorable, and the window
+   admitted. Adaptation vs the plan's `RevSignedActive(I, rid, kid, recTime)`
+   witness: the real active witness is the frozen-model EntryActive(mid, kid),
+   paired with the honor rule's own RevHonorInfo(V, I, rid, kid, recTime, mid) --
+   exactly the T3 rotation_no_hijack independent-witness pattern, which is what
+   makes the negative mutation (delete the signer-'active premise from HONOR)
+   FALSIFY this theorem (a compromised/retired-key forgery is then honorable but
+   has no EntryActive for that (mid, kid)). */
+lemma revocation_auth_soundness:
+  all-traces
+  "All V rid #h. RevocationHonored(V, rid) @ #h
+     ==> (Ex I kid recTime mid #s.
+             RevHonorInfo(V, I, rid, kid, recTime, mid) @ #h
+           & EntryActive(mid, kid) @ #s
+           & ClassHonorable(rid) @ #h
+           & WindowOk(rid, recTime) @ #h)"
+
+/* THEOREM 2 -- revocation EFFECTIVENESS (no silent skip). True honored-side
+   completeness ("a presented valid record IS honored") is a LIVENESS property --
+   Tamarin cannot force a rule to fire, and a co-emission encoding (the honor
+   rule emitting both a "presented" and an "honored" label at the same instant)
+   is tautological by construction. The sound SAFETY content of "no silent skip"
+   lives on the IGNORE side: the ONLY ways a verifier discards a revocation are
+   the two legitimate reasons, and each must hold with an INDEPENDENT witness
+   emitted away from the ignore rule itself -- RevClass at the mint for
+   'class_none, OutWindowMark at the window coin for 'out_of_window. A verifier
+   that could discard an authentic in-class in-window record would have to emit
+   some OTHER reason or an unjustified one, and no such trace exists. Negative
+   control: deleting the !Revocability(rid, 'none') premise from
+   Ignore_Revocation_none lets any-class records be discarded as 'class_none
+   with no RevClass(rid, 'none') witness -> falsified. */
+lemma revocation_effectiveness:
+  all-traces
+  "All V rid reason #ig.
+     RevocationIgnored(V, rid, reason) @ #ig
+   ==> ( (reason = 'class_none' & (Ex #n. RevClass(rid, 'none') @ #n))
+       | (reason = 'out_of_window' & (Ex recTime #o. OutWindowMark(rid, recTime) @ #o)) )"
+
+/* THEOREM 3 -- IRREVOCABILITY of class 'none. A 'none-class receipt is never
+   effectively revoked: if any revocation for rid is honored, rid's class is NOT
+   'none. Provable from Fr-freshness uniqueness of the mint: each ~rid is minted
+   by EXACTLY ONE Mint_Revocable_* instance (its Fr(~rid) is consumed once), so a
+   rid carries exactly one class -- honoring requires !Revocability(rid,
+   'refund_window|'policy), and RevClass(rid, 'none') exists only where the SAME
+   rid was minted 'none by the only mint it ever had -- impossible together. */
+lemma irrevocability_none:
+  all-traces
+  "All V rid #h. RevocationHonored(V, rid) @ #h
+     ==> not (Ex #n. RevClass(rid, 'none') @ #n)"
+
+/* THEOREM 4 -- REFUND-WINDOW BOUND. A 'refund_window revocation is honored ONLY
+   when its window genuinely admitted: an honored refund_window record (WindowOk
+   binds its recTime) implies an INDEPENDENT InWindowActive(rid, recTime) coin
+   witness. Adaptation vs the plan sketch (`RevClass(rid,'refund_window')@#h ==>
+   WindowOk@#h`, which double-binds recTime universally and is trivially the honor
+   rule's own label): recTime is bound by the honored record's WindowOk, the class
+   is pinned by HonoredClass('refund_window') at the honor, and the consequent is
+   the coin-side InWindowActive witness -- non-tautological and window-branch
+   sensitive. */
+lemma refund_window_bound:
+  all-traces
+  "All V rid recTime #h.
+     RevocationHonored(V, rid) @ #h
+   & HonoredClass(rid, 'refund_window') @ #h
+   & WindowOk(rid, recTime) @ #h
+     ==> (Ex #w. InWindowActive(rid, recTime) @ #w)"
 
 end
