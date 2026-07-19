@@ -41,7 +41,7 @@ rule Genesis_v01:
         e1  = <kid, 'ed_only', pk(~sk), 'none', 'active'>
     in
     [ Fr(~name), Fr(~sk), Fr(~mid), Fr(~ver) ]
-  --[ Genesis($I), GenesisMid($I, ~mid) ]->
+  --[ Genesis($I), GenesisMid($I, ~mid), EntryActive(~mid, kid) ]->
     [ !ManifestEntry(~mid, kid, 'ed_only', pk(~sk), 'none', 'active')
     , !KeyMat(kid, ~sk)
     , !Manifest(~mid, $I, ~ver)
@@ -93,7 +93,9 @@ rule AddKey_Rotate_v01:
     , NewManifest($I, ver, vnext(ver))
     , VerSucc($I, ver, vnext(ver))
     , HybridActiveIn($I, ~mid2)
-    , HybridKey($I, kidH) ]->
+    , HybridKey($I, kidH)
+    , EntryActive(~mid2, kidE)
+    , EntryActive(~mid2, kidH) ]->
     [ !ManifestEntry(~mid2, kidE, algE, pk(~skE), pqE, 'active')
     , !ManifestEntry(~mid2, kidH, 'hybrid', pk(~skH), pk_pq(~skPQ), 'active')
     , !KeyMat(kidH, ~skH)
@@ -102,7 +104,18 @@ rule AddKey_Rotate_v01:
     , !AuthManifest(~mid2, $I, vnext(ver))
     , IssuerGen($I, vnext(ver), ~mid2, e1, eH)
     , Out(<'mhdr', $I, vnext(ver), ~mid2>)
-    , Out(sign(<'manifest', $I, vnext(ver), ~mid2, e1, eH>, ~skE)) ]
+    , Out(sign(<'manifest', $I, vnext(ver), ~mid2, e1, eH>, ~skE))
+    /* Task 3 continuity token (§7.3): a signature by the parent-active key ~skE
+       over the successor's CONTENT-IDENTITY header <'manifest', I, N+1, mid2>.
+       In this model `mid2` IS the per-manifest content identity (trust binds to
+       mid; Task-2 frozen contract), so binding mid2 commits to the successor
+       manifest's content -- its entries are authenticated by living in the
+       persistent !ManifestEntry(mid2,...) this same rule emits. Signing atomic
+       header terms (no entry tuples in the verifier's verify() goal) is what keeps
+       the continuity check tractable, mirroring the Task-2 acceptance fix. The
+       full-entry signature above is retained as the frozen on-the-wire manifest
+       signature. */
+    , Out(sign(<'manifest', $I, vnext(ver), ~mid2>, ~skE)) ]
 
 /* Retire (§7.3, single-entry manifest): flip the sole active key to 'retired in a
    fresh successor, signed by that key while still 'active in the PARENT. The
@@ -135,7 +148,8 @@ rule Compromise_Key_v01:
     [ IssuerGen($I, ver, mid, e1, 'none')
     , !KeyMat(kid, ~sk)
     , Fr(~mid2) ]
-  --[ Compromise($I, kid), NewManifest($I, ver, vnext(ver)), VerSucc($I, ver, vnext(ver)) ]->
+  --[ Compromise($I, kid), NewManifest($I, ver, vnext(ver)), VerSucc($I, ver, vnext(ver))
+    , EntryCompromised(~mid2, kid) ]->
     [ !ManifestEntry(~mid2, kid, alg, pk(~sk), pq, 'compromised')
     , !Manifest(~mid2, $I, vnext(ver))
     , !AuthManifest(~mid2, $I, vnext(ver))
@@ -158,7 +172,8 @@ rule Compromise_One_Preserve_Sibling_v01:
     , !KeyMat(kidC, ~skC)
     , !KeyMat(kidS, ~skS)
     , Fr(~mid2) ]
-  --[ Compromise($I, kidC), NewManifest($I, ver, vnext(ver)), VerSucc($I, ver, vnext(ver)) ]->
+  --[ Compromise($I, kidC), NewManifest($I, ver, vnext(ver)), VerSucc($I, ver, vnext(ver))
+    , EntryActive(~mid2, kidS), EntryCompromised(~mid2, kidC) ]->
     [ !ManifestEntry(~mid2, kidS, algS, pk(~skS), pqS, 'active')
     , !ManifestEntry(~mid2, kidC, algC, pk(~skC), pqC, 'compromised')
     , !Manifest(~mid2, $I, vnext(ver))
@@ -183,7 +198,8 @@ rule Compromise_Slot1_Preserve_Sibling_v01:
     , !KeyMat(kidC, ~skC)
     , !KeyMat(kidS, ~skS)
     , Fr(~mid2) ]
-  --[ Compromise($I, kidC), NewManifest($I, ver, vnext(ver)), VerSucc($I, ver, vnext(ver)) ]->
+  --[ Compromise($I, kidC), NewManifest($I, ver, vnext(ver)), VerSucc($I, ver, vnext(ver))
+    , EntryCompromised(~mid2, kidC), EntryActive(~mid2, kidS) ]->
     [ !ManifestEntry(~mid2, kidC, algC, pk(~skC), pqC, 'compromised')
     , !ManifestEntry(~mid2, kidS, algS, pk(~skS), pqS, 'active')
     , !Manifest(~mid2, $I, vnext(ver))
@@ -206,7 +222,8 @@ rule Retire_Slot1_Preserve_Sibling_v01:
     , !KeyMat(kidR, ~skR)
     , !KeyMat(kidS, ~skS)
     , Fr(~mid2) ]
-  --[ Retire($I, kidR), NewManifest($I, ver, vnext(ver)), VerSucc($I, ver, vnext(ver)) ]->
+  --[ Retire($I, kidR), NewManifest($I, ver, vnext(ver)), VerSucc($I, ver, vnext(ver))
+    , EntryActive(~mid2, kidS) ]->
     [ !ManifestEntry(~mid2, kidR, algR, pk(~skR), pqR, 'retired')
     , !ManifestEntry(~mid2, kidS, algS, pk(~skS), pqS, 'active')
     , !Manifest(~mid2, $I, vnext(ver))
@@ -236,7 +253,8 @@ rule Reveal_Key:
 rule Attacker_Manifest_v01:
     let kid_att = <$I, ~nameA> in
     [ In(<'forge', $I, verA>), Fr(~nameA), Fr(~midA), Fr(~skA) ]
-  --[ AttackerManifest($I, ~midA), AttackerManifestVer($I, ~midA, verA) ]->
+  --[ AttackerManifest($I, ~midA), AttackerManifestVer($I, ~midA, verA)
+    , EntryActive(~midA, kid_att) ]->
     [ !Manifest(~midA, $I, verA)
     , !ManifestEntry(~midA, kid_att, 'ed_only', pk(~skA), 'none', 'active')
     , Out(~skA) ]
@@ -261,7 +279,7 @@ rule Attacker_Manifest_v01:
 rule Bootstrap_verified_v01:
     [ Fr(~vid), !AuthManifest(mid, $I, ver) ]
   --[ TrustVerified(~vid, $I), VerifiedTrustMid(~vid, $I, mid) ]->
-    [ VerifierTrust(~vid, $I, ver, mid) ]
+    [ VerifierTrust(~vid, $I, ver, mid), TrustCursor(~vid, $I, ver, mid) ]
 
 /* Verifier BOOTSTRAP over an unauthenticated path (§7.4 TOFU): the verifier
    adopts a published manifest reached over a non-TLS path (In token,
@@ -272,7 +290,7 @@ rule Bootstrap_tofu_v01:
     , !Manifest(mid, $I, ver)
     , In(<'tofu_fetch', $I>) ]
   --[ TrustTOFU(~vid, $I) ]->
-    [ VerifierTrust(~vid, $I, ver, mid) ]
+    [ VerifierTrust(~vid, $I, ver, mid), TrustCursor(~vid, $I, ver, mid) ]
 
 /* ACCEPT (v0.1) -- signer key 'active in the EXACT trusted manifest `mid`, named
    by the EXACT envelope `kid`. Opaque In(<payload, kid, sig>); the entry is
@@ -315,6 +333,65 @@ rule Accept_v01_retired:
     , Ok(V, rid)
     , RetiredKeyWarning(V, $I, kid) ]->
     [ VerifierTrust(V, $I, ver, mid) ]
+
+/* CONTINUITY ADVANCE (§7.3 rotation continuity, auto-trust path) -- a verifier
+   holding a trust cursor TrustCursor(V,I,ver,mid) adopts a CANDIDATE successor
+   manifest that arrives over the adversarial channel (public header In(<'mhdr'>)
+   + In()-delivered signature blob). The successor is AUTO-TRUSTED iff (a) its
+   version is the immediate successor vnext(ver) of the currently-trusted version
+   [§7.3 "manifest_version N+1"], and (b) the candidate was SIGNED BY A KEY 'active
+   IN THE CURRENTLY-TRUSTED MANIFEST mid -- the signer key is resolved from
+   !ManifestEntry(mid, signerKid, ..., 'active') of the CURRENT trust, never a
+   global lookup. The verifier reconstructs the signed continuity token
+   <'manifest', I, vnext(ver), mid2> -- mid2 is the successor's CONTENT-IDENTITY
+   (Task-2 frozen contract: trust binds to mid, mid is 1:1 with manifest content),
+   so binding mid2 commits to the successor's content; its entries are then
+   authenticated by living in the persistent !ManifestEntry(mid2,...) -- and checks
+   verify(sig, token, spub)=true (crypto-primitive equality via signature_eq). ALL
+   checks are rule PREMISES (§5a): version-succession is the structural pattern
+   vnext(ver); active-signer is the 'active status match; signature is the Eq idiom.
+   NONE is a restriction.
+   TRUST-CURSOR SPLIT (tractability, mirrors the Task-2 acceptance fix): advances
+   operate on the linear TrustCursor, NOT on VerifierTrust (which Accept reads and
+   which stays Bootstrap-only, hence non-recursive -- preserving acceptance-search
+   speed). This rule is the ONLY UNFLAGGED way the cursor advances. Scope: the
+   add-key rotation (canonical §7.3 continuity, mixed keyset); it never flags ->
+   the clean branch. */
+rule Verifier_Continuity_Advance_v01:
+    [ TrustCursor(V, $I, ver, mid)
+    , !ManifestEntry(mid, signerKid, salg, spub, spq, 'active')
+    , In(<'mhdr', $I, vnext(ver), mid2>)
+    , In(sig) ]
+  --[ Eq(verify(sig, <'manifest', $I, vnext(ver), mid2>, spub), true)
+    , AuthorityAdvance(V, $I, mid, mid2)
+    , AdvanceSigner(V, $I, mid, signerKid)
+    , ContinuityAdvance(V, $I, mid, mid2, signerKid) ]->
+    [ TrustCursor(V, $I, vnext(ver), mid2) ]
+
+/* DISCONTINUOUS ROTATION (§7.3 failure path) -- a candidate that is NOT signed by
+   a key 'active in the currently-trusted manifest (the signer key + its pubkey are
+   supplied over the channel from ATTACKER knowledge, In(<'signer',...>), i.e. an
+   attacker key or a revealed OLD key, never resolved from the trusted manifest),
+   or a candidate at a non-successor / conflicting version, is representable here.
+   The verifier CANNOT establish continuity, so it MUST report trust:
+   "unverified_rotation" (§11.1) -> UnverifiedRotation(V,I); it NEVER silently
+   auto-accepts on the clean branch. This rule models the operator adopting a
+   discontinuous/conflicting manifest AFTER being warned: the resulting trust is
+   FLAGGED (UnverifiedRotation at the same instant as the advance). The candidate
+   signature is still checked (Eq idiom) so AdvanceSigner names a real signer, but
+   under an attacker-supplied key -- exactly a signer NOT active in the trusted
+   manifest. */
+rule Verifier_Rotation_Discontinuous_v01:
+    [ TrustCursor(V, $I, ver, mid)
+    , In(<'mhdr', $I, ver2, mid2>)
+    , In(<'signer', signerKid, spub>)
+    , In(sig) ]
+  --[ Eq(verify(sig, <'manifest', $I, ver2, mid2>, spub), true)
+    , AuthorityAdvance(V, $I, mid, mid2)
+    , AdvanceSigner(V, $I, mid, signerKid)
+    , UnverifiedRotation(V, $I)
+    , DiscontinuousRotation(V, $I, mid, mid2) ]->
+    [ TrustCursor(V, $I, ver2, mid2) ]
 
 /* ---------------------------------------------------------------------------
    RESTRICTIONS -- local well-formedness / crypto-primitive equalities only (5a)
@@ -449,5 +526,129 @@ lemma sanity_same_version_conflict:
   "Ex I v1 v2 sk midA #r #f.
      Rotate(I, v1, v2, sk) @ #r
    & AttackerManifestVer(I, midA, v2) @ #f"
+
+/* Task 3 honest continuity: a verifier that VERIFIED-trusts the genesis manifest
+   `mid` advances its trust to the add-key successor `mid2` via the clean
+   continuity rule, the candidate being signed by the genesis key kidE (active in
+   `mid`). Witnesses that the auto-trust path is executable end-to-end
+   (bootstrap -> honest rotate -> continuity advance), signer = the rotation
+   signer, ordered after the bootstrap. */
+lemma sanity_continuity_advance:
+  exists-trace
+  "Ex V I mid mid2 signerKid v1 v2 #b #g #r #c.
+     VerifiedTrustMid(V, I, mid) @ #b
+   & GenesisMid(I, mid) @ #g
+   & Rotate(I, v1, v2, signerKid) @ #r
+   & AuthorityAdvance(V, I, mid, mid2) @ #c
+   & ContinuityAdvance(V, I, mid, mid2, signerKid) @ #c
+   & #b < #c
+   & #r < #c"
+
+/* ---------------------------------------------------------------------------
+   GROUP-B ADVERSARIAL REACHABILITY (exists-trace) -- the anti-own-goal group:
+   for the negative Group-C theorems, show their premises are reachable WITH THE
+   ATTACKER ACTING, so the theorems defeat a real bad trace, not a vacuous one.
+   --------------------------------------------------------------------------- */
+
+/* An attacker-injected rotation candidate reaches the verifier's continuity check
+   and is REJECTED/flagged: the attacker REVEALS a key, signs a rotation candidate
+   with it, and the verifier -- unable to establish continuity (the signer is not
+   resolved from its trusted manifest) -- reports trust:"unverified_rotation"
+   (DiscontinuousRotation + UnverifiedRotation), never a silent clean adoption. The
+   flagged advance is signed by the revealed key, ordered after the reveal. */
+lemma reach_forged_rotation_rejected:
+  exists-trace
+  "Ex V I mid mid2 signerKid #k #d.
+     RevealKey(signerKid) @ #k
+   & DiscontinuousRotation(V, I, mid, mid2) @ #d
+   & AdvanceSigner(V, I, mid, signerKid) @ #d
+   & UnverifiedRotation(V, I) @ #d
+   & #k < #d"
+
+/* A receipt bearing a compromised-marked key is submittable: an honest receipt was
+   issued under `kid` (Issued + UsesKey), `kid` is later marked 'compromised in a
+   manifest (Compromise + EntryCompromised(mid, kid)), and the attacker even holds
+   kid's material (RevealKey) so it can submit forged receipts under it -- all of
+   which compromised_key_rejected then proves a mid-trusting verifier rejects. */
+lemma reach_compromised_receipt_submitted:
+  exists-trace
+  "Ex I kid rid mid #i #c #x #r.
+     Issued(I, rid) @ #i
+   & UsesKey(I, kid) @ #i
+   & Compromise(I, kid) @ #c
+   & EntryCompromised(mid, kid) @ #x
+   & RevealKey(kid) @ #r
+   & #i < #c"
+
+/* ---------------------------------------------------------------------------
+   GROUP-C SECURITY THEOREMS (all-traces)
+   --------------------------------------------------------------------------- */
+
+/* PROPERTY 2 -- rotation not hijackable (§7.3, §11.1; TM-28). ANY change of a
+   verifier's authority set (an AuthorityAdvance of its trust cursor to a new
+   manifest mid2) is EITHER continuity-valid -- its candidate was signed by a key
+   that is 'active in the PREVIOUSLY-trusted manifest mid (witnessed by an
+   independent EntryActive(mid, signerKid) action emitted where that entry was
+   created 'active) -- OR the state is flagged trust:"unverified_rotation"
+   (UnverifiedRotation). No unflagged, non-active-signed authority change exists.
+   The EntryActive conjunct is INDEPENDENT of the advance rule's own labels (it is
+   emitted by the manifest-creating rules), so deleting the 'active status premise
+   from Verifier_Continuity_Advance_v01 falsifies this theorem (negative control). */
+lemma rotation_no_hijack:
+  all-traces
+  "All V I mid mid2 #c.
+     AuthorityAdvance(V, I, mid, mid2) @ #c
+   ==> ( (Ex signerKid #s. AdvanceSigner(V, I, mid, signerKid) @ #c
+                          & EntryActive(mid, signerKid) @ #s)
+       | (Ex #u. UnverifiedRotation(V, I) @ #u) )"
+
+/* PROPERTY 3 -- compromise fails closed (§7.3 unconditional, §11 step 3). Once a
+   verifier's trusted manifest `mid` marks a key `kid` 'compromised
+   (EntryCompromised(mid, kid)), NO acceptance (Ok) can ever resolve to that kid
+   under that manifest -- regardless of issued_at, regardless of any prior valid
+   receipt. The accept rules pattern-match only 'active/'retired entries, and a
+   single content-identity `mid` binds each kid to exactly one status; this theorem
+   confirms NO OTHER path yields such an Ok. Negative control: deleting the 'active
+   (or 'retired) status premise from the accept rules -- letting them match a
+   'compromised entry -- falsifies this theorem. */
+lemma compromised_key_rejected:
+  all-traces
+  "not (Ex V I rid kid ver mid alg #a #x.
+       Ok(V, rid) @ #a
+     & AcceptInfo(V, I, rid, kid, ver, mid, alg) @ #a
+     & EntryCompromised(mid, kid) @ #x)"
+
+/* PROPERTY 1 -- acceptance is authentic (§10, §11; TM-01/02). If a verifier
+   accepts a receipt (Ok) under a manifest `mid` it VERIFIED-trusts
+   (VerifiedTrustMid, i.e. the §7.4 TLS root, honest-only), then either the honest
+   issuer actually issued that receipt (Issued(I, rid)) OR the signing key `kid`
+   was revealed to the attacker (RevealKey(kid)) -- a receipt cannot be accepted
+   under a verified manifest without one of the two. The signing key is the exact
+   accepted authority (kid from AcceptInfo), so the reveal disjunct names a key that
+   was an accepted authority for I. */
+lemma acceptance_issuer_signed [use_induction]:
+  all-traces
+  "All V I rid kid ver mid alg #a.
+     Ok(V, rid) @ #a
+   & AcceptInfo(V, I, rid, kid, ver, mid, alg) @ #a
+   & (Ex #t. VerifiedTrustMid(V, I, mid) @ #t)
+   ==> ( (Ex #i. Issued(I, rid) @ #i & #i < #a)
+       | (Ex #r. RevealKey(kid) @ #r & #r < #a) )"
+
+/* PROPERTY 2 (continued) -- an OLD key is powerless (§7.3). Revealing a key that
+   is NOT 'active in the currently-trusted manifest `mid` can never drive an
+   UNFLAGGED authority change: if an authority advance is signed by `signerKid`,
+   that key was revealed, and it is NOT active in `mid` (no EntryActive(mid,
+   signerKid)), then the advance MUST be flagged trust:"unverified_rotation". The
+   clean continuity rule requires an 'active-in-mid signer, so a non-active revealed
+   key can only drive the discontinuous (flagged) branch. */
+lemma old_key_powerless:
+  all-traces
+  "All V I mid mid2 signerKid #c #k.
+     AuthorityAdvance(V, I, mid, mid2) @ #c
+   & AdvanceSigner(V, I, mid, signerKid) @ #c
+   & RevealKey(signerKid) @ #k
+   & not (Ex #s. EntryActive(mid, signerKid) @ #s)
+   ==> (Ex #u. UnverifiedRotation(V, I) @ #u)"
 
 end
