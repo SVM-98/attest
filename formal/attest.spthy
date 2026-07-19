@@ -3,6 +3,16 @@ begin
 
 builtins: signing, natural-numbers
 
+/* Post-quantum public-key constructor (FIX WAVE 2, New-4). Declared here so the
+   hybrid key-entry can carry REAL PQ material `pk_pq(~skPQ)` (a one-way public
+   projection of a fresh PQ secret ~skPQ), instead of a raw fresh atom that could
+   never unify with the Task-5 equation. Task 5 will additionally declare
+   `sig_pq/2`, `verify_pq/3` and the equation `verify_pq(sig_pq(m,sk),m,pk_pq(sk))
+   = true`; declaring only the public constructor now keeps this producer frozen
+   and forward-compatible. `pk_pq` is a public constructor, so the manifest
+   candidate may expose `pk_pq(~skPQ)` over Out without ever revealing ~skPQ. */
+functions: pk_pq/1
+
 /* Fresh-key registration, minimal, just to make the toolchain sanity trace runnable. */
 rule Register_Key:
     [ Fr(~sk) ]
@@ -10,14 +20,17 @@ rule Register_Key:
     [ !Ltk($A, ~sk), !Pk($A, pk(~sk)), Out(pk(~sk)) ]
 
 /* ============================================================================
-   Task 2 (FIX WAVE) - v0.1 authority model (issuance, rotation, verifier
+   Task 2 (FIX WAVE 2) - v0.1 authority model (issuance, rotation, verifier
    bootstrap, acceptance). Design 2026-07-18 section 3 (architecture) and 5a
-   (restriction discipline). Spec attest-v0.1 sections 7.1, 7.3, 7.4, 11.
+   (restriction discipline). Spec attest-v0.1 sections 4.1, 7.1, 7.3, 7.4, 11.
 
-   This is the re-architecture demanded by the Task-2 review (findings F1-F6):
-   trust binds to a SPECIFIC manifest's contents (per-manifest identity nonce
-   `mid`), versions succeed N -> N+1 over natural numbers, and every transition
-   carries the FULL keyset (bounded to <=2 co-active entries) forward.
+   This is the re-architecture demanded by the Task-2 reviews (findings F1-F6 and
+   the re-review's New-1..New-4): trust binds to a SPECIFIC manifest's contents
+   (per-manifest identity nonce `mid`), versions succeed N -> N+1 over natural
+   numbers, every transition carries the FULL keyset forward AND signs the FULL
+   public entry tuples, both keyset slots are first-class active authorities, the
+   transmitted receipt carries an explicit `kid` matched at acceptance, and hybrid
+   entries carry usable PQ key material.
 
    FACT SHAPES (consumed by later tasks - do not rename):
 
@@ -27,14 +40,13 @@ rule Register_Key:
          share a `mid` (each minted by Fr).
 
      !ManifestEntry(mid, kid, alg, pubkey, pk_pq, status)
-         one key-entry BELONGING to manifest `mid`. Field tuple shape and domains
-         are preserved from the v1 model:
-           alg    in {'ed_only', 'hybrid'};  pk_pq = 'none' for Ed-only.
+         one key-entry BELONGING to manifest `mid`. Field tuple shape and domains:
+           alg    in {'ed_only', 'hybrid'};  pk_pq = 'none' for Ed-only,
+                  pk_pq(~skPQ) for a hybrid entry (New-4: REAL PQ material).
            status in {'active', 'retired', 'compromised'}.
            kid    = <I, name>  -- kid-domain is structurally the issuer I.
-         The ONLY change vs v1's `!ManifestKey(I, ver, kid, ...)` is that
-         membership is now scoped to the manifest identity `mid`, not to the
-         global (I, ver) namespace: an attacker manifest at the same (I, ver) but
+         Membership is scoped to the manifest identity `mid`, not the global
+         (I, ver) namespace: an attacker manifest at the same (I, ver) but
          different contents gets a DIFFERENT `mid` and so can never alias verified
          trust (F1). To keep source computation finite, transitions NEVER re-read
          `!ManifestEntry`; they thread the full keyset through the linear
@@ -43,6 +55,13 @@ rule Register_Key:
      !KeyMat(kid, sk)             -- persistent Ed secret material for `kid`
                                      (minted fresh per key -> F6: a rotation's new
                                      key secret can never equal the signer's).
+
+     !PqKeyMat(kid, skPQ)         -- persistent PQ secret material for a HYBRID
+                                     `kid` (New-4). Produced by add-key rotation,
+                                     unused in Task 2; Task 5's hybrid issuance
+                                     consumes it to build `sig_pq(payload, skPQ)`.
+                                     ~skPQ is NEVER placed on Out; only the public
+                                     projection pk_pq(~skPQ) travels in the entry.
 
      !AuthManifest(mid, I, ver)   -- the section 7.4 authentic (TLS root) channel;
                                      emitted ONLY by honest issuer rules, consumed
@@ -54,27 +73,56 @@ rule Register_Key:
      IssuerState(I, ver, mid, e1, e2) -- linear; the issuer's CURRENT manifest
                                      generation. e1, e2 are the (<=2) current key
                                      ENTRY TUPLES  <kid, alg, pubkey, pk_pq, status>
-                                     ('none' for an empty slot). Issuance and every
-                                     transition consume+thread it, so a receipt can
-                                     only be issued under the CURRENT manifest's
-                                     active key (F5) and transitions carry the full
-                                     keyset forward without re-reading persistent
-                                     entry facts.
+                                     ('none' for an empty slot). BOTH slots are
+                                     first-class (New-1): issuance and every
+                                     retire/compromise transition has a slot-1 AND
+                                     a slot-2 variant, so either active member can
+                                     issue a receipt or be retired/compromised
+                                     while preserving its sibling. Issuance and
+                                     every transition consume+thread this term, so
+                                     a receipt can only be issued under the CURRENT
+                                     manifest's active key (F5).
 
      VerifierTrust(V, I, ver, mid)-- linear; the verifier trust-store entry, bound
                                      to the exact `mid` (F1).
+
+   ENTRY-BOUND ABSTRACTION (New-2, for the README abstraction register): a manifest
+   generation carries AT MOST 2 TOTAL key entries (the e1/e2 slots), in ANY mix of
+   active/retired/compromised. This bound suffices for Tasks 3-6 because every
+   target property and the G6 exhibit needs at most two simultaneous entries:
+     - property 1 (acceptance => issuer-signed): one active key;
+     - property 2 (rotation non-hijackable / old_key_powerless): a retired-or-
+       compromised predecessor A + one active successor/sibling B (2 entries);
+     - property 3 (compromise fail-closed): a compromised key + at most one active
+       sibling (2 entries);
+     - property 4 (no hybrid downgrade) + G6 exhibit: an Ed-only active key
+       co-active with a hybrid active key (2 entries).
+   The only lifecycle that needs 3 SIMULTANEOUS entries -- retired A + active B +
+   freshly-added C, i.e. a further add-key rotation while retaining retired/
+   compromised history -- lies beyond the four properties and is out of scope for
+   Tasks 3-6. The §7.3 "receipts made while active remain acceptable after
+   retirement" requirement is fully covered within the 2-entry bound: a retired A
+   and an active B co-exist in one generation (retire-preserve-sibling), and A's
+   receipts stay resolvable via the retired-key accept branch.
 
    MODELLING DISCIPLINE (design 5a, non-negotiable): every acceptance /
    authorization check is a RULE PREMISE that can fail in-trace, NEVER a
    restriction:
      - signature verifies    -> action Eq(verify(sig, payload, pubkey), true) on an
-                                OPAQUE In(<payload, sig>), discharged by the local
-                                crypto-primitive equality restriction signature_eq
-                                (5a-permitted: prunes only cryptographically
-                                impossible traces, never a revealed-key forgery).
+                                OPAQUE In(<payload, kid, sig>), discharged by the
+                                local crypto-primitive equality restriction
+                                signature_eq (5a-permitted: prunes only
+                                cryptographically impossible traces, never a
+                                revealed-key forgery).
      - key resolved from mid -> the accept rules read !ManifestEntry(mid, ...) with
                                 `mid` taken from VerifierTrust, NEVER a global
                                 (I, ver) lookup (F1).
+     - kid resolved exactly  -> the transmitted receipt carries the signer `kid`
+                                (New-3); acceptance consumes In(<payload, kid, sig>)
+                                and unifies that exact `kid` against
+                                !ManifestEntry(mid, kid, ...). §11 step 2 resolves
+                                the specific named key, and Task 5's hybrid rule
+                                needs both legs to share ONE kid.
      - status != compromised -> the accept rules pattern-match 'active' / 'retired'
                                 only; a 'compromised' entry can never fire them, yet
                                 the (rejected) submission trace is NOT deleted.
@@ -104,11 +152,13 @@ rule Genesis_v01:
     , !AuthManifest(~mid, $I, %1)
     , IssuerState($I, %1, ~mid, e1, 'none') ]
 
-/* Receipt issuance (F5): consumes-and-restores the CURRENT IssuerState and signs
-   with the key that is 'active in slot 1 of THAT current manifest (not any
-   historical entry). Section 7.3: a receipt signed while the key was active stays
-   valid after a later retirement. Emitted onto the Dolev-Yao channel. */
-rule Issue_Receipt_v01:
+/* Receipt issuance from SLOT 1 (F5, New-3): consumes-and-restores the CURRENT
+   IssuerState and signs with the key that is 'active in slot 1 of THAT current
+   manifest (not any historical entry). Section 7.3: a receipt signed while the key
+   was active stays valid after a later retirement. The transmitted receipt carries
+   the signer `kid` (New-3): <payload, kid, sig>. Emitted onto the Dolev-Yao
+   channel. */
+rule Issue_Receipt_v01_slot1:
     let payload = <'0.1', 'receipt', ~rid, $I>
         e1 = <kid, alg, pk(~sk), pq, 'active'>
     in
@@ -117,46 +167,71 @@ rule Issue_Receipt_v01:
     , Fr(~rid) ]
   --[ Issued($I, ~rid), UsesKey($I, kid) ]->
     [ IssuerState($I, %ver, mid, e1, e2)
-    , Out(<payload, sign(payload, ~sk)>) ]
+    , Out(<payload, kid, sign(payload, ~sk)>) ]
 
-/* Add-key rotation (section 7.3 continuity; F2, F3, F6): mints successor version
-   %ver %+ %1 with a FRESH identity ~mid2 that carries the FULL keyset - the
+/* Receipt issuance from SLOT 2 (New-1, first-class second slot): symmetric to the
+   slot-1 variant but signs with the 'active key sitting in slot 2 (e.g. the hybrid
+   key added by rotation, via its Ed leg). This is what lets the newly-added key
+   actually issue a v0.1 receipt. */
+rule Issue_Receipt_v01_slot2:
+    let payload = <'0.1', 'receipt', ~rid, $I>
+        e2 = <kid, alg, pk(~sk), pq, 'active'>
+    in
+    [ IssuerState($I, %ver, mid, e1, e2)
+    , !KeyMat(kid, ~sk)
+    , Fr(~rid) ]
+  --[ Issued($I, ~rid), UsesKey($I, kid) ]->
+    [ IssuerState($I, %ver, mid, e1, e2)
+    , Out(<payload, kid, sign(payload, ~sk)>) ]
+
+/* Add-key rotation (section 7.3 continuity; F2, F3, F6, New-4): mints successor
+   version %ver %+ %1 with a FRESH identity ~mid2 that carries the FULL keyset - the
    existing active entry E is PRESERVED and a SECOND active entry (a fresh hybrid
-   key H) is introduced, giving a mixed keyset (Ed-only E + hybrid H both active
-   in ~mid2). The candidate is signed by E (an 'active key in the PARENT manifest)
-   and emitted over the ADVERSARIAL channel (Out) carrying the full keyset by
-   public key + status; the authentic channel copy (!AuthManifest) still lets a
-   FRESH verifier bootstrap the new version. The new secret ~skH is minted fresh
-   (F6) and is necessarily distinct from the signer's ~skE. Verifier-side N->N+1
-   adoption is Task 3 - not modeled here. */
+   key H) is introduced, giving a mixed keyset (Ed-only E + hybrid H both active in
+   ~mid2). The hybrid entry carries REAL PQ material pk_pq(~skPQ) (New-4) with the
+   secret ~skPQ kept in !PqKeyMat and NEVER on Out. The candidate is signed by E (an
+   'active key in the PARENT manifest) over the ADVERSARIAL channel (Out) carrying
+   the FULL public entry tuples e1 and eH (F2: kid+alg+pubkey+pk_pq+status, not just
+   <pubkey,status>); the authentic channel copy (!AuthManifest) still lets a FRESH
+   verifier bootstrap the new version. The new secrets ~skH/~skPQ are minted fresh
+   (F6) and are necessarily distinct from the signer's ~skE. */
 rule AddKey_Rotate_v01:
     let kidH = <$I, ~name2>
         e1   = <kidE, algE, pk(~skE), pqE, 'active'>
-        eH   = <kidH, 'hybrid', pk(~skH), ~pqH, 'active'>
-        manifest2 = <'manifest', $I, %ver %+ %1, ~mid2,
-                     <pk(~skE), 'active'>, <pk(~skH), 'active'>>
+        eH   = <kidH, 'hybrid', pk(~skH), pk_pq(~skPQ), 'active'>
+        manifest2 = <'manifest', $I, %ver %+ %1, ~mid2, e1, eH>
     in
     [ IssuerState($I, %ver, mid, e1, 'none')
     , !KeyMat(kidE, ~skE)
-    , Fr(~name2), Fr(~skH), Fr(~pqH), Fr(~mid2) ]
+    , Fr(~name2), Fr(~skH), Fr(~skPQ), Fr(~mid2) ]
   --[ Rotate($I, %ver, %ver %+ %1, kidE)
     , NewManifest($I, %ver, %ver %+ %1)
-    , HybridActiveIn($I, ~mid2) ]->
+    , HybridActiveIn($I, ~mid2)
+    , HybridKey($I, kidH) ]->
     [ !ManifestEntry(~mid2, kidE, algE, pk(~skE), pqE, 'active')
-    , !ManifestEntry(~mid2, kidH, 'hybrid', pk(~skH), ~pqH, 'active')
+    , !ManifestEntry(~mid2, kidH, 'hybrid', pk(~skH), pk_pq(~skPQ), 'active')
     , !KeyMat(kidH, ~skH)
+    , !PqKeyMat(kidH, ~skPQ)
     , !Manifest(~mid2, $I, %ver %+ %1)
     , !AuthManifest(~mid2, $I, %ver %+ %1)
     , IssuerState($I, %ver %+ %1, ~mid2, e1, eH)
-    , Out(<manifest2, sign(manifest2, ~skE)>) ]
+    /* Emit only the SIGNATURE over the full-entry manifest (F2: the signature still
+       commits to kid+alg+pubkey+pk_pq+status). The manifest content is NOT re-sent
+       raw as a <content,sig> pair: a raw full-entry tuple on Out() induces
+       self-referential source chains (2943 partial deconstructions). The
+       non-deconstructible sig blob avoids them. Task 2 has no consumer of the
+       candidate; Task 3's continuity rule will introduce the adversarial-channel
+       candidate (content reconstructed from public key material published there). */
+    , Out(sign(manifest2, ~skE)) ]
 
-/* Retire (single-entry manifest): flip the sole active key to 'retired in a fresh
-   successor, signed by that key while still 'active in the PARENT. Section 7.3:
-   receipts made while active remain acceptable (with a warning). */
+/* Retire (single-entry manifest; F2): flip the sole active key to 'retired in a
+   fresh successor, signed by that key while still 'active in the PARENT. The signed
+   candidate carries the FULL retired entry tuple e1r. Section 7.3: receipts made
+   while active remain acceptable (with a warning). */
 rule Retire_Key_v01:
     let e1  = <kid, alg, pk(~sk), pq, 'active'>
         e1r = <kid, alg, pk(~sk), pq, 'retired'>
-        manifest2 = <'manifest', $I, %ver %+ %1, ~mid2, <pk(~sk), 'retired'>>
+        manifest2 = <'manifest', $I, %ver %+ %1, ~mid2, e1r>
     in
     [ IssuerState($I, %ver, mid, e1, 'none')
     , !KeyMat(kid, ~sk)
@@ -166,17 +241,17 @@ rule Retire_Key_v01:
     , !Manifest(~mid2, $I, %ver %+ %1)
     , !AuthManifest(~mid2, $I, %ver %+ %1)
     , IssuerState($I, %ver %+ %1, ~mid2, e1r, 'none')
-    , Out(<manifest2, sign(manifest2, ~sk)>) ]
+    , Out(sign(manifest2, ~sk)) ]
 
-/* Retire (two-entry manifest; F2 sibling preservation): flip the slot-1 entry to
-   'retired while PRESERVING the slot-2 sibling 'active, in a fresh successor
-   carrying both. Signed by the surviving sibling S (an 'active parent key). */
-rule Retire_One_Preserve_Sibling_v01:
+/* Retire SLOT 1, preserve SLOT 2 (two-entry manifest; F2 sibling preservation):
+   flip the slot-1 entry to 'retired while PRESERVING the slot-2 sibling 'active, in
+   a fresh successor carrying BOTH full entry tuples. Signed by the surviving
+   sibling S (an 'active parent key). */
+rule Retire_One_Preserve_Sibling_slot1_v01:
     let eR  = <kidR, algR, pk(~skR), pqR, 'active'>
         eS  = <kidS, algS, pk(~skS), pqS, 'active'>
         eRr = <kidR, algR, pk(~skR), pqR, 'retired'>
-        manifest3 = <'manifest', $I, %ver %+ %1, ~mid3,
-                     <pk(~skR), 'retired'>, <pk(~skS), 'active'>>
+        manifest3 = <'manifest', $I, %ver %+ %1, ~mid3, eRr, eS>
     in
     [ IssuerState($I, %ver, mid, eR, eS)
     , !KeyMat(kidR, ~skR)
@@ -188,15 +263,37 @@ rule Retire_One_Preserve_Sibling_v01:
     , !Manifest(~mid3, $I, %ver %+ %1)
     , !AuthManifest(~mid3, $I, %ver %+ %1)
     , IssuerState($I, %ver %+ %1, ~mid3, eRr, eS)
-    , Out(<manifest3, sign(manifest3, ~skS)>) ]
+    , Out(sign(manifest3, ~skS)) ]
 
-/* Compromise-marking (section 7.3 fail-closed, single-entry manifest): flip the
-   sole active key to 'compromised in a fresh successor. Any receipt resolving to
-   it must be rejected -- the accept rules never match a compromised entry. */
+/* Retire SLOT 2, preserve SLOT 1 (New-1 symmetric variant): flip the slot-2 entry
+   to 'retired while PRESERVING the slot-1 sibling 'active. Signed by the surviving
+   slot-1 sibling S. Positional keyset order (slot1, slot2) is preserved. */
+rule Retire_One_Preserve_Sibling_slot2_v01:
+    let eS  = <kidS, algS, pk(~skS), pqS, 'active'>
+        eR  = <kidR, algR, pk(~skR), pqR, 'active'>
+        eRr = <kidR, algR, pk(~skR), pqR, 'retired'>
+        manifest3 = <'manifest', $I, %ver %+ %1, ~mid3, eS, eRr>
+    in
+    [ IssuerState($I, %ver, mid, eS, eR)
+    , !KeyMat(kidR, ~skR)
+    , !KeyMat(kidS, ~skS)
+    , Fr(~mid3) ]
+  --[ Retire($I, kidR), NewManifest($I, %ver, %ver %+ %1) ]->
+    [ !ManifestEntry(~mid3, kidR, algR, pk(~skR), pqR, 'retired')
+    , !ManifestEntry(~mid3, kidS, algS, pk(~skS), pqS, 'active')
+    , !Manifest(~mid3, $I, %ver %+ %1)
+    , !AuthManifest(~mid3, $I, %ver %+ %1)
+    , IssuerState($I, %ver %+ %1, ~mid3, eS, eRr)
+    , Out(sign(manifest3, ~skS)) ]
+
+/* Compromise-marking (section 7.3 fail-closed, single-entry manifest; F2): flip the
+   sole active key to 'compromised in a fresh successor, signing the FULL compromised
+   entry tuple. Any receipt resolving to it must be rejected -- the accept rules
+   never match a compromised entry. */
 rule Compromise_Key_v01:
     let e1  = <kid, alg, pk(~sk), pq, 'active'>
         e1c = <kid, alg, pk(~sk), pq, 'compromised'>
-        manifest2 = <'manifest', $I, %ver %+ %1, ~mid2, <pk(~sk), 'compromised'>>
+        manifest2 = <'manifest', $I, %ver %+ %1, ~mid2, e1c>
     in
     [ IssuerState($I, %ver, mid, e1, 'none')
     , !KeyMat(kid, ~sk)
@@ -206,17 +303,17 @@ rule Compromise_Key_v01:
     , !Manifest(~mid2, $I, %ver %+ %1)
     , !AuthManifest(~mid2, $I, %ver %+ %1)
     , IssuerState($I, %ver %+ %1, ~mid2, e1c, 'none')
-    , Out(<manifest2, sign(manifest2, ~sk)>) ]
+    , Out(sign(manifest2, ~sk)) ]
 
-/* Compromise-marking (two-entry manifest; F2 sibling preservation): flip the
-   slot-1 entry to 'compromised while PRESERVING the slot-2 sibling 'active.
-   Signed by the surviving sibling S. */
-rule Compromise_One_Preserve_Sibling_v01:
+/* Compromise SLOT 1, preserve SLOT 2 (two-entry manifest; F2 sibling preservation):
+   flip the slot-1 entry to 'compromised while PRESERVING the slot-2 sibling 'active.
+   Signed by the surviving sibling S. This is the honest 'genesis A -> add hybrid B
+   -> compromise A (A compromised, B active)' step of the New-2 lifecycle. */
+rule Compromise_One_Preserve_Sibling_slot1_v01:
     let eC  = <kidC, algC, pk(~skC), pqC, 'active'>
         eS  = <kidS, algS, pk(~skS), pqS, 'active'>
         eCc = <kidC, algC, pk(~skC), pqC, 'compromised'>
-        manifest3 = <'manifest', $I, %ver %+ %1, ~mid3,
-                     <pk(~skC), 'compromised'>, <pk(~skS), 'active'>>
+        manifest3 = <'manifest', $I, %ver %+ %1, ~mid3, eCc, eS>
     in
     [ IssuerState($I, %ver, mid, eC, eS)
     , !KeyMat(kidC, ~skC)
@@ -228,7 +325,29 @@ rule Compromise_One_Preserve_Sibling_v01:
     , !Manifest(~mid3, $I, %ver %+ %1)
     , !AuthManifest(~mid3, $I, %ver %+ %1)
     , IssuerState($I, %ver %+ %1, ~mid3, eCc, eS)
-    , Out(<manifest3, sign(manifest3, ~skS)>) ]
+    , Out(sign(manifest3, ~skS)) ]
+
+/* Compromise SLOT 2, preserve SLOT 1 (New-1 symmetric variant): flip the slot-2
+   entry to 'compromised while PRESERVING the slot-1 sibling 'active. Signed by the
+   surviving slot-1 sibling S. This lets the newly-added hybrid key (slot 2) itself
+   be marked compromised. */
+rule Compromise_One_Preserve_Sibling_slot2_v01:
+    let eS  = <kidS, algS, pk(~skS), pqS, 'active'>
+        eC  = <kidC, algC, pk(~skC), pqC, 'active'>
+        eCc = <kidC, algC, pk(~skC), pqC, 'compromised'>
+        manifest3 = <'manifest', $I, %ver %+ %1, ~mid3, eS, eCc>
+    in
+    [ IssuerState($I, %ver, mid, eS, eC)
+    , !KeyMat(kidC, ~skC)
+    , !KeyMat(kidS, ~skS)
+    , Fr(~mid3) ]
+  --[ Compromise($I, kidC), NewManifest($I, %ver, %ver %+ %1) ]->
+    [ !ManifestEntry(~mid3, kidC, algC, pk(~skC), pqC, 'compromised')
+    , !ManifestEntry(~mid3, kidS, algS, pk(~skS), pqS, 'active')
+    , !Manifest(~mid3, $I, %ver %+ %1)
+    , !AuthManifest(~mid3, $I, %ver %+ %1)
+    , IssuerState($I, %ver %+ %1, ~mid3, eS, eCc)
+    , Out(sign(manifest3, ~skS)) ]
 
 /* ---------------------------------------------------------------------------
    ATTACKER SIDE
@@ -282,24 +401,26 @@ rule Bootstrap_tofu_v01:
   --[ TrustTOFU(~vid, $I) ]->
     [ VerifierTrust(~vid, $I, %ver, mid) ]
 
-/* ACCEPT (v0.1) -- signer key 'active in the EXACT trusted manifest `mid` (F1).
-   The receipt arrives as an OPAQUE In(<payload, sig>); the entry is resolved from
-   !ManifestEntry(mid, ...) with `mid` taken from VerifierTrust (never a global
-   (I, ver) lookup); verify(sig, payload, pubkey)=true is the local-equality action
-   discharged by signature_eq. Structural premises: version dispatch (payload
-   literal '0.1'), issuer binding ($I unified across payload/trust/manifest),
-   kid-domain (<$I, kname>), and status (pattern-match 'active -- a 'compromised
-   entry can never fire this rule while the rejected-submission trace is NOT
-   deleted). VerifierTrust is read-and-restored so a verifier can validate more
-   than one receipt. AcceptInfo carries the accepted manifest's ver/mid/alg for
-   the tightened sanity lemmas. */
+/* ACCEPT (v0.1) -- signer key 'active in the EXACT trusted manifest `mid` (F1),
+   named by the EXACT envelope `kid` (New-3). The receipt arrives as an OPAQUE
+   In(<payload, kid, sig>); the entry is resolved from !ManifestEntry(mid, kid, ...)
+   with `mid` taken from VerifierTrust (never a global (I, ver) lookup) and `kid`
+   unified against the envelope's kid (§11 step 2 resolves the specific named key);
+   verify(sig, payload, pubkey)=true is the local-equality action discharged by
+   signature_eq. Structural premises: version dispatch (payload literal '0.1'),
+   issuer binding ($I unified across payload/trust/manifest/kid), kid-domain
+   (<$I, kname>), and status (pattern-match 'active -- a 'compromised entry can
+   never fire this rule while the rejected-submission trace is NOT deleted).
+   VerifierTrust is read-and-restored so a verifier can validate more than one
+   receipt. AcceptInfo carries the accepted manifest's ver/mid/alg for the
+   tightened sanity lemmas. */
 rule Accept_v01:
     let payload = <'0.1', 'receipt', rid, $I>
         kid     = <$I, kname>
     in
     [ VerifierTrust(V, $I, %ver, mid)
     , !ManifestEntry(mid, kid, alg, pubkey, pq, 'active')
-    , In(<payload, sig>) ]
+    , In(<payload, kid, sig>) ]
   --[ Eq(verify(sig, payload, pubkey), true)
     , SignatureValid(V, $I, rid, kid)
     , Accept_v01(V, $I, rid, kid)
@@ -309,14 +430,15 @@ rule Accept_v01:
 
 /* ACCEPT (v0.1) -- retired-key branch (section 11 step 3 asymmetry): a key
    'retired in the trusted manifest still validates receipts, but MUST raise a
-   warning. Same signature idiom, same mid-bound resolution as Accept_v01. */
+   warning. Same signature idiom, same mid-bound + kid-bound resolution as
+   Accept_v01. */
 rule Accept_v01_retired:
     let payload = <'0.1', 'receipt', rid, $I>
         kid     = <$I, kname>
     in
     [ VerifierTrust(V, $I, %ver, mid)
     , !ManifestEntry(mid, kid, alg, pubkey, pq, 'retired')
-    , In(<payload, sig>) ]
+    , In(<payload, kid, sig>) ]
   --[ Eq(verify(sig, payload, pubkey), true)
     , SignatureValid(V, $I, rid, kid)
     , Accept_v01(V, $I, rid, kid)
@@ -358,39 +480,73 @@ lemma sanity_v01_accept:
    & Issued(I, rid) @ #i
    & #i < #a"
 
-/* F4b: the acceptance must be under the ROTATED (successor) manifest version
-   %v2 = the version the Rotate produced -- an accept under the old version does
-   not satisfy AcceptInfo(..., %v2, ...). */
+/* F4b (+ New-honest-issuance): the acceptance must be under the ROTATED (successor)
+   manifest version %v2 = the version the Rotate produced, AND witnessed by a genuine
+   honest issuance ordered #r < #i < #a -- so it is a rotate -> honest-issue ->
+   accept path, not a Reveal_Key+forge trace. */
 lemma sanity_rotate_then_accept:
   exists-trace
-  "Ex I %v1 %v2 sk V rid kid mid alg #r #a #t.
+  "Ex I %v1 %v2 sk V rid kid mid alg #r #i #a #t.
      Rotate(I, %v1, %v2, sk) @ #r
+   & Issued(I, rid) @ #i
    & Accept_v01(V, I, rid, kid) @ #a
    & AcceptInfo(V, I, rid, kid, %v2, mid, alg) @ #a
    & VerifiedTrustMid(V, I, mid) @ #t
-   & #r < #a"
+   & #r < #i
+   & #i < #a"
 
-/* F4c: genuine post-retirement acceptance via the retired-key branch --
-   BOTH #ret < #a ordering AND the RetiredKeyWarning emitted at #a. */
+/* F4c (+ New-honest-issuance): genuine post-retirement acceptance via the
+   retired-key branch -- an HONEST issuance while the key was active (#i), then
+   retirement (#ret), then acceptance (#a), ordered #i < #ret < #a, WITH the
+   RetiredKeyWarning emitted at #a. Not a Reveal_Key+forge trace. */
 lemma sanity_retired_key_receipt_still_accepts:
   exists-trace
-  "Ex I kid V rid mid alg %v #ret #a #t.
-     Retire(I, kid) @ #ret
+  "Ex I kid V rid mid alg %v #i #ret #a #t.
+     Issued(I, rid) @ #i
+   & Retire(I, kid) @ #ret
    & Accept_v01(V, I, rid, kid) @ #a
    & AcceptInfo(V, I, rid, kid, %v, mid, alg) @ #a
    & VerifiedTrustMid(V, I, mid) @ #t
    & RetiredKeyWarning(V, I, kid) @ #a
+   & #i < #ret
    & #ret < #a"
 
 /* DoD 3a (representation admits a MIXED keyset): one manifest `mid` holds BOTH
    an 'active Ed-only key (used to accept a receipt -> AcceptInfo alg 'ed_only)
-   AND an 'active hybrid key (HybridActiveIn) at the same time. */
+   AND an 'active hybrid key (HybridActiveIn) at the same time. After New-4 the
+   hybrid entry carries REAL pk_pq(~skPQ) material. */
 lemma sanity_mixed_keyset:
   exists-trace
   "Ex I V rid kid mid %v #a #h #t.
      AcceptInfo(V, I, rid, kid, %v, mid, 'ed_only') @ #a
    & HybridActiveIn(I, mid) @ #h
    & VerifiedTrustMid(V, I, mid) @ #t"
+
+/* New-1 (slot-2 is a first-class authority): the key ADDED into slot 2 by add-key
+   rotation (the hybrid key kidH) can BOTH issue a receipt (UsesKey) AND itself be
+   marked compromised (Compromise), issuance ordered before compromise. Witnesses
+   that neither issuance nor compromise is limited to slot 1. */
+lemma sanity_slot2_issue_and_compromise:
+  exists-trace
+  "Ex I kidH #h #u #c.
+     HybridKey(I, kidH) @ #h
+   & UsesKey(I, kidH) @ #u
+   & Compromise(I, kidH) @ #c
+   & #u < #c"
+
+/* New-3 (envelope kid is resolved exactly): a receipt whose transmitted `kid`
+   equals the key the issuer signed with (UsesKey at the honest issuance #i) is
+   accepted (Accept_v01 resolving that same kid at #a). Because acceptance consumes
+   In(<payload, kid, sig>) and unifies that kid against the manifest entry, this is
+   a genuine kid-bound honest acceptance. */
+lemma sanity_kid_bound_accept:
+  exists-trace
+  "Ex V I rid kid mid alg #a #i.
+     Accept_v01(V, I, rid, kid) @ #a
+   & AcceptInfo(V, I, rid, kid, %1, mid, alg) @ #a
+   & Issued(I, rid) @ #i
+   & UsesKey(I, kid) @ #i
+   & #i < #a"
 
 /* DoD 3b (representation admits an attacker manifest with a DISTINCT mid): a
    'verified verifier's trusted manifest `mid_h` and an attacker-published
