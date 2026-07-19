@@ -128,13 +128,19 @@ rule Retire_Key_v01:
     [ IssuerGen($I, ver, mid, e1, 'none')
     , !KeyMat(kid, ~sk)
     , Fr(~mid2) ]
-  --[ Retire($I, kid), NewManifest($I, ver, vnext(ver)), VerSucc($I, ver, vnext(ver)) ]->
+  --[ Retire($I, kid), NewManifest($I, ver, vnext(ver)), VerSucc($I, ver, vnext(ver))
+    , EntryRetired(~mid2, kid) ]->
     [ !ManifestEntry(~mid2, kid, alg, pk(~sk), pq, 'retired')
     , !Manifest(~mid2, $I, vnext(ver))
     , !AuthManifest(~mid2, $I, vnext(ver))
     , IssuerGen($I, vnext(ver), ~mid2, e1r, 'none')
     , Out(<'mhdr', $I, vnext(ver), ~mid2>)
-    , Out(sign(<'manifest', $I, vnext(ver), ~mid2, e1r>, ~sk)) ]
+    , Out(sign(<'manifest', $I, vnext(ver), ~mid2, e1r>, ~sk))
+    /* C2 fix: EVERY honest lifecycle successor emits the same atomic
+       content-identity continuity token its add-key sibling does, signed by the
+       same parent-active key as the full-body signature -- §7.3 continuity is a
+       property of the whole manifest chain, not of add-key rotations only. */
+    , Out(sign(<'manifest', $I, vnext(ver), ~mid2>, ~sk)) ]
 
 /* Compromise-marking (§7.3 fail-closed, single-entry manifest): flip the sole
    active key to 'compromised in a fresh successor, signing the FULL compromised
@@ -155,7 +161,9 @@ rule Compromise_Key_v01:
     , !AuthManifest(~mid2, $I, vnext(ver))
     , IssuerGen($I, vnext(ver), ~mid2, e1c, 'none')
     , Out(<'mhdr', $I, vnext(ver), ~mid2>)
-    , Out(sign(<'manifest', $I, vnext(ver), ~mid2, e1c>, ~sk)) ]
+    , Out(sign(<'manifest', $I, vnext(ver), ~mid2, e1c>, ~sk))
+    /* C2 fix: atomic continuity token, same signer as the full body. */
+    , Out(sign(<'manifest', $I, vnext(ver), ~mid2>, ~sk)) ]
 
 /* Compromise ONE entry, preserve the sibling (two-entry manifest): flip the
    slot-2 entry to 'compromised while PRESERVING the slot-1 sibling 'active, signed
@@ -180,7 +188,9 @@ rule Compromise_One_Preserve_Sibling_v01:
     , !AuthManifest(~mid2, $I, vnext(ver))
     , IssuerGen($I, vnext(ver), ~mid2, eS, eCc)
     , Out(<'mhdr', $I, vnext(ver), ~mid2>)
-    , Out(sign(<'manifest', $I, vnext(ver), ~mid2, eS, eCc>, ~skS)) ]
+    , Out(sign(<'manifest', $I, vnext(ver), ~mid2, eS, eCc>, ~skS))
+    /* C2 fix: atomic continuity token, same signer as the full body. */
+    , Out(sign(<'manifest', $I, vnext(ver), ~mid2>, ~skS)) ]
 
 /* Compromise SLOT-1 entry, preserve the SLOT-2 sibling (review-3 fix 3): the
    mirror of the rule above — flips the slot-1 entry (e.g. the legacy Ed-only key
@@ -206,7 +216,9 @@ rule Compromise_Slot1_Preserve_Sibling_v01:
     , !AuthManifest(~mid2, $I, vnext(ver))
     , IssuerGen($I, vnext(ver), ~mid2, eCc, eS)
     , Out(<'mhdr', $I, vnext(ver), ~mid2>)
-    , Out(sign(<'manifest', $I, vnext(ver), ~mid2, eCc, eS>, ~skS)) ]
+    , Out(sign(<'manifest', $I, vnext(ver), ~mid2, eCc, eS>, ~skS))
+    /* C2 fix: atomic continuity token, same signer as the full body. */
+    , Out(sign(<'manifest', $I, vnext(ver), ~mid2>, ~skS)) ]
 
 /* Retire SLOT-1 entry, preserve the SLOT-2 sibling (review-3 fix 3): sibling-
    preserving retirement — the slot-1 entry goes 'retired while the slot-2 sibling
@@ -223,14 +235,16 @@ rule Retire_Slot1_Preserve_Sibling_v01:
     , !KeyMat(kidS, ~skS)
     , Fr(~mid2) ]
   --[ Retire($I, kidR), NewManifest($I, ver, vnext(ver)), VerSucc($I, ver, vnext(ver))
-    , EntryActive(~mid2, kidS) ]->
+    , EntryActive(~mid2, kidS), EntryRetired(~mid2, kidR) ]->
     [ !ManifestEntry(~mid2, kidR, algR, pk(~skR), pqR, 'retired')
     , !ManifestEntry(~mid2, kidS, algS, pk(~skS), pqS, 'active')
     , !Manifest(~mid2, $I, vnext(ver))
     , !AuthManifest(~mid2, $I, vnext(ver))
     , IssuerGen($I, vnext(ver), ~mid2, eRr, eS)
     , Out(<'mhdr', $I, vnext(ver), ~mid2>)
-    , Out(sign(<'manifest', $I, vnext(ver), ~mid2, eRr, eS>, ~skS)) ]
+    , Out(sign(<'manifest', $I, vnext(ver), ~mid2, eRr, eS>, ~skS))
+    /* C2 fix: atomic continuity token, same signer as the full body. */
+    , Out(sign(<'manifest', $I, vnext(ver), ~mid2>, ~skS)) ]
 
 /* ---------------------------------------------------------------------------
    ATTACKER SIDE
@@ -257,6 +271,11 @@ rule Attacker_Manifest_v01:
     , EntryActive(~midA, kid_att) ]->
     [ !Manifest(~midA, $I, verA)
     , !ManifestEntry(~midA, kid_att, 'ed_only', pk(~skA), 'none', 'active')
+    /* C2/I4 fix: the forged manifest's public header is PUBLISHED like every
+       honest one -- without this Out the fresh ~midA never reaches attacker
+       knowledge and no forged candidate can ever be PRESENTED to a verifier
+       (the Group-B witnesses would be unreachable by construction). */
+    , Out(<'mhdr', $I, verA, ~midA>)
     , Out(~skA) ]
     /* Review-3 fixes 1+2: (1) the VERSION is attacker-chosen from In() — it can
        equal a published honest version (same-version conflict, knowable from the
@@ -275,11 +294,33 @@ rule Attacker_Manifest_v01:
 /* Verifier BOOTSTRAP over the authentic channel (§7.4 TLS root): first/only
    trust-store fetch. Fresh ~vid = one verifier session; trust = verified, bound
    to the exact `mid`. Only consumer of !AuthManifest (honest-only) -> a
-   'verified verifier always trusts an honest manifest identity. */
+   'verified verifier always trusts an honest manifest identity.
+   UNIFIED TRUST HEAD (C1 fix): ONE authoritative linear fact
+   TrustHead(V, I, ver, mid, prov, flag) carries the verifier's entire trust
+   state -- manifest identity, version, PROVENANCE ('verified | 'tofu, set at
+   bootstrap, never changed) and DISCONTINUITY FLAG ('clean | 'flagged, §11.1
+   lineage taint). It is moved ONLY by the continuity-advance rules. Every rule
+   that produces a TrustHead state ALSO records it as a persistent snapshot
+   !HeadState(V, I, ver, mid, prov, flag) -- the head's own state HISTORY, 1:1
+   with the head states, same parameters, same lineage. The ACCEPT rules read
+   !HeadState, so AcceptInfo.mid ranges over continuity-adopted manifests, not
+   just bootstrapped snapshots (the C1 requirement).
+   TRACTABILITY NOTE (documented over-approximation): letting acceptance read
+   any HISTORICAL head state (not only the newest) admits extra traces where a
+   verifier validates under trust it has since advanced past -- i.e. manifest
+   FRESHNESS, which is out of scope per design §5 (TM-29/32). For the
+   all-traces theorems this is a sound STRENGTHENING (they are proved over a
+   superset of the real traces); the exists-trace witnesses use the newest
+   state. The alternative -- acceptance consuming/restoring the linear head --
+   makes TrustHead's sources recursive through every acceptance and blows the
+   plain-prover search out of the CI budget (measured: ~12x on the cheapest
+   acceptance ET alone). */
 rule Bootstrap_verified_v01:
     [ Fr(~vid), !AuthManifest(mid, $I, ver) ]
-  --[ TrustVerified(~vid, $I), VerifiedTrustMid(~vid, $I, mid) ]->
-    [ VerifierTrust(~vid, $I, ver, mid), TrustCursor(~vid, $I, ver, mid) ]
+  --[ TrustVerified(~vid, $I), VerifiedTrustMid(~vid, $I, mid)
+    , NewHead(~vid, $I, ver, mid, 'verified', 'clean') ]->
+    [ TrustHead(~vid, $I, ver, mid, 'verified', 'clean')
+    , !HeadState(~vid, $I, ver, mid, 'verified', 'clean') ]
 
 /* Verifier BOOTSTRAP over an unauthenticated path (§7.4 TOFU): the verifier
    adopts a published manifest reached over a non-TLS path (In token,
@@ -289,32 +330,40 @@ rule Bootstrap_tofu_v01:
     [ Fr(~vid)
     , !Manifest(mid, $I, ver)
     , In(<'tofu_fetch', $I>) ]
-  --[ TrustTOFU(~vid, $I) ]->
-    [ VerifierTrust(~vid, $I, ver, mid), TrustCursor(~vid, $I, ver, mid) ]
+  --[ TrustTOFU(~vid, $I)
+    , NewHead(~vid, $I, ver, mid, 'tofu', 'clean') ]->
+    [ TrustHead(~vid, $I, ver, mid, 'tofu', 'clean')
+    , !HeadState(~vid, $I, ver, mid, 'tofu', 'clean') ]
 
 /* ACCEPT (v0.1) -- signer key 'active in the EXACT trusted manifest `mid`, named
    by the EXACT envelope `kid`. Opaque In(<payload, kid, sig>); the entry is
-   resolved from !ManifestEntry(mid, kid, ...) with `mid` taken from VerifierTrust
-   (never a global (I, ver) lookup); verify(sig, payload, pubkey)=true is the
-   local-equality action discharged by signature_eq. Structural premises: version
-   dispatch (literal '0.1'), issuer binding ($I across payload/trust/kid),
-   kid-domain (<$I, kname>), status pattern 'active -- a 'compromised entry can
-   never fire this rule while the rejected submission trace is NOT deleted.
-   VerifierTrust is read-and-restored so a verifier can validate more than one
-   receipt. AcceptInfo carries the accepted manifest's ver/mid/alg. */
+   resolved from !ManifestEntry(mid, kid, ...) with `mid` taken from the UNIFIED
+   TrustHead (never a global (I, ver) lookup) -- so `mid` may be the bootstrap
+   manifest OR any continuity-adopted successor (C1 fix); verify(sig, payload,
+   pubkey)=true is the local-equality action discharged by signature_eq.
+   Structural premises: version dispatch (literal '0.1'), issuer binding ($I
+   across payload/trust/kid), kid-domain (<$I, kname>), status pattern 'active --
+   a 'compromised entry can never fire this rule while the rejected submission
+   trace is NOT deleted. Reads the persistent !HeadState snapshot (see the C1
+   note at Bootstrap_verified_v01) so a verifier can validate any number of
+   receipts without making the linear head's sources recursive. AcceptInfo
+   carries the accepted manifest's ver/mid/alg; AcceptProv carries the head
+   state's provenance + discontinuity flag, which the security theorems
+   condition on. */
 rule Accept_v01:
     let payload = <'0.1', 'receipt', rid, $I>
         kid     = <$I, kname>
     in
-    [ VerifierTrust(V, $I, ver, mid)
+    [ !HeadState(V, $I, ver, mid, prov, flag)
     , !ManifestEntry(mid, kid, alg, pubkey, pq, 'active')
     , In(<payload, kid, sig>) ]
   --[ Eq(verify(sig, payload, pubkey), true)
     , SignatureValid(V, $I, rid, kid)
     , Accept_v01(V, $I, rid, kid)
     , AcceptInfo(V, $I, rid, kid, ver, mid, alg)
+    , AcceptProv(V, prov, flag)
     , Ok(V, rid) ]->
-    [ VerifierTrust(V, $I, ver, mid) ]
+    [ ]
 
 /* ACCEPT (v0.1) -- retired-key branch (§11 step 3 asymmetry): a key 'retired in
    the trusted manifest still validates receipts, but MUST raise a warning. Same
@@ -323,16 +372,38 @@ rule Accept_v01_retired:
     let payload = <'0.1', 'receipt', rid, $I>
         kid     = <$I, kname>
     in
-    [ VerifierTrust(V, $I, ver, mid)
+    [ !HeadState(V, $I, ver, mid, prov, flag)
     , !ManifestEntry(mid, kid, alg, pubkey, pq, 'retired')
     , In(<payload, kid, sig>) ]
   --[ Eq(verify(sig, payload, pubkey), true)
     , SignatureValid(V, $I, rid, kid)
     , Accept_v01(V, $I, rid, kid)
     , AcceptInfo(V, $I, rid, kid, ver, mid, alg)
+    , AcceptProv(V, prov, flag)
     , Ok(V, rid)
     , RetiredKeyWarning(V, $I, kid) ]->
-    [ VerifierTrust(V, $I, ver, mid) ]
+    [ ]
+
+/* REJECT (v0.1, §7.3 fail-closed made EXPLICIT -- I4 fix): a submitted receipt
+   whose signature VERIFIES but whose envelope kid resolves to a 'compromised
+   entry of the trusted manifest is REJECTED. The accept rules never matching a
+   'compromised entry makes rejection implicit (absence of Ok); this rule makes
+   the SUBMISSION and the REJECTION first-class trace events, so the Group-B
+   witness can show a real forged submission reaching a verifier and being
+   turned away -- not merely that issuance and compromise coexist. Emits no Ok
+   and produces no state (fail-closed: nothing downstream). */
+rule Reject_v01_compromised:
+    let payload = <'0.1', 'receipt', rid, $I>
+        kid     = <$I, kname>
+    in
+    [ !HeadState(V, $I, ver, mid, prov, flag)
+    , !ManifestEntry(mid, kid, alg, pubkey, pq, 'compromised')
+    , In(<payload, kid, sig>) ]
+  --[ Eq(verify(sig, payload, pubkey), true)
+    , CompromisedSubmission(V, $I, rid, kid)
+    , Rejected(V, $I, rid, kid)
+    , RejectInfo(V, $I, rid, kid, ver, mid) ]->
+    [ ]
 
 /* CONTINUITY ADVANCE (§7.3 rotation continuity, auto-trust path) -- a verifier
    holding a trust cursor TrustCursor(V,I,ver,mid) adopts a CANDIDATE successor
@@ -351,22 +422,28 @@ rule Accept_v01_retired:
    checks are rule PREMISES (§5a): version-succession is the structural pattern
    vnext(ver); active-signer is the 'active status match; signature is the Eq idiom.
    NONE is a restriction.
-   TRUST-CURSOR SPLIT (tractability, mirrors the Task-2 acceptance fix): advances
-   operate on the linear TrustCursor, NOT on VerifierTrust (which Accept reads and
-   which stays Bootstrap-only, hence non-recursive -- preserving acceptance-search
-   speed). This rule is the ONLY UNFLAGGED way the cursor advances. Scope: the
-   add-key rotation (canonical §7.3 continuity, mixed keyset); it never flags ->
-   the clean branch. */
+   UNIFIED HEAD (C1 fix, replaces the T3-v1 trust-cursor split): the advance
+   operates on the SAME linear TrustHead the accept rules read, so an advanced
+   head authorizes receipts. The clean advance PRESERVES provenance and requires
+   an incoming 'clean flag (once flagged, trust never silently returns to clean --
+   §11.1 lineage taint). This rule is the ONLY UNFLAGGED way the head advances. */
 rule Verifier_Continuity_Advance_v01:
-    [ TrustCursor(V, $I, ver, mid)
+    [ TrustHead(V, $I, ver, mid, prov, 'clean')
     , !ManifestEntry(mid, signerKid, salg, spub, spq, 'active')
     , In(<'mhdr', $I, vnext(ver), mid2>)
+    /* C2 fix: the adopted target MUST resolve to its unique manifest/content
+       fact at the header's exact version -- a revealed active key can no longer
+       drive an advance to an ORPHAN mid2 that names no represented authority
+       set. (!Manifest is emitted once per mid, honest or attacker.) */
+    , !Manifest(mid2, $I, vnext(ver))
     , In(sig) ]
   --[ Eq(verify(sig, <'manifest', $I, vnext(ver), mid2>, spub), true)
     , AuthorityAdvance(V, $I, mid, mid2)
     , AdvanceSigner(V, $I, mid, signerKid)
-    , ContinuityAdvance(V, $I, mid, mid2, signerKid) ]->
-    [ TrustCursor(V, $I, vnext(ver), mid2) ]
+    , ContinuityAdvance(V, $I, mid, mid2, signerKid)
+    , NewHead(V, $I, vnext(ver), mid2, prov, 'clean') ]->
+    [ TrustHead(V, $I, vnext(ver), mid2, prov, 'clean')
+    , !HeadState(V, $I, vnext(ver), mid2, prov, 'clean') ]
 
 /* DISCONTINUOUS ROTATION (§7.3 failure path) -- a candidate that is NOT signed by
    a key 'active in the currently-trusted manifest (the signer key + its pubkey are
@@ -380,18 +457,28 @@ rule Verifier_Continuity_Advance_v01:
    FLAGGED (UnverifiedRotation at the same instant as the advance). The candidate
    signature is still checked (Eq idiom) so AdvanceSigner names a real signer, but
    under an attacker-supplied key -- exactly a signer NOT active in the trusted
-   manifest. */
+   manifest. UNIFIED HEAD (C1): consumes/produces the same TrustHead; provenance
+   is preserved, the outgoing flag is ALWAYS 'flagged (any incoming flag). */
 rule Verifier_Rotation_Discontinuous_v01:
-    [ TrustCursor(V, $I, ver, mid)
+    [ TrustHead(V, $I, ver, mid, prov, flag)
     , In(<'mhdr', $I, ver2, mid2>)
+    /* C2 fix: same target-content requirement as the clean branch -- even a
+       flagged adoption lands on a manifest that exists as content. */
+    , !Manifest(mid2, $I, ver2)
     , In(<'signer', signerKid, spub>)
     , In(sig) ]
   --[ Eq(verify(sig, <'manifest', $I, ver2, mid2>, spub), true)
     , AuthorityAdvance(V, $I, mid, mid2)
     , AdvanceSigner(V, $I, mid, signerKid)
     , UnverifiedRotation(V, $I)
-    , DiscontinuousRotation(V, $I, mid, mid2) ]->
-    [ TrustCursor(V, $I, ver2, mid2) ]
+    , DiscontinuousRotation(V, $I, mid, mid2)
+    /* I4 fix: expose the HEAD version vs CANDIDATE version at the check, so the
+       Group-B witnesses can pin same-version-conflict and structural-gap
+       candidates relative to what the verifier currently trusts. */
+    , DiscontinuousVer(V, $I, ver, ver2)
+    , NewHead(V, $I, ver2, mid2, prov, 'flagged') ]->
+    [ TrustHead(V, $I, ver2, mid2, prov, 'flagged')
+    , !HeadState(V, $I, ver2, mid2, prov, 'flagged') ]
 
 /* ---------------------------------------------------------------------------
    RESTRICTIONS -- local well-formedness / crypto-primitive equalities only (5a)
@@ -544,41 +631,128 @@ lemma sanity_continuity_advance:
    & #b < #c
    & #r < #c"
 
+/* C1 witness: acceptance UNDER THE ADVANCED HEAD, same verifier V end-to-end --
+   verified bootstrap at `mid`, clean continuity advance to `mid2`, then an Ok
+   whose AcceptInfo carries mid2 (a continuity-adopted manifest authorizes a
+   receipt), with verified/clean provenance at the acceptance and a genuinely
+   honest issuance under a mid2-active key. This is the executable link the
+   T3-v1 cursor split severed. */
+lemma sanity_accept_after_advance:
+  exists-trace
+  "Ex V I rid kid mid mid2 alg v2 #b #g #c #a #i.
+     VerifiedTrustMid(V, I, mid) @ #b
+   & GenesisMid(I, mid) @ #g
+   & AuthorityAdvance(V, I, mid, mid2) @ #c
+   & Ok(V, rid) @ #a
+   & AcceptInfo(V, I, rid, kid, v2, mid2, alg) @ #a
+   & AcceptProv(V, 'verified', 'clean') @ #a
+   & Issued(I, rid) @ #i
+   & UsesKey(I, kid) @ #i
+   & IssueMid(I, mid2, kid) @ #i
+   & (Ex #h. HybridActiveIn(I, mid2) @ #h)
+   & #b < #c
+   & #c < #a"
+
+/* C2 witness (multi-hop continuity across lifecycle kinds): the SAME verifier
+   advances CLEANLY twice -- genesis -> add-key successor mid2 -> sibling-
+   preserving COMPROMISE successor mid3 -- so a compromise mark is DELIVERED to
+   an existing verifier through the §7.3 continuity chain (not via a fresh
+   bootstrap). ContinuityAdvance on both hops pins the clean branch; this is
+   exactly the chain compromised_key_rejected needs to matter for advanced
+   verifiers, and it is only possible because retire/compromise successors now
+   emit the same continuity token add-key does (C2 fix). */
+lemma sanity_multihop_advance_compromise:
+  exists-trace
+  "Ex V I mid mid2 mid3 s1 s2 kidC #b #g #c1 #c2 #x.
+     VerifiedTrustMid(V, I, mid) @ #b
+   & GenesisMid(I, mid) @ #g
+   & ContinuityAdvance(V, I, mid, mid2, s1) @ #c1
+   & ContinuityAdvance(V, I, mid2, mid3, s2) @ #c2
+   & EntryCompromised(mid3, kidC) @ #x
+   & (Ex #h. HybridActiveIn(I, mid2) @ #h)
+   & #b < #c1
+   & #c1 < #c2"
+
 /* ---------------------------------------------------------------------------
    GROUP-B ADVERSARIAL REACHABILITY (exists-trace) -- the anti-own-goal group:
    for the negative Group-C theorems, show their premises are reachable WITH THE
    ATTACKER ACTING, so the theorems defeat a real bad trace, not a vacuous one.
    --------------------------------------------------------------------------- */
 
-/* An attacker-injected rotation candidate reaches the verifier's continuity check
-   and is REJECTED/flagged: the attacker REVEALS a key, signs a rotation candidate
-   with it, and the verifier -- unable to establish continuity (the signer is not
-   resolved from its trusted manifest) -- reports trust:"unverified_rotation"
-   (DiscontinuousRotation + UnverifiedRotation), never a silent clean adoption. The
-   flagged advance is signed by the revealed key, ordered after the reveal. */
-lemma reach_forged_rotation_rejected:
+/* I4 witness 1/3 (rotation, NON-ACTIVE OLD SIGNER -- the exact antecedent of
+   old_key_powerless): the attacker REVEALS a key that is NOT 'active in the
+   verifier's trusted manifest `mid` (no EntryActive(mid, signerKid) anywhere --
+   e.g. the genesis key after its retirement successor became the trust), signs
+   a rotation candidate with it, and the verifier -- unable to establish
+   continuity -- flags trust:"unverified_rotation" AT the check. */
+lemma reach_rotation_nonactive_signer_flagged:
   exists-trace
-  "Ex V I mid mid2 signerKid #k #d.
+  /* Positive anchors (EntryRetired in the trusted mid + verified bootstrap)
+     guide the plain-prover search to the concrete retired-key scenario; the
+     not-EntryActive conjunct -- the theorem's actual antecedent -- is kept and
+     checked over that concrete manifest. */
+  "Ex V I mid mid2 signerKid #k #d #q #b.
      RevealKey(signerKid) @ #k
+   & EntryRetired(mid, signerKid) @ #q
+   & VerifiedTrustMid(V, I, mid) @ #b
    & DiscontinuousRotation(V, I, mid, mid2) @ #d
    & AdvanceSigner(V, I, mid, signerKid) @ #d
    & UnverifiedRotation(V, I) @ #d
+   & not (Ex #s. EntryActive(mid, signerKid) @ #s)
    & #k < #d"
 
-/* A receipt bearing a compromised-marked key is submittable: an honest receipt was
-   issued under `kid` (Issued + UsesKey), `kid` is later marked 'compromised in a
-   manifest (Compromise + EntryCompromised(mid, kid)), and the attacker even holds
-   kid's material (RevealKey) so it can submit forged receipts under it -- all of
-   which compromised_key_rejected then proves a mid-trusting verifier rejects. */
+/* I4 witness 2/3 (rotation, SAME-VERSION CONFLICT delivered): an honest
+   rotation produced version v2 = vnext(v1); the attacker publishes a CONFLICTING
+   manifest midA carrying that SAME v2 (version learned from the public 'mhdr'
+   header) and presents it to a verifier whose head sits at v1 -- the candidate
+   claims the successor slot the honest manifest already occupies. The verifier
+   flags it at the check (DiscontinuousVer pins head-version v1 vs candidate
+   version v2). */
+lemma reach_rotation_same_version_flagged:
+  exists-trace
+  "Ex V I mid midA v1 v2 sk #r #f #d.
+     Rotate(I, v1, v2, sk) @ #r
+   & AttackerManifestVer(I, midA, v2) @ #f
+   & DiscontinuousRotation(V, I, mid, midA) @ #d
+   & DiscontinuousVer(V, I, v1, v2) @ #d
+   & UnverifiedRotation(V, I) @ #d"
+
+/* I4 witness 3/3 (rotation, STRUCTURAL GAP): the candidate's version is the
+   DOUBLE successor vnext(vnext(v)) of the version the verifier's head currently
+   trusts -- it skips a generation, so §7.3's every-intermediate-manifest check
+   cannot succeed and the verifier flags it. (vnext is a public constructor, so
+   the attacker can mint gap versions from any published header.) */
+lemma reach_rotation_gap_flagged:
+  exists-trace
+  "Ex V I mid midA v #f #d.
+     AttackerManifestVer(I, midA, vnext(vnext(v))) @ #f
+   & DiscontinuousRotation(V, I, mid, midA) @ #d
+   & DiscontinuousVer(V, I, v, vnext(vnext(v))) @ #d
+   & UnverifiedRotation(V, I) @ #d"
+
+/* I4 witness (compromised receipt SUBMITTED and REJECTED, end-to-end): an
+   honest receipt is issued under `kid`; `kid` is later marked 'compromised
+   (EntryCompromised in manifest `mid`); the attacker REVEALS kid's material and
+   AFTERWARD submits a forged receipt (a DIFFERENT rid2, signed from stolen
+   material) to a verifier whose trusted head is AT that compromised-marking
+   manifest `mid` -- and the verifier REJECTS it (Rejected + CompromisedSubmission
+   at the same instant, RejectInfo binding the same mid). This is the concrete
+   bad trace compromised_key_rejected defeats: submission, trust, and rejection
+   are all IN the witness now, not implied by absence. */
 lemma reach_compromised_receipt_submitted:
   exists-trace
-  "Ex I kid rid mid #i #c #x #r.
+  "Ex V I kid rid rid2 ver mid #i #c #x #r #j.
      Issued(I, rid) @ #i
    & UsesKey(I, kid) @ #i
    & Compromise(I, kid) @ #c
    & EntryCompromised(mid, kid) @ #x
    & RevealKey(kid) @ #r
-   & #i < #c"
+   & CompromisedSubmission(V, I, rid2, kid) @ #j
+   & Rejected(V, I, rid2, kid) @ #j
+   & RejectInfo(V, I, rid2, kid, ver, mid) @ #j
+   & not (rid2 = rid)
+   & #i < #c
+   & #r < #j"
 
 /* ---------------------------------------------------------------------------
    GROUP-C SECURITY THEOREMS (all-traces)
@@ -590,7 +764,11 @@ lemma reach_compromised_receipt_submitted:
    that is 'active in the PREVIOUSLY-trusted manifest mid (witnessed by an
    independent EntryActive(mid, signerKid) action emitted where that entry was
    created 'active) -- OR the state is flagged trust:"unverified_rotation"
-   (UnverifiedRotation). No unflagged, non-active-signed authority change exists.
+   (UnverifiedRotation) AT THE INSTANT OF THAT CHANGE (I3 fix: the flag is
+   required @ #c, not at an arbitrary trace point -- a later unrelated flagged
+   rotation can no longer retroactively excuse an earlier silent hijack; §11.1
+   lets a PRIOR discontinuity taint later trust, never a future event excuse a
+   past change). No unflagged, non-active-signed authority change exists.
    The EntryActive conjunct is INDEPENDENT of the advance rule's own labels (it is
    emitted by the manifest-creating rules), so deleting the 'active status premise
    from Verifier_Continuity_Advance_v01 falsifies this theorem (negative control). */
@@ -600,7 +778,7 @@ lemma rotation_no_hijack:
      AuthorityAdvance(V, I, mid, mid2) @ #c
    ==> ( (Ex signerKid #s. AdvanceSigner(V, I, mid, signerKid) @ #c
                           & EntryActive(mid, signerKid) @ #s)
-       | (Ex #u. UnverifiedRotation(V, I) @ #u) )"
+       | UnverifiedRotation(V, I) @ #c )"
 
 /* PROPERTY 3 -- compromise fails closed (§7.3 unconditional, §11 step 3). Once a
    verifier's trusted manifest `mid` marks a key `kid` 'compromised
@@ -619,29 +797,38 @@ lemma compromised_key_rejected:
      & EntryCompromised(mid, kid) @ #x)"
 
 /* PROPERTY 1 -- acceptance is authentic (§10, §11; TM-01/02). If a verifier
-   accepts a receipt (Ok) under a manifest `mid` it VERIFIED-trusts
-   (VerifiedTrustMid, i.e. the §7.4 TLS root, honest-only), then either the honest
-   issuer actually issued that receipt (Issued(I, rid)) OR the signing key `kid`
-   was revealed to the attacker (RevealKey(kid)) -- a receipt cannot be accepted
-   under a verified manifest without one of the two. The signing key is the exact
-   accepted authority (kid from AcceptInfo), so the reveal disjunct names a key that
-   was an accepted authority for I. */
+   accepts a receipt (Ok) under a VERIFIED-provenance, CLEAN (never-flagged)
+   trust head (AcceptProv at the acceptance -- §7.4 TLS root, possibly advanced
+   through §7.3 clean continuity; C1 fix: the head is the SAME state the advance
+   rules move, so `mid` here ranges over continuity-adopted successors too), then
+   either the honest issuer actually issued that receipt (Issued(I, rid)) OR some
+   key OF THAT ISSUER was revealed to the attacker before the acceptance.
+   The reveal disjunct is issuer-scoped rather than pinned to the accepted `kid`
+   (C1 consequence, deliberate): with clean continuity advances in scope, a
+   revealed CURRENTLY-ACTIVE key can sign a §7.3-valid successor candidate
+   carrying attacker keys -- the verifier then accepts attacker receipts under
+   the adopted manifest while the stolen key is the advance SIGNER, not the
+   accepted kid. Every such trace still requires stealing one of I's keys; with
+   NO reveal of I's keys, acceptance under a clean verified head implies honest
+   issuance. (All honest kids have the form <I, name>.) */
 lemma acceptance_issuer_signed [use_induction]:
   all-traces
   "All V I rid kid ver mid alg #a.
      Ok(V, rid) @ #a
    & AcceptInfo(V, I, rid, kid, ver, mid, alg) @ #a
-   & (Ex #t. VerifiedTrustMid(V, I, mid) @ #t)
+   & AcceptProv(V, 'verified', 'clean') @ #a
    ==> ( (Ex #i. Issued(I, rid) @ #i & #i < #a)
-       | (Ex #r. RevealKey(kid) @ #r & #r < #a) )"
+       | (Ex nm #r. RevealKey(<I, nm>) @ #r & #r < #a) )"
 
 /* PROPERTY 2 (continued) -- an OLD key is powerless (§7.3). Revealing a key that
    is NOT 'active in the currently-trusted manifest `mid` can never drive an
    UNFLAGGED authority change: if an authority advance is signed by `signerKid`,
    that key was revealed, and it is NOT active in `mid` (no EntryActive(mid,
-   signerKid)), then the advance MUST be flagged trust:"unverified_rotation". The
-   clean continuity rule requires an 'active-in-mid signer, so a non-active revealed
-   key can only drive the discontinuous (flagged) branch. */
+   signerKid)), then the advance MUST be flagged trust:"unverified_rotation"
+   AT THAT VERY ADVANCE (I3 fix: flag @ #c, same rationale as
+   rotation_no_hijack). The clean continuity rule requires an 'active-in-mid
+   signer, so a non-active revealed key can only drive the discontinuous
+   (flagged) branch. */
 lemma old_key_powerless:
   all-traces
   "All V I mid mid2 signerKid #c #k.
@@ -649,6 +836,6 @@ lemma old_key_powerless:
    & AdvanceSigner(V, I, mid, signerKid) @ #c
    & RevealKey(signerKid) @ #k
    & not (Ex #s. EntryActive(mid, signerKid) @ #s)
-   ==> (Ex #u. UnverifiedRotation(V, I) @ #u)"
+   ==> UnverifiedRotation(V, I) @ #c"
 
 end
