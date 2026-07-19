@@ -10,6 +10,16 @@ builtins: signing
    constructor now keeps this producer frozen and forward-compatible. */
 functions: pk_pq/1
 
+/* Public free successor constructor for manifest versions (review-3 fix 1).
+   Honest transitions mint version vnext(ver) from the parent's ver; the genesis
+   version is an opaque fresh nonce. Each honest rule publishes a public header
+   <'mhdr', I, ver, mid> (atomic terms only — no entry tuples, so no
+   deconstruction chains), which makes version terms attacker-knowable: an
+   attacker manifest can then carry an EXISTING honest version (same-version
+   conflict), a constructed vnext(x) (gap/successor candidate), or garbage.
+   Task 3's continuity rule consumes exactly this distinction. */
+functions: vnext/1
+
 /* Fresh-key registration, minimal, just to make the toolchain sanity trace runnable. */
 rule Register_Key:
     [ Fr(~sk) ]
@@ -36,7 +46,8 @@ rule Genesis_v01:
     , !KeyMat(kid, ~sk)
     , !Manifest(~mid, $I, ~ver)
     , !AuthManifest(~mid, $I, ~ver)
-    , IssuerGen($I, ~ver, ~mid, e1, 'none') ]
+    , IssuerGen($I, ~ver, ~mid, e1, 'none')
+    , Out(<'mhdr', $I, ~ver, ~mid>) ]
 
 /* Receipt issuance (§7.3): signs with a key that is 'active in SOME published
    manifest generation. Reads ONLY persistent facts (!ManifestEntry + !KeyMat) so
@@ -77,20 +88,21 @@ rule AddKey_Rotate_v01:
     in
     [ IssuerGen($I, ver, mid, e1, 'none')
     , !KeyMat(kidE, ~skE)
-    , Fr(~name2), Fr(~skH), Fr(~skPQ), Fr(~mid2), Fr(~ver2) ]
-  --[ Rotate($I, ver, ~ver2, kidE)
-    , NewManifest($I, ver, ~ver2)
-    , VerSucc($I, ver, ~ver2)
+    , Fr(~name2), Fr(~skH), Fr(~skPQ), Fr(~mid2) ]
+  --[ Rotate($I, ver, vnext(ver), kidE)
+    , NewManifest($I, ver, vnext(ver))
+    , VerSucc($I, ver, vnext(ver))
     , HybridActiveIn($I, ~mid2)
     , HybridKey($I, kidH) ]->
     [ !ManifestEntry(~mid2, kidE, algE, pk(~skE), pqE, 'active')
     , !ManifestEntry(~mid2, kidH, 'hybrid', pk(~skH), pk_pq(~skPQ), 'active')
     , !KeyMat(kidH, ~skH)
     , !PqKeyMat(kidH, ~skPQ)
-    , !Manifest(~mid2, $I, ~ver2)
-    , !AuthManifest(~mid2, $I, ~ver2)
-    , IssuerGen($I, ~ver2, ~mid2, e1, eH)
-    , Out(sign(<'manifest', $I, ~ver2, ~mid2, e1, eH>, ~skE)) ]
+    , !Manifest(~mid2, $I, vnext(ver))
+    , !AuthManifest(~mid2, $I, vnext(ver))
+    , IssuerGen($I, vnext(ver), ~mid2, e1, eH)
+    , Out(<'mhdr', $I, vnext(ver), ~mid2>)
+    , Out(sign(<'manifest', $I, vnext(ver), ~mid2, e1, eH>, ~skE)) ]
 
 /* Retire (§7.3, single-entry manifest): flip the sole active key to 'retired in a
    fresh successor, signed by that key while still 'active in the PARENT. The
@@ -102,13 +114,14 @@ rule Retire_Key_v01:
     in
     [ IssuerGen($I, ver, mid, e1, 'none')
     , !KeyMat(kid, ~sk)
-    , Fr(~mid2), Fr(~ver2) ]
-  --[ Retire($I, kid), NewManifest($I, ver, ~ver2), VerSucc($I, ver, ~ver2) ]->
+    , Fr(~mid2) ]
+  --[ Retire($I, kid), NewManifest($I, ver, vnext(ver)), VerSucc($I, ver, vnext(ver)) ]->
     [ !ManifestEntry(~mid2, kid, alg, pk(~sk), pq, 'retired')
-    , !Manifest(~mid2, $I, ~ver2)
-    , !AuthManifest(~mid2, $I, ~ver2)
-    , IssuerGen($I, ~ver2, ~mid2, e1r, 'none')
-    , Out(sign(<'manifest', $I, ~ver2, ~mid2, e1r>, ~sk)) ]
+    , !Manifest(~mid2, $I, vnext(ver))
+    , !AuthManifest(~mid2, $I, vnext(ver))
+    , IssuerGen($I, vnext(ver), ~mid2, e1r, 'none')
+    , Out(<'mhdr', $I, vnext(ver), ~mid2>)
+    , Out(sign(<'manifest', $I, vnext(ver), ~mid2, e1r>, ~sk)) ]
 
 /* Compromise-marking (§7.3 fail-closed, single-entry manifest): flip the sole
    active key to 'compromised in a fresh successor, signing the FULL compromised
@@ -121,13 +134,14 @@ rule Compromise_Key_v01:
     in
     [ IssuerGen($I, ver, mid, e1, 'none')
     , !KeyMat(kid, ~sk)
-    , Fr(~mid2), Fr(~ver2) ]
-  --[ Compromise($I, kid), NewManifest($I, ver, ~ver2), VerSucc($I, ver, ~ver2) ]->
+    , Fr(~mid2) ]
+  --[ Compromise($I, kid), NewManifest($I, ver, vnext(ver)), VerSucc($I, ver, vnext(ver)) ]->
     [ !ManifestEntry(~mid2, kid, alg, pk(~sk), pq, 'compromised')
-    , !Manifest(~mid2, $I, ~ver2)
-    , !AuthManifest(~mid2, $I, ~ver2)
-    , IssuerGen($I, ~ver2, ~mid2, e1c, 'none')
-    , Out(sign(<'manifest', $I, ~ver2, ~mid2, e1c>, ~sk)) ]
+    , !Manifest(~mid2, $I, vnext(ver))
+    , !AuthManifest(~mid2, $I, vnext(ver))
+    , IssuerGen($I, vnext(ver), ~mid2, e1c, 'none')
+    , Out(<'mhdr', $I, vnext(ver), ~mid2>)
+    , Out(sign(<'manifest', $I, vnext(ver), ~mid2, e1c>, ~sk)) ]
 
 /* Compromise ONE entry, preserve the sibling (two-entry manifest): flip the
    slot-2 entry to 'compromised while PRESERVING the slot-1 sibling 'active, signed
@@ -143,14 +157,63 @@ rule Compromise_One_Preserve_Sibling_v01:
     [ IssuerGen($I, ver, mid, eS, eC)
     , !KeyMat(kidC, ~skC)
     , !KeyMat(kidS, ~skS)
-    , Fr(~mid2), Fr(~ver2) ]
-  --[ Compromise($I, kidC), NewManifest($I, ver, ~ver2), VerSucc($I, ver, ~ver2) ]->
+    , Fr(~mid2) ]
+  --[ Compromise($I, kidC), NewManifest($I, ver, vnext(ver)), VerSucc($I, ver, vnext(ver)) ]->
     [ !ManifestEntry(~mid2, kidS, algS, pk(~skS), pqS, 'active')
     , !ManifestEntry(~mid2, kidC, algC, pk(~skC), pqC, 'compromised')
-    , !Manifest(~mid2, $I, ~ver2)
-    , !AuthManifest(~mid2, $I, ~ver2)
-    , IssuerGen($I, ~ver2, ~mid2, eS, eCc)
-    , Out(sign(<'manifest', $I, ~ver2, ~mid2, eS, eCc>, ~skS)) ]
+    , !Manifest(~mid2, $I, vnext(ver))
+    , !AuthManifest(~mid2, $I, vnext(ver))
+    , IssuerGen($I, vnext(ver), ~mid2, eS, eCc)
+    , Out(<'mhdr', $I, vnext(ver), ~mid2>)
+    , Out(sign(<'manifest', $I, vnext(ver), ~mid2, eS, eCc>, ~skS)) ]
+
+/* Compromise SLOT-1 entry, preserve the SLOT-2 sibling (review-3 fix 3): the
+   mirror of the rule above — flips the slot-1 entry (e.g. the legacy Ed-only key
+   E) to 'compromised while PRESERVING the slot-2 sibling (e.g. the hybrid key H)
+   'active, signed by the surviving sibling. This makes an ALL-HYBRID active
+   authority set reachable (E compromised, only H active), which the
+   no_downgrade_*_allhybrid theorems (Task 6) quantify over — without it they
+   would verify vacuously. */
+rule Compromise_Slot1_Preserve_Sibling_v01:
+    let eC  = <kidC, algC, pk(~skC), pqC, 'active'>
+        eS  = <kidS, algS, pk(~skS), pqS, 'active'>
+        eCc = <kidC, algC, pk(~skC), pqC, 'compromised'>
+    in
+    [ IssuerGen($I, ver, mid, eC, eS)
+    , !KeyMat(kidC, ~skC)
+    , !KeyMat(kidS, ~skS)
+    , Fr(~mid2) ]
+  --[ Compromise($I, kidC), NewManifest($I, ver, vnext(ver)), VerSucc($I, ver, vnext(ver)) ]->
+    [ !ManifestEntry(~mid2, kidC, algC, pk(~skC), pqC, 'compromised')
+    , !ManifestEntry(~mid2, kidS, algS, pk(~skS), pqS, 'active')
+    , !Manifest(~mid2, $I, vnext(ver))
+    , !AuthManifest(~mid2, $I, vnext(ver))
+    , IssuerGen($I, vnext(ver), ~mid2, eCc, eS)
+    , Out(<'mhdr', $I, vnext(ver), ~mid2>)
+    , Out(sign(<'manifest', $I, vnext(ver), ~mid2, eCc, eS>, ~skS)) ]
+
+/* Retire SLOT-1 entry, preserve the SLOT-2 sibling (review-3 fix 3): sibling-
+   preserving retirement — the slot-1 entry goes 'retired while the slot-2 sibling
+   stays 'active, signed by the surviving sibling. Together with the rule above
+   this covers the §7.3 lifecycle where the legacy key is decommissioned (retired
+   or compromised) and the added key carries the authority forward. */
+rule Retire_Slot1_Preserve_Sibling_v01:
+    let eR  = <kidR, algR, pk(~skR), pqR, 'active'>
+        eS  = <kidS, algS, pk(~skS), pqS, 'active'>
+        eRr = <kidR, algR, pk(~skR), pqR, 'retired'>
+    in
+    [ IssuerGen($I, ver, mid, eR, eS)
+    , !KeyMat(kidR, ~skR)
+    , !KeyMat(kidS, ~skS)
+    , Fr(~mid2) ]
+  --[ Retire($I, kidR), NewManifest($I, ver, vnext(ver)), VerSucc($I, ver, vnext(ver)) ]->
+    [ !ManifestEntry(~mid2, kidR, algR, pk(~skR), pqR, 'retired')
+    , !ManifestEntry(~mid2, kidS, algS, pk(~skS), pqS, 'active')
+    , !Manifest(~mid2, $I, vnext(ver))
+    , !AuthManifest(~mid2, $I, vnext(ver))
+    , IssuerGen($I, vnext(ver), ~mid2, eRr, eS)
+    , Out(<'mhdr', $I, vnext(ver), ~mid2>)
+    , Out(sign(<'manifest', $I, vnext(ver), ~mid2, eRr, eS>, ~skS)) ]
 
 /* ---------------------------------------------------------------------------
    ATTACKER SIDE
@@ -172,12 +235,20 @@ rule Reveal_Key:
    Task 6. */
 rule Attacker_Manifest_v01:
     let kid_att = <$I, ~nameA> in
-    [ In(<'forge', $I>), Fr(~nameA), Fr(~midA), Fr(~verA), Fr(~skA) ]
-  --[ AttackerManifest($I, ~midA) ]->
-    [ !Manifest(~midA, $I, ~verA)
+    [ In(<'forge', $I, verA>), Fr(~nameA), Fr(~midA), Fr(~skA) ]
+  --[ AttackerManifest($I, ~midA), AttackerManifestVer($I, ~midA, verA) ]->
+    [ !Manifest(~midA, $I, verA)
     , !ManifestEntry(~midA, kid_att, 'ed_only', pk(~skA), 'none', 'active')
-    , !KeyMat(kid_att, ~skA)
     , Out(~skA) ]
+    /* Review-3 fixes 1+2: (1) the VERSION is attacker-chosen from In() — it can
+       equal a published honest version (same-version conflict, knowable from the
+       'mhdr' headers), be vnext(x) of a known version (successor/gap candidate),
+       or be garbage; freshness no longer erases the conflict cases §7.3 requires.
+       (2) NO !KeyMat is emitted for the attacker key: !KeyMat is honest-issuer
+       key material, so Issue_Receipt_v01 can never emit the issuer-honesty event
+       `Issued` under an attacker key. The attacker still KNOWS ~skA (leaked via
+       Out) and can sign receipts itself from knowledge — the Task 6 TOFU-forgery
+       exhibit needs exactly that, not the honest issuance rule. */
 
 /* ---------------------------------------------------------------------------
    VERIFIER SIDE
@@ -274,6 +345,7 @@ lemma sanity_v01_accept:
    & VerifiedTrustMid(V, I, mid) @ #t
    & GenesisMid(I, mid) @ #g
    & Issued(I, rid) @ #i
+   & UsesKey(I, kid) @ #i
    & #i < #a"
 
 /* Rotation then accept: acceptance under the ROTATED (successor) manifest,
@@ -285,6 +357,7 @@ lemma sanity_rotate_then_accept:
   "Ex I v1 v2 sk V rid kid mid alg #r #i #a #t.
      Rotate(I, v1, v2, sk) @ #r
    & Issued(I, rid) @ #i
+   & UsesKey(I, kid) @ #i
    & Accept_v01(V, I, rid, kid) @ #a
    & AcceptInfo(V, I, rid, kid, v2, mid, alg) @ #a
    & VerifiedTrustMid(V, I, mid) @ #t
@@ -297,10 +370,17 @@ lemma sanity_rotate_then_accept:
    REAL pk_pq(~skPQ) material. */
 lemma sanity_mixed_keyset:
   exists-trace
-  "Ex I V rid kid mid v #a #h #t.
+  /* Review-3 fix 4: the witness must be an HONEST issuance-then-acceptance under
+     the mixed manifest (prior Issued + UsesKey for the accepted kid + IssueMid on
+     the same mid, ordered) — a Reveal_Key+forge trace no longer satisfies it. */
+  "Ex I V rid kid mid v #a #h #t #i.
      AcceptInfo(V, I, rid, kid, v, mid, 'ed_only') @ #a
    & HybridActiveIn(I, mid) @ #h
-   & VerifiedTrustMid(V, I, mid) @ #t"
+   & VerifiedTrustMid(V, I, mid) @ #t
+   & Issued(I, rid) @ #i
+   & UsesKey(I, kid) @ #i
+   & IssueMid(I, mid, kid) @ #i
+   & #i < #a"
 
 /* Envelope kid is resolved exactly: a receipt whose transmitted `kid` equals the
    key the issuer signed with (UsesKey at the honest issuance #i) is accepted
@@ -327,6 +407,7 @@ lemma sanity_retired_key_receipt_still_accepts:
   exists-trace
   "Ex I kid V rid mid alg v #i #ret #a #t.
      Issued(I, rid) @ #i
+   & UsesKey(I, kid) @ #i
    & Retire(I, kid) @ #ret
    & Accept_v01(V, I, rid, kid) @ #a
    & AcceptInfo(V, I, rid, kid, v, mid, alg) @ #a
@@ -357,5 +438,16 @@ lemma sanity_attacker_distinct_mid:
      VerifiedTrustMid(V, I, mid_h) @ #b
    & AttackerManifest(I, mid_a) @ #f
    & not (mid_h = mid_a)"
+
+/* Review-3 fix 1 demonstrator: a SAME-VERSION CONFLICT is reachable — the
+   attacker publishes a manifest carrying the SAME version v2 that an honest
+   rotation produced (learned from the public 'mhdr' header). §7.3's conflicting-
+   manifests case is therefore representable; Task 3's continuity rule consumes
+   exactly this distinction (same-version vs successor vs gap). */
+lemma sanity_same_version_conflict:
+  exists-trace
+  "Ex I v1 v2 sk midA #r #f.
+     Rotate(I, v1, v2, sk) @ #r
+   & AttackerManifestVer(I, midA, v2) @ #f"
 
 end
