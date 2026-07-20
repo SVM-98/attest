@@ -1430,11 +1430,14 @@ lemma revoked_view_never_ok:
    that issuer ever revealed. Stated at the ADMISSION point because that is where
    rev_record_authentic is stated, so this is exactly that lemma's boundary: under
    TOFU trust record authenticity does not hold, which is TM-11 and is what §7.4
-   warns about. Honoring follows by class dispatch, which carries no crypto
-   (Honor_Revocation_policy consumes !AuthRevRecord + !Revocability only); the
-   honor-level variant of this witness was measured intractable (the honor chain
-   crossed with the two global negatives exceeded 585s), so the cheap
-   admission-level form is what ships. */
+   warns about. SCOPE OF THIS WITNESS (re-review Q3): it reaches the model's
+   authentication DECISION and produces !AuthRevRecord -- it is not a mere
+   submission of a forgery -- but it does NOT entail downstream honoring, and this
+   formula cannot: with no RevClass / !Revocability anchor, nothing here forces a
+   dispatch rule to fire. That does not weaken it as a counterexample to UNSCOPED
+   admission authenticity, which is what it exists to be. The honor-level variant
+   was measured intractable (the honor chain crossed with the two global negatives
+   exceeded 585s), so the admission-level form is what ships. */
 lemma attack_tofu_revocation_forgery:
   exists-trace
   "Ex V I rid kid recTime midA #f #b #a.
