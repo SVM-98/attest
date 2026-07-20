@@ -298,6 +298,13 @@ rule Attacker_Manifest_v01:
        knowledge and no forged candidate can ever be PRESENTED to a verifier
        (the Group-B witnesses would be unreachable by construction). */
     , Out(<'mhdr', $I, verA, ~midA>)
+    /* T4b fix: the forged entry's key NAME is published for exactly the reason
+       the line below publishes ~midA. Without it the attacker could never put
+       its own kid <$I, ~nameA> into any envelope, so no rule matching
+       kid = <$I, kname> could ever fire on a forged entry -- which silently
+       made the TOFU branch unreachable and let an all-heads authenticity claim
+       look provable. A published manifest's key ids are public by definition. */
+    , Out(~nameA)
     , Out(~skA) ]
     /* Review-3 fixes 1+2: (1) the VERSION is attacker-chosen from In() — it can
        equal a published honest version (same-version conflict, knowable from the
@@ -621,8 +628,12 @@ rule Admit_Revocation_Record:
     , !ManifestEntry(mid, kid, alg, pubkey, pq, 'active')
     , In(<body, kid, sig>) ]
   --[ Eq(verify(sig, body, pubkey), true)
-    , RevRecordAdmitted(V, $I, rid, kid, recTime, mid) ]->
-    [ !AuthRevRecord(V, $I, rid, kid, recTime, mid) ]
+    , RevRecordAdmitted(V, $I, rid, kid, recTime, mid)
+    /* T4b: the head's provenance and discontinuity flag at the moment of
+       admission, co-timed with the admission itself, so the authenticity lemma
+       can be scoped to clean-verified trust exactly like acceptance is. */
+    , RevAdmitProv(V, prov, flag) ]->
+    [ !AuthRevRecord(V, $I, rid, kid, recTime, mid, prov, flag) ]
 
 /* Verifier HONOR (refund_window branch) -- §5a premise discipline, ALL checks
    are rule premises: (1) the record is ADMITTED (authenticated against V's
@@ -633,10 +644,11 @@ rule Admit_Revocation_Record:
    refund_window_bound; AuthMatchingInClassInWindow marks the full-guard instant
    for the ignore-side effectiveness reasoning. */
 rule Honor_Revocation_refund_window:
-    [ !AuthRevRecord(V, $I, rid, kid, recTime, mid)
+    [ !AuthRevRecord(V, $I, rid, kid, recTime, mid, prov, flag)
     , !Revocability(rid, 'refund_window')
     , !InWindow(rid, recTime) ]
   --[ RevocationHonored(V, rid)
+    , RevHonorProv(V, prov, flag)
     , RevHonorInfo(V, $I, rid, kid, recTime, mid)
     , ClassHonorable(rid)
     , WindowOk(rid, recTime)
@@ -651,9 +663,10 @@ rule Honor_Revocation_refund_window:
    'policy: no window applies), but HonoredClass names 'policy so
    refund_window_bound does not apply to it. */
 rule Honor_Revocation_policy:
-    [ !AuthRevRecord(V, $I, rid, kid, recTime, mid)
+    [ !AuthRevRecord(V, $I, rid, kid, recTime, mid, prov, flag)
     , !Revocability(rid, 'policy') ]
   --[ RevocationHonored(V, rid)
+    , RevHonorProv(V, prov, flag)
     , RevHonorInfo(V, $I, rid, kid, recTime, mid)
     , ClassHonorable(rid)
     , WindowOk(rid, recTime)
@@ -668,7 +681,7 @@ rule Honor_Revocation_policy:
    admitted records (see Admit_Revocation_Record). RevIgnoreInfo carries
    (recTime, mid) for witness anchoring. */
 rule Ignore_Revocation_none:
-    [ !AuthRevRecord(V, $I, rid, kid, recTime, mid)
+    [ !AuthRevRecord(V, $I, rid, kid, recTime, mid, prov, flag)
     , !Revocability(rid, 'none') ]
   --[ RevocationIgnored(V, rid, 'class_none')
     , RevIgnoreInfo(V, $I, rid, recTime, mid) ]->
@@ -679,7 +692,7 @@ rule Ignore_Revocation_none:
    acceptance untouched (§12.2 refund_window row, out-of-window case).
    Coin-flipped mirror. */
 rule Ignore_Revocation_out_of_window:
-    [ !AuthRevRecord(V, $I, rid, kid, recTime, mid)
+    [ !AuthRevRecord(V, $I, rid, kid, recTime, mid, prov, flag)
     , !Revocability(rid, 'refund_window')
     , !NotInWindow(rid, recTime) ]
   --[ RevocationIgnored(V, rid, 'out_of_window')
@@ -1007,6 +1020,25 @@ lemma reach_compromised_receipt_submitted:
    GROUP-C SECURITY THEOREMS (all-traces)
    --------------------------------------------------------------------------- */
 
+/* HEAD HONESTY [reuse, use_induction] -- the attacker-manifest branch, discharged
+   ONCE. A clean-verified head can only name an attacker-published manifest if some
+   key of that issuer was revealed first: Bootstrap_verified_v01 consumes
+   !AuthManifest, which Attacker_Manifest_v01 never emits (base case), and the only
+   way onward while staying ('verified','clean') is Verifier_Continuity_Advance_v01,
+   whose signer must be 'active in the CURRENTLY trusted manifest -- honest key,
+   hence a reveal (step case; the discontinuous branch always sets 'flagged, so it
+   cannot reach this head state). Proving this separately is what makes
+   rev_record_authentic tractable under a FAITHFUL attacker: without it the main
+   induction re-derives this argument at every admission step, and the whole lemma
+   exceeded the prover budget in all three shapes tried (clean-verified conditioned,
+   all-heads classification, public-name attacker). */
+lemma verified_clean_head_honest [reuse, use_induction]:
+  all-traces
+  "All V I ver mid #n.
+     NewHead(V, I, ver, mid, 'verified', 'clean') @ #n
+   & (Ex #f. AttackerManifest(I, mid) @ #f)
+     ==> (Ex nm #r. RevealKey(<I, nm>) @ #r & #r < #n)"
+
 /* PROPERTY 2 -- rotation not hijackable (§7.3, §11.1; TM-28). ANY change of a
    verifier's authority set (an AuthorityAdvance of its trust cursor to a new
    manifest mid2) is EITHER continuity-valid -- its candidate was signed by a key
@@ -1158,12 +1190,19 @@ lemma sanity_issued_receipt_revoked:
    machine-checked instance. */
 lemma reach_refund_window_honored:
   exists-trace
-  "Ex V I rid kid recTime mid #g #b #p #vi #w #h.
+  "Ex V I rid kid recTime mid #g #b #p #vi #a #w #h.
      GenesisMid(I, mid) @ #g
    & VerifiedTrustMid(V, I, mid) @ #b
    & RevClass(rid, 'refund_window') @ #p
    & RevocationIssued(I, rid, kid, recTime) @ #vi
    & RevSignerMid(I, rid, kid, mid) @ #vi
+   /* T4b anchor: pin the admission to the honest CLEAN-VERIFIED head. With a
+      faithful attacker the unanchored search wanders through forged-manifest
+      admissions before reaching the honest trace (measured: >570s); this also
+      makes the witness say what it should -- the refund-window path works under
+      verified trust. */
+   & RevRecordAdmitted(V, I, rid, kid, recTime, mid) @ #a
+   & RevAdmitProv(V, 'verified', 'clean') @ #a
    & InWindowActive(rid, recTime) @ #w
    & RevocationHonored(V, rid) @ #h
    & HonoredClass(rid, 'refund_window') @ #h
@@ -1174,10 +1213,13 @@ lemma reach_refund_window_honored:
    coin branch is reachable). */
 lemma reach_revocation_out_of_window:
   exists-trace
-  "Ex V I rid rec mid #g #b #p #o #ig.
+  "Ex V I rid kid rec mid #g #b #p #a #o #ig.
      GenesisMid(I, mid) @ #g
    & VerifiedTrustMid(V, I, mid) @ #b
    & RevClass(rid, 'refund_window') @ #p
+   /* T4b anchor: same reason as reach_refund_window_honored above. */
+   & RevRecordAdmitted(V, I, rid, kid, rec, mid) @ #a
+   & RevAdmitProv(V, 'verified', 'clean') @ #a
    & OutWindowMark(rid, rec) @ #o
    & RevocationIgnored(V, rid, 'out_of_window') @ #ig
    & RevIgnoreInfo(V, I, rid, rec, mid) @ #ig
@@ -1220,25 +1262,26 @@ lemma reach_revoked_then_rejected:
    (distinct tag, no receipt/rotation collision), emitting RevocationIssued -- or
    SOME key of that issuer was revealed to the attacker beforehand (ISSUER-SCOPED
    reveal).
-   *** SCOPE CAVEAT (2026-07-20, found AFTER this lemma was proved; OPEN decision,
-   see task-4-report.md "TOFU artifact"). This lemma is unconditioned on head
-   provenance and it VERIFIES -- but the all-heads scope is an ARTIFACT of the
-   attacker model, not a protocol property, and the justification originally
-   written here (that reaching an attacker manifest requires a §7.3 advance signed
-   by a real chain key, hence a reveal) is WRONG: Bootstrap_tofu_v01 consumes
-   !Manifest, so a TOFU verifier adopts an attacker manifest with NO reveal
-   anywhere, and Admit_Revocation_Record reads prov/flag FREE, so it fires on that
-   head. What actually blocks the counterexample is that Attacker_Manifest_v01
-   publishes ~midA and ~skA but NOT ~nameA, the key-name half of its own entry's
-   kid -- so the attacker can never NAME the key it just forged in an envelope.
-   Machine-checked: the probe asserting exactly that counterexample (attacker
-   manifest + TOFU head + admitted record + no RevealKey(<I,.>) + no
-   RevocationIssued) is FALSIFIED in 140 steps and EVERY branch closes on
-   solve(!KU(~nameA)), including all seven continuity-advance cases; adding the
-   single line Out(~nameA) to that rule makes the SAME probe VERIFY in 8 steps,
-   and a TOFU-forged ACCEPTANCE (TM-11) in 14. Under a faithful attacker the
-   honest scope is a CLEAN-VERIFIED head, mirroring acceptance_issuer_signed.
-   Probes and prover output: .superpowers/sdd/t4-mutants/probe{2,3}.spthy. ***
+   SCOPE, and why it is a CLEAN-VERIFIED one (T4b; the history matters because an
+   earlier version of this lemma claimed ALL heads). Trust provenance is required
+   here for the same reason acceptance_issuer_signed requires it: under TOFU
+   (§7.4) a verifier adopts whatever manifest it is handed, so a record signed by
+   the adopter's own forged key is admitted with no reveal and no honest issuance.
+   That trace is not hypothetical -- it is exhibited, machine-checked, by
+   attack_tofu_revocation_forgery at the end of this theory. The earlier all-heads
+   claim was provable only because Attacker_Manifest_v01 did not publish ~nameA,
+   the key-name half of its own entry's kid, so the attacker could never NAME the
+   key it had just forged; the probe asserting the counterexample was falsified in
+   140 steps with EVERY branch closing on solve(!KU(~nameA)), including all seven
+   continuity-advance cases. That rule now publishes the name, and the boundary is
+   stated instead of hidden. Probes and prover output:
+   .superpowers/sdd/t4-mutants/probe{2,3}.spthy.
+   TRACTABILITY: with a faithful attacker this lemma does NOT prove on its own
+   within the prover budget in any shape tried (clean-verified conditioned,
+   all-heads classification, attacker-chosen public key name -- all >560s). It
+   becomes provable once verified_clean_head_honest discharges the
+   attacker-manifest branch ONCE as a [reuse] lemma instead of letting this
+   induction re-derive it at every admission step: 92 + 4775 steps, 461s together.
    Issuer-scoping (not
    exact-kid) is REQUIRED: the record's own signer key may be the attacker's own
    fabricated <I,name'> whose secret was never in honest !KeyMat (never a
@@ -1249,12 +1292,12 @@ lemma reach_revoked_then_rejected:
    RevocationIssued nor a reveal. As a [reuse] lemma it is available to soundness,
    which chains through it without re-deriving the induction (the argument inlined
    into the honored-event all-traces search did not terminate at 590s --
-   run-b3-sound590.out; this standalone admission-point form verifies in ~465s --
-   run-e1-uncond.out). */
+   run-b3-sound590.out; this standalone admission-point form is what verifies). */
 lemma rev_record_authentic [reuse, use_induction]:
   all-traces
   "All V I rid kid recTime mid #a.
      RevRecordAdmitted(V, I, rid, kid, recTime, mid) @ #a
+   & RevAdmitProv(V, 'verified', 'clean') @ #a
      ==> ( (Ex #vi. RevocationIssued(I, rid, kid, recTime) @ #vi & #vi < #a)
          | (Ex nm #r. RevealKey(<I, nm>) @ #r & #r < #a) )"
 
@@ -1280,6 +1323,7 @@ lemma revocation_auth_soundness:
   "All V rid I kid recTime mid #h.
      RevocationHonored(V, rid) @ #h
    & RevHonorInfo(V, I, rid, kid, recTime, mid) @ #h
+   & RevHonorProv(V, 'verified', 'clean') @ #h
      ==> ( (Ex #s. EntryActive(mid, kid) @ #s)
          & ClassHonorable(rid) @ #h
          & WindowOk(rid, recTime) @ #h
@@ -1374,5 +1418,31 @@ lemma refund_window_bound:
 lemma revoked_view_never_ok:
   all-traces
   "not (Ex V rid #o. Ok(V, rid) @ #o & ConsultedHonored(V, rid) @ #o)"
+
+
+/* ATTACK EXHIBIT (T4b) -- TOFU-forged revocation, machine-checked. This is the
+   trace the pre-T4b model could not express: because Attacker_Manifest_v01 did
+   not publish its own key NAME, no forged kid could ever appear in an envelope,
+   and the authenticity lemma looked provable for ALL heads. With a faithful
+   attacker the trace exists and is exhibited here rather than hidden: a verifier
+   that bootstrapped over TOFU (§7.4) onto an attacker-published manifest ADMITS
+   as authentic a revocation record the honest issuer NEVER issued, with NO key of
+   that issuer ever revealed. Stated at the ADMISSION point because that is where
+   rev_record_authentic is stated, so this is exactly that lemma's boundary: under
+   TOFU trust record authenticity does not hold, which is TM-11 and is what §7.4
+   warns about. Honoring follows by class dispatch, which carries no crypto
+   (Honor_Revocation_policy consumes !AuthRevRecord + !Revocability only); the
+   honor-level variant of this witness was measured intractable (the honor chain
+   crossed with the two global negatives exceeded 585s), so the cheap
+   admission-level form is what ships. */
+lemma attack_tofu_revocation_forgery:
+  exists-trace
+  "Ex V I rid kid recTime midA #f #b #a.
+     AttackerManifest(I, midA) @ #f
+   & TrustTOFU(V, I) @ #b
+   & RevRecordAdmitted(V, I, rid, kid, recTime, midA) @ #a
+   & RevAdmitProv(V, 'tofu', 'clean') @ #a
+   & not (Ex nm #r. RevealKey(<I, nm>) @ #r)
+   & not (Ex #vi. RevocationIssued(I, rid, kid, recTime) @ #vi)"
 
 end
