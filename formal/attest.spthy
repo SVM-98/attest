@@ -1213,11 +1213,27 @@ lemma reach_revoked_then_rejected:
    -- the ONLY honest producer of a verify-true <'revoke', ...> signature
    (distinct tag, no receipt/rotation collision), emitting RevocationIssued -- or
    SOME key of that issuer was revealed to the attacker beforehand (ISSUER-SCOPED
-   reveal). ALL HEADS (no clean-verified condition needed): issuer-scoping is
-   sound even for a flagged attacker-manifest trace, because reaching an attacker
-   manifest whose active entry is <I,name'> still requires the attacker to have
-   driven a §7.3 advance signed by an active key of I's real trust chain -- i.e.
-   RevealKey(<I,nm>) for some nm -- so the disjunct holds. Issuer-scoping (not
+   reveal).
+   *** SCOPE CAVEAT (2026-07-20, found AFTER this lemma was proved; OPEN decision,
+   see task-4-report.md "TOFU artifact"). This lemma is unconditioned on head
+   provenance and it VERIFIES -- but the all-heads scope is an ARTIFACT of the
+   attacker model, not a protocol property, and the justification originally
+   written here (that reaching an attacker manifest requires a §7.3 advance signed
+   by a real chain key, hence a reveal) is WRONG: Bootstrap_tofu_v01 consumes
+   !Manifest, so a TOFU verifier adopts an attacker manifest with NO reveal
+   anywhere, and Admit_Revocation_Record reads prov/flag FREE, so it fires on that
+   head. What actually blocks the counterexample is that Attacker_Manifest_v01
+   publishes ~midA and ~skA but NOT ~nameA, the key-name half of its own entry's
+   kid -- so the attacker can never NAME the key it just forged in an envelope.
+   Machine-checked: the probe asserting exactly that counterexample (attacker
+   manifest + TOFU head + admitted record + no RevealKey(<I,.>) + no
+   RevocationIssued) is FALSIFIED in 140 steps and EVERY branch closes on
+   solve(!KU(~nameA)), including all seven continuity-advance cases; adding the
+   single line Out(~nameA) to that rule makes the SAME probe VERIFY in 8 steps,
+   and a TOFU-forged ACCEPTANCE (TM-11) in 14. Under a faithful attacker the
+   honest scope is a CLEAN-VERIFIED head, mirroring acceptance_issuer_signed.
+   Probes and prover output: .superpowers/sdd/t4-mutants/probe{2,3}.spthy. ***
+   Issuer-scoping (not
    exact-kid) is REQUIRED: the record's own signer key may be the attacker's own
    fabricated <I,name'> whose secret was never in honest !KeyMat (never a
    Reveal_Key target), so exact-kid RevealKey(kid) would be FALSE though an
