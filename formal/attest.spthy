@@ -696,10 +696,16 @@ rule Ignore_Revocation_out_of_window:
    source cost -- binding the envelope In() directly (with the free unverified
    sig, or crossed with Eq(verify) and the deep !HonoredRevocation honor chain)
    either opened a partial deconstruction or taxed the whole theory's source
-   computation past 590s (run-d3-postf7.out / run-f1-decouple.out). The SAME
-   issued receipt either drives Accept_v01 (Ok, when V's view withholds the
-   record) or this reject (when V consults the honored revocation) -- a true
-   accept-path sibling.
+   computation past 590s (run-d3-postf7.out / run-f1-decouple.out).
+   ABSTRACTION, STATED EXPLICITLY (re-review Q2): this rule ABSTRACTS the
+   submitted receipt rather than CONSUMING the actual envelope -- it reads the
+   persistent marker that rid was issued, not the `In(<payload, kid, sig>)` term
+   Accept_v01 consumes. So it is an alternative branch on the same receipt
+   IDENTITY, not on the same wire message; describing it as literally sharing the
+   accept path's envelope would overstate the model. The abstraction is what
+   makes it tractable, and it is sound for the property proved here
+   (revoked_view_never_ok quantifies over the invocation's actions, not over
+   envelope terms).
    SPEC SCOPE (adjudication, v0.1 §11.1): the revocation view is a PER-INVOCATION
    input -- `unknown`/`not_revoked_as_of` do NOT degrade `ok`. So the plan's
    absolute "a revoked rid's later Accept is UNREACHABLE" (plan:228) is STRONGER
@@ -1281,7 +1287,16 @@ lemma revocation_auth_soundness:
          & ( (Ex #vi. RevocationIssued(I, rid, kid, recTime) @ #vi & #vi < #h)
            | (Ex nm #r. RevealKey(<I, nm>) @ #r & #r < #h) ))"
 
-/* THEOREM 2 -- revocation EFFECTIVENESS (no silent skip, no wrongful ignore).
+/* THEOREM 2 -- IGNORE-REASON INTEGRITY / no wrongful ignore.
+   NAME CAVEAT (re-review Q3): the lemma is called `revocation_effectiveness` for
+   continuity with the plan, but "effectiveness" OVERSTATES what it proves. Its
+   antecedent starts at `RevocationIgnored`, so it says nothing about a trace that
+   admits a record (persistent !AuthRevRecord) and then does NEITHER honor nor
+   ignore -- that trace satisfies this theorem vacuously. What IS proved is
+   (i) every ignore carries a legitimate reason with an independent witness, and
+   (ii) an authenticated in-class IN-WINDOW record can never be ignored. Genuine
+   supplied-record effectiveness ("a presented valid record IS honored") is NOT
+   proved and is not provable here -- see the liveness note below.
    True honored-side completeness ("a presented valid record IS honored") is a
    LIVENESS property -- Tamarin cannot force a rule to fire, and a co-emission
    encoding (the honor rule emitting both a "presented" and an "honored" label
