@@ -87,11 +87,17 @@ won't adopt voluntarily, the lever is regulation and market pressure, not forger
 
 ## Status
 
-Spec v0.1 is complete, with two independent implementations — a Python reference
-implementation and a TypeScript verifier — that agree on all 66 conformance
-vector leaves (29 groups spanning format/crypto, lifecycle/policy and
-transparency behavior), plus an end-to-end demo that deletes a store's entire
-infrastructure mid-lifecycle and proves the receipt still verifies.
+Spec v0.1 is complete and v0.2 is specified and implemented on `main`, with two
+independent implementations — a Python reference implementation and a TypeScript
+verifier — that agree on all 66 conformance vector leaves across 29 groups: 43 of
+them the v0.1 corpus, the rest exercising v0.2's hybrid signature profile and
+transparency behaviour. (A v0.1-only verifier is required to reject v0.2
+envelopes, so it is measured against the 43-leaf subset.) There is also an
+end-to-end demo that deletes a store's entire infrastructure mid-lifecycle and
+proves the receipt still verifies.
+
+The published packages are still `0.1.2`: everything v0.2 lives on `main` and is
+not released yet.
 
 Three pieces of assurance work go beyond what a test suite can show. They are
 being finished on branches, and are linked here rather than left invisible:

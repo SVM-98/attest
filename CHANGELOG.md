@@ -25,23 +25,40 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   New conformance leaf group `26-hybrid` (8 leaves).
 
 - v0.2 Stage 2 — issuer key transparency and timestamp anchoring, as a
-  **corroboration** layer. A log can show that a receipt or key manifest existed
-  and was publicly visible; it can never make an unsigned or untrusted one look
-  authentic. The `verified` trust result stays what it always was — domain
-  control — and inclusion evidence surfaces separately as `transparency` /
-  `corroboration`, so the two claims can never be confused. Substrate is a
-  static C2SP tlog-tiles log; checkpoints carry hybrid Ed25519 + ML-DSA-65
-  signatures on both cores; anchoring requires the post-quantum leg (classic
-  RFC 3161 optional) and mechanizes a CRQC cutoff; the commitment covers the
-  signed-receipt core including signature bytes. Log keys stay offline, are
-  origin-bound, and their rotation chain is mandatory. Sibling patch shipped
-  with it: revocation records and artifact manifests carry hybrid signatures
-  too, closing the window where they were Ed25519-only and forgeable after a
-  cryptographically relevant quantum computer exists. New conformance leaf
-  groups `27-valid-to-absent` and `28-transparency`.
+  **corroboration** layer. What it proves is inclusion in a log-signed Merkle
+  root: a verifier checks a hybrid-signed checkpoint plus an inclusion proof, and
+  anchoring can additionally bound when that checkpoint existed. It can never
+  make an unsigned or untrusted artifact look authentic — the `verified` trust
+  result stays what it always was, domain control, and inclusion evidence
+  surfaces separately as `transparency` / `corroboration` so the two claims
+  cannot be confused.
+
+  What it does **not** provide, stated in the spec itself (§10.4, §13) and worth
+  repeating here: without witness cosignatures there is no anti-equivocation. An
+  unwitnessed log operator can maintain split views indefinitely, and a verifier
+  detects equivocation only when it already holds two inconsistent validly-signed
+  checkpoints. `corroboration: "witnessed"` — the verdict that closes this — needs
+  a witness federation that does not exist yet.
+
+  Substrate is a static C2SP tlog-tiles log; checkpoints carry hybrid Ed25519 +
+  ML-DSA-65 signatures on both cores. Two anchor kinds: OpenTimestamps, required
+  for any **post-horizon** standing, and RFC 3161, accepted as a classical
+  convenience that carries no weight past a configured CRQC horizon. The receipt
+  commitment covers the signed-receipt core — `JCS(payload)` and `JCS(signatures)`
+  under a domain separator — so it binds the signature bytes, not the payload
+  alone. Log keys are pinned in the verifier's own trust store and rotated
+  out-of-band; the mandatory gapless rotation chain is a rule about **issuer key
+  manifests** above version 1, not about log keys. Sibling patch shipped with it:
+  revocation records and artifact manifests carry hybrid signatures too, closing
+  the window where they were Ed25519-only and forgeable once a cryptographically
+  relevant quantum computer exists. New conformance leaf groups
+  `27-valid-to-absent` and `28-transparency`.
 
 - Conformance corpus grown to **66 leaf vectors across 29 groups**, from 43 at
-  0.1.2. Both implementations reproduce every one, with none skipped.
+  0.1.2. Both implementations reproduce every one, with none skipped. Note the
+  corpus is no longer a v0.1 corpus: the 43 leaves at 0.1.2 are v0.1 conformance,
+  and the 23 added since exercise v0.2 behaviour a v0.1-only verifier is required
+  to reject.
 
 ## [0.1.2] — 2026-07-13
 

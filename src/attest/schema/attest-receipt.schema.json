@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://attest.example/spec/attest-receipt-0.1.schema.json",
-  "title": "attest v0.1 receipt payload",
+  "title": "attest receipt payload (v0.1 and v0.2)",
   "type": "object",
   "additionalProperties": true,
   "required": ["attest_version", "receipt_id", "issued_at", "issuer", "buyer", "work", "license", "survivability"],
