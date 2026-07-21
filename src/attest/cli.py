@@ -1547,7 +1547,9 @@ def _cmd_check_artifact(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="attest", description="attest operator CLI (v0.1 and v0.2)")
+    parser = argparse.ArgumentParser(
+        prog="attest", description="attest operator CLI (v0.1 and v0.2)"
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("keygen", help="Generate an Ed25519 keypair")
