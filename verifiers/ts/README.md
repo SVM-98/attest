@@ -1,10 +1,10 @@
 # attest-verifier
 
-An independent TypeScript implementation of an [attest v0.1](../../docs/spec/attest-v0.1.md) verifier. It checks a signed attest receipt envelope and reports its signature, schema, trust, revocation, and buyer-binding status — it does not issue, sign, or mutate receipts, manifests, or revocation records. Issuance is the Python reference implementation's job (`attest` package, repo root); this package only ever reads.
+An independent TypeScript implementation of an attest verifier, covering both published profiles: [v0.1](../../docs/spec/attest-v0.1.md) (Ed25519) and [v0.2](../../docs/spec/attest-v0.2.md) (hybrid Ed25519 + ML-DSA-65, plus Stage 2 transparency and anchoring evidence). It checks a signed attest receipt envelope and reports its signature, schema, trust, revocation, and buyer-binding status — it does not issue, sign, or mutate receipts, manifests, or revocation records. Issuance is the Python reference implementation's job (`attest` package, repo root); this package only ever reads.
 
 ## Independence claim
 
-This verifier shares no code with the Python reference implementation. It is a from-scratch reimplementation of the attest v0.1 algorithm (design §11) in TypeScript:
+This verifier shares no code with the Python reference implementation. It is a from-scratch reimplementation of the attest verification algorithm (v0.1 design §11, extended by the v0.2 delta spec) in TypeScript:
 
 - **No shared modules, no shared runtime.** The strict JSON parser, JCS-style canonical serializer, Ed25519 verification, key/artifact manifest logic, revocation classification, and buyer-binding checks are each written independently in `src/`, against the spec text and the language-neutral conformance vectors — not against the Python source.
 - **Crypto via [`@noble/curves`](https://github.com/paulmillr/noble-curves) and [`@noble/hashes`](https://github.com/paulmillr/noble-hashes)**, pure-JS, audited, dependency-minimal libraries — not libsodium (which the Python reference uses via `pynacl`) and not any WASM build of libsodium. Base64url encode/decode (`src/b64u.ts`) is hand-rolled on `btoa`/`atob`, with no external dependency.
@@ -35,12 +35,15 @@ export function verify(
   revocationView?: JsonValue[] | null,
   disclosure?: Disclosure | null,
   maxRevocationRecords?: number,
+  options?: VerifyTransparencyOptions,   // { transparency?, logKeys?, anchorPolicy? } — v0.2 Stage 2
 ): VerificationResult
 
 export function isOk(r: VerificationResult): boolean // signature=valid && schema=valid && revocation!=='revoked' && errors.length===0
 ```
 
 `maxRevocationRecords` bounds the untrusted `revocationView` (default 10000); a view larger than the cap is not evaluated and fails closed (an `errors` entry, so `isOk()` is `false`) for a revocable receipt, or warns for an irrevocable one.
+
+`options` is how v0.2 Stage 2 evidence enters: `transparency` (the inclusion evidence accompanying the receipt), `logKeys` (the log keys you pin, in your own trust store — never taken from the bundle), and `anchorPolicy` (including the CRQC horizon). Omit it entirely and verification behaves exactly as before, offline and log-free; supply it and the result additionally carries `transparency` / `corroboration`, which never upgrade the `trust` verdict.
 
 `envelopeBytes` is the raw receipt envelope bytes exactly as received (this package parses them itself with a strict, duplicate-key-rejecting JSON reader — never pre-parse with `JSON.parse` and re-stringify, or you'll silently paper over malformed input the reference parser is required to reject). `trustStore` is `{ manifests: Record<string, JsonObject>, provenance: Record<string, string>, chains?: Record<string, JsonObject[]> }` — the issuer key manifests you trust, how you obtained each issuer's manifest (`"tls"` or otherwise), and optionally each issuer's manifest history for rotation-continuity checking.
 
