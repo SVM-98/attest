@@ -1,6 +1,6 @@
-# attest v0.1 conformance vectors
+# attest conformance vectors
 
-This directory holds the attest v0.1 conformance suite: fixed, language-neutral test cases against which any implementation of [`docs/spec/attest-v0.1.md`](../attest-v0.1.md) can be checked. Each vector is a leaf directory (identified by containing `expected.json`) holding the raw inputs to feed the verification algorithm and the exact `VerificationResult` a conformant verifier must produce.
+This directory holds the attest conformance suite: fixed, language-neutral test cases against which any implementation can be checked. Groups `01`–`25` (43 leaves) are **v0.1** conformance, against [`docs/spec/attest-v0.1.md`](../attest-v0.1.md); `26-hybrid`, `27-valid-to-absent` and `28-transparency` cover **v0.2**, against [`docs/spec/attest-v0.2.md`](../attest-v0.2.md). A v0.1-only verifier must reject v0.2 envelopes and is therefore measured against the v0.1 subset, not all 66 leaves. Each vector is a leaf directory (identified by containing `expected.json`) holding the raw inputs to feed the verification algorithm and the exact `VerificationResult` a conformant verifier must produce.
 
 **Normative conformance requirement**: an implementation is attest-conformant iff it produces every vector's expected result. There is no partial conformance — any single mismatch is a conformance failure.
 

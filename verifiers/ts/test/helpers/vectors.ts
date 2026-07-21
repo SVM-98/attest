@@ -1,4 +1,4 @@
-// Vector loader for the attest v0.1 conformance suite. Reads (never mutates)
+// Vector loader for the attest conformance suite (v0.1 + v0.2). Reads (never mutates)
 // `docs/spec/vectors/` — the language-neutral vector set replayed identically
 // by the Python reference's `tests/test_vectors.py`. See that file's module
 // docstring for the vector-directory conventions this loader implements.
