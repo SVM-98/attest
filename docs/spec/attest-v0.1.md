@@ -292,7 +292,8 @@ The signature input for a receipt is exactly `JCS(payload)` — as produced by t
 - **Pinned verification ruleset.** A conforming verifier MUST perform cofactorless (strict) RFC 8032 verification and MUST additionally:
   - reject a signature whose scalar `S` is non-canonical, i.e. `S ≥ L`, where the Ed25519 group order is `L = 2^252 + 27742317777372353535851937790883648493` (SUF-CMA property);
   - reject small-order or non-canonical encodings of the public key `A` and the signature's `R` component (SBS property).
-- **Receipt hash** (for bundles, dedup, and future transparency use): `SHA-256(JCS(payload))`. It MUST NOT be computed over the envelope, which contains unsigned, malleable members (`delivery`).
+- **Receipt hash** (for bundles and dedup): `SHA-256(JCS(payload))`. It MUST NOT be computed over the envelope, which contains unsigned, malleable members (`delivery`).
+  > **Superseded for transparency use (v0.2 Stage 2).** This payload-only hash is NOT the transparency-log commitment. A `receipt` log entry commits to the signed-receipt core — `SHA-256("attest-receipt-core-v1" || 0x00 || JCS(payload) || 0x00 || JCS(signatures))` — so that the commitment binds the signature bytes and not the payload alone; see [`attest-v0.2.md`](attest-v0.2.md) §12. Conformance vector `28-transparency` rejects the payload-only construction. Building log entries from the hash above would produce evidence no conforming verifier accepts.
 - **Hashes**: SHA-256 for artifacts, legal texts, and policies (§9.1); scrypt (§8.1) exclusively for the buyer commitment.
 
 **Non-normative note:** the pinned ruleset exists so that implementations built on different backends (libsodium, OpenSSL, `ed25519-dalek`, …) disagree loudly at conformance-test time (§15) rather than silently accepting a malleable signature in the field.
@@ -410,7 +411,7 @@ MUST contain `salts.json` (`receipt_id → salt`) and, if used, `keys/` (per-rec
 
 ## 15. Test vectors and conformance
 
-The conformance vectors under [`docs/spec/vectors/`](vectors/) are the attest v0.1 conformance suite. **An implementation is attest-conformant if and only if it produces the expected `VerificationResult` — every component listed in a vector's `expected.json`, matched exactly — for every vector present under `docs/spec/vectors/`.**
+The conformance vectors under [`docs/spec/vectors/`](vectors/) are the attest conformance suite. Since v0.2 it is no longer a v0.1-only corpus: groups `01`–`25` (43 leaves, the corpus as of the `v0.1.2` release) define **v0.1** conformance, while `26-hybrid`, `27-valid-to-absent` and `28-transparency` exercise v0.2 behaviour. A v0.1-only verifier is REQUIRED to reject v0.2 envelopes, so it cannot reproduce the v0.2 expectations and is measured against the 43-leaf v0.1 subset; an implementation claiming v0.2 must reproduce all 66. **An implementation is attest-conformant if and only if it produces the expected `VerificationResult` — every component listed in a vector's `expected.json`, matched exactly — for every vector present under `docs/spec/vectors/`.**
 
 | Vector | Directory | Exercises |
 | --- | --- | --- |
