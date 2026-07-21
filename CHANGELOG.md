@@ -22,7 +22,26 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   or the receipt is rejected. v0.1 receipts remain valid and verifiable
   forever; a v0.1 verifier MUST reject a v0.2 envelope outright (no downgrade
   path). New public spec: [`docs/spec/attest-v0.2.md`](docs/spec/attest-v0.2.md).
-  New conformance leaf group `26-hybrid` (8 leaves), for 51 vectors total.
+  New conformance leaf group `26-hybrid` (8 leaves).
+
+- v0.2 Stage 2 — issuer key transparency and timestamp anchoring, as a
+  **corroboration** layer. A log can show that a receipt or key manifest existed
+  and was publicly visible; it can never make an unsigned or untrusted one look
+  authentic. The `verified` trust result stays what it always was — domain
+  control — and inclusion evidence surfaces separately as `transparency` /
+  `corroboration`, so the two claims can never be confused. Substrate is a
+  static C2SP tlog-tiles log; checkpoints carry hybrid Ed25519 + ML-DSA-65
+  signatures on both cores; anchoring requires the post-quantum leg (classic
+  RFC 3161 optional) and mechanizes a CRQC cutoff; the commitment covers the
+  signed-receipt core including signature bytes. Log keys stay offline, are
+  origin-bound, and their rotation chain is mandatory. Sibling patch shipped
+  with it: revocation records and artifact manifests carry hybrid signatures
+  too, closing the window where they were Ed25519-only and forgeable after a
+  cryptographically relevant quantum computer exists. New conformance leaf
+  groups `27-valid-to-absent` and `28-transparency`.
+
+- Conformance corpus grown to **66 leaf vectors across 29 groups**, from 43 at
+  0.1.2. Both implementations reproduce every one, with none skipped.
 
 ## [0.1.2] — 2026-07-13
 

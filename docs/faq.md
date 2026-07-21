@@ -53,10 +53,23 @@ checkable offline requires no consensus mechanism, no token, and no chain — a
 verifier just checks a signature against a key the issuer published. Consensus
 exists to solve double-spend and ordering among mutually distrusting parties
 maintaining a shared ledger; a buyer proving they hold a receipt to a verifier
-they choose is a different, simpler problem. The one place a chain could ever
-show up in this project is an optional future transparency-anchoring layer
-(Merkle-root anchoring for registry-node data) — and it stays strictly optional,
-never a requirement for a receipt to verify.
+they choose is a different, simpler problem.
+
+There is now a transparency layer, and it is worth being precise about what it
+is, because "append-only log" and "blockchain" get used interchangeably and they
+are not the same thing. v0.2 Stage 2 adds an optional Merkle-tree transparency
+log (the C2SP tlog-tiles format, served as static files) plus timestamp
+anchoring. No consensus, no token, no miners, no shared ledger between
+distrusting parties — just a tamper-evident append-only structure anyone can
+audit, of the same family used for TLS certificate transparency.
+
+Two properties keep it from becoming a dependency. It **corroborates**, it never
+authenticates: a log entry can show a receipt existed and was publicly visible at
+a point in time, and it can never make an unsigned or untrusted receipt look
+genuine — the trust result stays domain control, and inclusion evidence is
+reported separately so the two are never confused. And it stays optional: a
+receipt verifies offline from its bytes and the issuer's key material, with no
+log reachable, exactly as before.
 
 ## What happens if the issuer dies?
 
