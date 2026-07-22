@@ -155,6 +155,10 @@ requirements of its own — and
 [docs/spec/attest-privacy.md](docs/spec/attest-privacy.md) is its
 privacy-considerations sibling.
 
+The core protocol properties are machine-checked in Tamarin: [formal/](formal/)
+holds the model, the property↔lemma↔spec map, and the honest scope of what is
+and is not proved, gated in CI by a statement-pinning checker.
+
 ## Roadmap / north star
 
 Non-normative, and deliberately undated — these are directions, not commitments:

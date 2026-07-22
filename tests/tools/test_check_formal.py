@@ -685,3 +685,211 @@ def test_round3_repro_quoted_comment_opener_rejected(tmp_path: Path) -> None:
     assert "Poison" in src
     rc = run_main(tmp_path, green_summary(), theory_src=src)
     assert rc == 1
+
+
+# --------------------------------------------------------------------------
+# CI shard anti-drift (Task 8): the `formal` job's four `--only` lists in
+# .github/workflows/ci.yml must partition CONTRACT exactly. A lemma added to
+# CONTRACT without a shard assignment (or assigned twice) must turn CI red
+# HERE, in pytest, before any prover minute is spent.
+# --------------------------------------------------------------------------
+
+CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+
+# Deliberately shape-coupled to the matrix layout in ci.yml (a comment there
+# points back here): each shard is a `- shard: <name>` entry followed by
+# `timeout:` and `checker_timeout:` lines and a SINGLE-LINE double-quoted
+# `lemmas:` list. Stdlib parsing is fine — the YAML is ours and this test owns
+# its shape.
+_SHARD_RE = re.compile(
+    r"^\s+-\s+shard:\s+(?P<shard>[A-Za-z0-9_-]+)\s*\n"
+    r"\s+timeout:\s+\d+\s*\n"
+    r"\s+checker_timeout:\s+\d+\s*\n"
+    r'\s+lemmas:\s+"(?P<lemmas>[^"\n]*)"',
+    re.MULTILINE,
+)
+_FORMAL_JOB_RE = re.compile(r"^  formal:\s*$", re.MULTILINE)
+_TOP_LEVEL_JOB_RE = re.compile(r"^  [A-Za-z0-9_-]+:\s*$", re.MULTILINE)
+_INCLUDE_RE = re.compile(r"^(?P<indent>\s+)include:\s*$", re.MULTILINE)
+
+
+def _matrix_list_item_count(formal_block: str) -> int:
+    """Count YAML list items under the matrix ``include:`` — any spelling.
+
+    Every shard is exactly one block-sequence item (``- ...`` or a standalone
+    ``-``) more indented than ``include:``; blank and comment lines are
+    skipped. Counting the dashes rather than the literal ``shard:`` key catches
+    a fifth entry written ``shard :``, ``"shard":``, or any other key spelling
+    — the loudness guard must not depend on how the key is typed.
+    """
+    inc = _INCLUDE_RE.search(formal_block)
+    if inc is None:
+        raise AssertionError("formal job matrix has no 'include:' block")
+    base = len(inc.group("indent"))
+    tail = formal_block[inc.end() :]
+    count = 0
+    for line in tail.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        stripped = line.lstrip()
+        if indent <= base and not stripped.startswith("-"):
+            break  # dedented out of the include block
+        if indent > base and re.match(r"^-(\s|$)", stripped):
+            count += 1
+    return count
+
+
+def ci_formal_shards(workflow: Path | None = None) -> dict[str, list[str]]:
+    """Extract the formal job's four shard -> lemma-list mappings from ci.yml."""
+    workflow = workflow or CI_WORKFLOW
+    text = workflow.read_text(encoding="utf-8")
+    formal = _FORMAL_JOB_RE.search(text)
+    if formal is None:
+        raise AssertionError(f"formal job block absent from {workflow}")
+    next_job = _TOP_LEVEL_JOB_RE.search(text, formal.end())
+    formal_block = text[formal.start() : next_job.start() if next_job else len(text)]
+    entries = [
+        (match.group("shard"), match.group("lemmas").split(","))
+        for match in _SHARD_RE.finditer(formal_block)
+    ]
+    # LOUDNESS GUARD: the strict entry regex is field-order- AND spelling-
+    # sensitive, so a matrix entry in a different shape would silently not
+    # match. Count matrix list ITEMS independently (any key spelling / field
+    # order — see _matrix_list_item_count) and require every item to have
+    # parsed. A fifth entry in ANY YAML form fails here, never hides.
+    item_count = _matrix_list_item_count(formal_block)
+    if item_count != len(entries):
+        raise AssertionError(
+            f"formal job matrix has {item_count} list items but only "
+            f"{len(entries)} parse as shard entries — fix ci.yml or this "
+            "parser, do not let entries go dark"
+        )
+    if len(entries) != 4:
+        raise AssertionError(
+            f"formal job must declare exactly 4 shard entries, found {len(entries)}"
+        )
+    shard_names = [name for name, _ in entries]
+    if len(set(shard_names)) != 4:
+        raise AssertionError(f"formal job shard names must be distinct, found {shard_names}")
+    return dict(entries)
+
+
+def test_ci_formal_matrix_declares_exactly_the_four_shards() -> None:
+    assert set(ci_formal_shards()) == {
+        "heavy-revdowngrade",
+        "heavy-acceptance",
+        "revocation",
+        "rest",
+    }
+
+
+def test_ci_formal_shard_lists_are_pairwise_disjoint() -> None:
+    shards = ci_formal_shards()
+    names = [name for lemmas in shards.values() for name in lemmas]
+    duplicated = sorted({name for name in names if names.count(name) > 1})
+    assert not duplicated, f"lemmas assigned to more than one CI shard: {duplicated}"
+
+
+def test_ci_formal_shard_union_equals_contract() -> None:
+    shards = ci_formal_shards()
+    union = {name for lemmas in shards.values() for name in lemmas}
+    missing = sorted(set(cf.CONTRACT) - union)
+    extra = sorted(union - set(cf.CONTRACT))
+    assert union == set(cf.CONTRACT), (
+        f"CI shard union != CONTRACT — missing from shards: {missing}; not in CONTRACT: {extra}"
+    )
+
+
+def test_ci_formal_shards_rejects_duplicate_entry(tmp_path: Path) -> None:
+    source = CI_WORKFLOW.read_text(encoding="utf-8")
+    duplicate = (
+        "          - shard: heavy-revdowngrade\n"
+        "            timeout: 120\n"
+        "            checker_timeout: 6900\n"
+        '            lemmas: "no_downgrade_revocation_allhybrid"\n'
+    )
+    needle = '            lemmas: "no_downgrade_revocation_allhybrid"\n'
+    mutated = source.replace(needle, needle + duplicate, 1)
+    workflow = tmp_path / "ci.yml"
+    workflow.write_text(mutated, encoding="utf-8")
+
+    with pytest.raises(AssertionError, match="exactly 4 shard entries"):
+        ci_formal_shards(workflow)
+
+
+def test_ci_formal_shards_rejects_missing_formal_job(tmp_path: Path) -> None:
+    source = CI_WORKFLOW.read_text(encoding="utf-8")
+    source = source.replace("  formal:\n", "  formal_renamed:\n", 1)
+    workflow = tmp_path / "ci.yml"
+    workflow.write_text(source, encoding="utf-8")
+
+    with pytest.raises(AssertionError, match="formal job block absent"):
+        ci_formal_shards(workflow)
+
+
+def test_ci_parser_counts_raw_markers_against_parsed_entries(tmp_path: Path) -> None:
+    # A fifth matrix entry with a DIFFERENT field order must fail loudly, not
+    # silently vanish from the strict entry regex (round-2 reviewer probe).
+    text = CI_WORKFLOW.read_text(encoding="utf-8")
+    reordered = (
+        "          - shard: sneaky-fifth\n"
+        '            lemmas: "sanity_toolchain"\n'
+        "            timeout: 90\n"
+        "            checker_timeout: 5100\n"
+    )
+    # Insert INSIDE the formal job block (a bare `steps:` anchor would hit the
+    # FIRST job in the file, leaving the formal block untouched).
+    head, formal_tail = text.split("\n  formal:\n", 1)
+    poisoned = (
+        head + "\n  formal:\n" + formal_tail.replace("    steps:\n", reordered + "    steps:\n", 1)
+    )
+    assert "sneaky-fifth" in poisoned
+    bad = tmp_path / "ci.yml"
+    bad.write_text(poisoned, encoding="utf-8")
+    with pytest.raises(AssertionError, match="list items"):
+        ci_formal_shards(bad)
+
+
+@pytest.mark.parametrize(
+    "fifth",
+    [
+        # Alternative YAML spellings the strict entry regex does NOT match —
+        # each is still one matrix list item, so the item-count guard fires
+        # (round-3 reviewer probe: `shard :`, quoted key, flow map).
+        "          - shard : sneaky-fifth\n            timeout: 90\n"
+        '            checker_timeout: 5100\n            lemmas: "sanity_toolchain"\n',
+        '          - "shard": sneaky-fifth\n            timeout: 90\n'
+        '            checker_timeout: 5100\n            lemmas: "sanity_toolchain"\n',
+        "          - {shard: sneaky-fifth, timeout: 90, checker_timeout: 5100,"
+        ' lemmas: "sanity_toolchain"}\n',
+        '          -\n            "shard": sneaky-fifth\n            timeout: 90\n'
+        '            checker_timeout: 5100\n            lemmas: "sanity_toolchain"\n',
+        "          -\n            shard: sneaky-fifth\n            timeout: 90\n"
+        '            checker_timeout: 5100\n            lemmas: "sanity_toolchain"\n',
+        pytest.param(
+            "        # comment\n"
+            '            -\n              "shard": sneaky-fifth\n              timeout: 90\n'
+            '              checker_timeout: 5100\n              lemmas: "sanity_toolchain"\n',
+            id="comment-then-quoted",
+        ),
+        pytest.param(
+            "          - shard: sneaky-fifth\n"
+            "            timeout: 90\n"
+            "        # note\n"
+            '            checker_timeout: 5100\n            lemmas: "sanity_toolchain"\n',
+            id="comment-inside-entry",
+        ),
+    ],
+)
+def test_ci_parser_catches_fifth_shard_in_any_spelling(tmp_path: Path, fifth: str) -> None:
+    text = CI_WORKFLOW.read_text(encoding="utf-8")
+    head, formal_tail = text.split("\n  formal:\n", 1)
+    poisoned = (
+        head + "\n  formal:\n" + formal_tail.replace("    steps:\n", fifth + "    steps:\n", 1)
+    )
+    assert "sneaky-fifth" in poisoned
+    bad = tmp_path / "ci.yml"
+    bad.write_text(poisoned, encoding="utf-8")
+    with pytest.raises(AssertionError):
+        ci_formal_shards(bad)
