@@ -79,7 +79,13 @@ pinned against drift by tests in `tests/tools/test_check_formal.py` that
 parse the workflow and assert the four `--only` lists are pairwise disjoint
 with union exactly equal to the checker contract — a lemma added to the
 contract without a shard assignment turns CI red in pytest before any prover
-minute is spent.
+minute is spent. A further semantic test asserts the job's run steps invoke
+the checker with the matrix placeholders and carry no `if:` gate. Declared
+boundary: these are guards against ACCIDENTAL drift — no in-repo static test
+can prove CI execution against an adversary with repository write access,
+who could remove the test in the same commit; execution enforcement against
+tampering belongs to branch protection (required status checks on the formal
+shards), which is repository configuration, not repo content.
 
 ### Injected summaries
 
