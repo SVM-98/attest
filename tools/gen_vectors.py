@@ -2545,7 +2545,11 @@ def gen_28_transparency() -> None:
     # from SHA-256(checkpoint.note_bytes) to a pinned Bitcoin header ->
     # transparency upgrades to anchored_before:<ISO-8601 UTC>. header_time
     # 1700000000 is transparency.py's own documented KAT
-    # (_iso8601: 1700000000 -> "2023-11-14T22:13:20Z"). ---
+    # (_iso8601: 1700000000 -> "2023-11-14T22:13:20Z"). No `anchor_profile`
+    # on the anchors evidence -> legacy note-bytes-only commitment (G4,
+    # attest-v0.2.md §11.1), still fully verifiable but classified with
+    # warning `anchor_note_only` (32-anchor-v2's `c-v1-note-only-warn`
+    # exercises the same classification directly against `verify_anchor`). ---
     header_hash_j = hashlib.sha256(b"attest-vectors-28j-anchor-header-v1").hexdigest()
     accumulator_start_j = hashlib.sha256(tlog.parse_checkpoint(checkpoint_a).note_bytes).digest()
     header_merkle_root_j = hashlib.sha256(accumulator_start_j).digest().hex()
@@ -2582,7 +2586,7 @@ def gen_28_transparency() -> None:
             "manifest_freshness": "not_checked",
             "ok": True,
             "errors": [],
-            "warnings": [],
+            "warnings": ["anchor_note_only"],
         },
         transparency=_evidence_a(anchors={"checkpoint": checkpoint_a, "proofs": [ots_proof_j]}),
         log_keys=[_log_key()],
@@ -3168,6 +3172,187 @@ def gen_31_manifest_currency() -> None:
     )
 
 
+def gen_32_anchor_v2() -> None:
+    """G4 (anchor profile v2, attest-v0.2.md §11.1): the OTS commitment
+    covers the checkpoint's FULL signed note (header AND signature lines,
+    `Checkpoint.signed_note_bytes`) instead of just its unsigned header
+    (`note_bytes`) — closing TM-33's residual risk that a chosen unsigned
+    note can be pre-anchored and signed later. One receipt/checkpoint
+    fixture (independent of group 28's own `entry_a`/`checkpoint_a`, built
+    fresh here so this group stands alone) with three OTS anchor evidence
+    variants, all against the SAME checkpoint:
+
+    - (a) declares `anchor_profile: "signed-note-v2"` and the op-chain
+      genuinely commits over `signed_note_bytes` -> verifies cleanly, no
+      note-only warning.
+    - (b) also declares `"signed-note-v2"`, but the op-chain was built from
+      `SHA-256(note_bytes)` alone (the OLD v1 seed) -> the replayed chain
+      lands on a different root than pinned, so the anchor FAILS — the
+      direct demonstration that a v1-shaped commitment cannot pass as v2
+      proof of the signed note's existence (TM-33's mitigation, negative
+      case).
+    - (c) declares no `anchor_profile` at all (legacy) with a genuinely
+      v1-shaped (`note_bytes`-only) op-chain -> verifies and upgrades
+      standing exactly like pre-G4 evidence always has (eternal
+      verifiability, attest-versioning.md §3), but now carries the
+      `anchor_note_only` warning classifying it as the weaker profile.
+    """
+    payload = issue.build_payload(**_base_payload_kwargs())
+    _assert_schema_valid(payload)
+    envelope = issue.issue(payload, ISSUER_KP, ISSUER_KID)
+    trust = _issuer_only_trust()
+
+    entry = {
+        "type": "receipt",
+        "issuer": ISSUER_ID,
+        "core_sha256": tlog.receipt_core_hash(envelope),
+    }
+    entry_bytes = tlog.encode_entry(entry)
+    root = tlog.build_tree([entry_bytes])
+    checkpoint_text = _sign_checkpoint_oracle(LOG_ORIGIN, 1, root)
+    inclusion = _hex_proof(tlog.inclusion_proof([entry_bytes], 0))
+    parsed_checkpoint = tlog.parse_checkpoint(checkpoint_text)
+    note_bytes = parsed_checkpoint.note_bytes
+    signed_note_bytes = parsed_checkpoint.signed_note_bytes
+    assert signed_note_bytes != note_bytes  # sanity: the v2 seed is strictly more bytes
+
+    def _evidence(**overrides: Any) -> dict[str, Any]:
+        base: dict[str, Any] = {
+            "entry": entry,
+            "leaf_index": 0,
+            "tree_size": 1,
+            "inclusion_proof": inclusion,
+            "checkpoint": checkpoint_text,
+        }
+        base.update(overrides)
+        return base
+
+    header_time = 1700000000  # transparency.py's own documented KAT (-> 2023-11-14T22:13:20Z)
+
+    def _single_hash_ots_proof(
+        commitment_bytes: bytes, header_hash_seed: bytes
+    ) -> tuple[dict[str, Any], anchor.AnchorPolicy]:
+        header_hash = hashlib.sha256(header_hash_seed).hexdigest()
+        accumulator_start = hashlib.sha256(commitment_bytes).digest()
+        header_merkle_root = hashlib.sha256(accumulator_start).digest().hex()
+        proof = {
+            "kind": "ots",
+            "ops": [["sha256"]],
+            "header_merkle_root": header_merkle_root,
+            "header_hash": header_hash,
+            "header_time": header_time,
+        }
+        policy = anchor.AnchorPolicy(
+            pinned_headers={
+                header_hash: anchor.PinnedHeader(
+                    header_hash=header_hash, merkle_root=header_merkle_root, time=header_time
+                )
+            },
+            crqc_horizon=None,
+        )
+        return proof, policy
+
+    # --- (a) v2-valid ---
+    ots_proof_a, policy_a = _single_hash_ots_proof(
+        signed_note_bytes, b"attest-vectors-32a-v2-header-v1"
+    )
+    write_vector(
+        "32-anchor-v2/a-v2-valid",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected={
+            "signature": "valid",
+            "schema": "valid",
+            "revocation": "unknown",
+            "binding": "not_checked",
+            "trust": "verified",
+            "transparency": "anchored_before:2023-11-14T22:13:20Z",
+            "corroboration": "logged",
+            "manifest_freshness": "not_checked",
+            "ok": True,
+            "errors": [],
+            "warnings": [],
+        },
+        transparency=_evidence(
+            anchors={
+                "checkpoint": checkpoint_text,
+                "proofs": [ots_proof_a],
+                "anchor_profile": "signed-note-v2",
+            }
+        ),
+        log_keys=[_log_key()],
+        anchor_policy=policy_a,
+    )
+
+    # --- (b) v2-commit-mismatch ---
+    ots_proof_b, policy_b = _single_hash_ots_proof(
+        note_bytes, b"attest-vectors-32b-v1-shaped-header-v1"
+    )
+    assert ots_proof_b["header_merkle_root"] != ots_proof_a["header_merkle_root"]
+    write_vector(
+        "32-anchor-v2/b-v2-commit-mismatch",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected={
+            "signature": "valid",
+            "schema": "valid",
+            "revocation": "unknown",
+            "binding": "not_checked",
+            "trust": "verified",
+            "transparency": "logged",
+            "corroboration": "logged",
+            "manifest_freshness": "not_checked",
+            "ok": True,
+            "errors": [],
+            "warnings": [
+                "proof[0]: ots op-chain result does not match header_merkle_root; anchor_profile "
+                "signed-note-v2 requires the accumulator to start from "
+                "SHA256(checkpoint.signed_note_bytes) — this evidence looks like a note-v1 "
+                "commitment presented as signed-note-v2"
+            ],
+        },
+        transparency=_evidence(
+            anchors={
+                "checkpoint": checkpoint_text,
+                "proofs": [ots_proof_b],
+                "anchor_profile": "signed-note-v2",
+            }
+        ),
+        log_keys=[_log_key()],
+        anchor_policy=policy_b,
+    )
+
+    # --- (c) v1-note-only-warn ---
+    ots_proof_c, policy_c = _single_hash_ots_proof(note_bytes, b"attest-vectors-32c-v1-header-v1")
+    write_vector(
+        "32-anchor-v2/c-v1-note-only-warn",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected={
+            "signature": "valid",
+            "schema": "valid",
+            "revocation": "unknown",
+            "binding": "not_checked",
+            "trust": "verified",
+            "transparency": "anchored_before:2023-11-14T22:13:20Z",
+            "corroboration": "logged",
+            "manifest_freshness": "not_checked",
+            "ok": True,
+            "errors": [],
+            "warnings": ["anchor_note_only"],
+        },
+        transparency=_evidence(anchors={"checkpoint": checkpoint_text, "proofs": [ots_proof_c]}),
+        log_keys=[_log_key()],
+        anchor_policy=policy_c,
+    )
+
+
 def main() -> None:
     _clear_leaf_dirs(VECTORS_DIR)
     VECTORS_DIR.mkdir(parents=True, exist_ok=True)
@@ -3203,6 +3388,7 @@ def main() -> None:
     gen_29_limits()
     gen_30_mixed_keyset()
     gen_31_manifest_currency()
+    gen_32_anchor_v2()
     leaf_count = sum(1 for _ in VECTORS_DIR.rglob("expected.json"))
     print(f"generated {leaf_count} vector cases under {VECTORS_DIR}")
 

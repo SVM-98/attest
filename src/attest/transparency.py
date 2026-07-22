@@ -42,7 +42,12 @@ which is its own hard verdict):
 5. Base standing: `(TRANSPARENCY_LOGGED, CORROBORATION_LOGGED)`.
 6. If `anchors` is present: `anchor.verify_anchor` against the same
    checkpoint and the trusted `policy`. A PQ-surviving proof upgrades
-   `transparency` to `anchored_before:<ISO-8601 UTC timestamp>`.
+   `transparency` to `anchored_before:<ISO-8601 UTC timestamp>`; if that
+   proof used the legacy note-bytes-only commitment
+   (`AnchorVerdict.note_only`, G4, attest-v0.2.md §11.1) the warning
+   `anchor_note_only` is added — the anchor still stands (eternal
+   verifiability, attest-versioning.md §3), just classified as the weaker
+   pre-G4 profile.
 7. Horizon: if `policy.crqc_horizon` is set and the anchor verdict (or its
    absence) does not `anchor.passes_horizon`, the whole result caps back to
    `(TRANSPARENCY_NOT_CHECKED, CORROBORATION_NONE)` — a checkpoint signature
@@ -106,6 +111,11 @@ _WARN_CONSISTENCY_PROOF_TOO_LONG = "consistency_proof_too_long"
 _WARN_EQUIVOCATION_DETECTED = "log_equivocation_detected"
 _WARN_ANCHORS_INVALID = "anchors_invalid"
 _WARN_ANCHOR_TIME_INVALID = "anchor_time_invalid"
+# G4 (attest-v0.2.md §11.1): an anchor that established standing via the
+# legacy note-bytes-only commitment (`AnchorVerdict.note_only`) — still
+# fully verifiable (eternal verifiability, attest-versioning.md §3), just
+# classified as the weaker profile.
+_WARN_ANCHOR_NOTE_ONLY = "anchor_note_only"
 _WARN_POST_HORIZON_UNANCHORED = "post_horizon_unanchored"
 _WARN_EVIDENCE_EVALUATION_FAILED = "evidence_evaluation_failed"
 
@@ -339,6 +349,8 @@ def _evaluate_untrusted_evidence(
         anchor_verdict = anchor.verify_anchor(anchors_evidence, checkpoint, policy)
         warnings.extend(anchor_verdict.warnings)
         if anchor_verdict.pq_surviving and anchor_verdict.anchored_before is not None:
+            if anchor_verdict.note_only:
+                warnings.append(_WARN_ANCHOR_NOTE_ONLY)
             rendered_anchor_time = _iso8601(anchor_verdict.anchored_before)
             if rendered_anchor_time is None:
                 warnings.append(_WARN_ANCHOR_TIME_INVALID)

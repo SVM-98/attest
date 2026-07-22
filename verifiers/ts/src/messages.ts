@@ -166,6 +166,14 @@ export const ANCHOR_WARN = {
   OTS_HEADER_MERKLE_ROOT_INVALID: "ots proof 'header_merkle_root' must be 64 lowercase hex chars",
   OTS_HEADER_HASH_INVALID: "ots proof 'header_hash' must be 64 lowercase hex chars",
   OTS_CHAIN_MISMATCH: 'ots op-chain result does not match header_merkle_root',
+  // G4/I2 (attest-v0.2.md §11.1.1): the same base mismatch, but under a
+  // declared signed-note-v2 profile — profile-aware, so the verifier names
+  // which seed the profile requires and, when the legacy note-v1 seed's
+  // replay genuinely matches, flags the common mistake explicitly.
+  OTS_CHAIN_MISMATCH_V2_REQUIRES:
+    'ots op-chain result does not match header_merkle_root; anchor_profile signed-note-v2 requires the accumulator to start from SHA256(checkpoint.signed_note_bytes)',
+  OTS_CHAIN_MISMATCH_V2_LOOKS_LIKE_V1:
+    'ots op-chain result does not match header_merkle_root; anchor_profile signed-note-v2 requires the accumulator to start from SHA256(checkpoint.signed_note_bytes) — this evidence looks like a note-v1 commitment presented as signed-note-v2',
   OTS_HEADER_NOT_PINNED: 'header_hash is not in policy.pinned_headers',
   OTS_PINNED_ROOT_MISMATCH: 'pinned header merkle_root does not match proof',
   OTS_PINNED_TIME_MISMATCH: 'pinned header time does not match proof',
@@ -187,6 +195,9 @@ export const otsHeaderTimeInvalid = (max: number) =>
   `ots proof 'header_time' must be a positive int no later than ${max}`
 export const rfc3161TokenNotStr = (v: unknown) => `rfc3161 token_b64 must be a str, got ${pyTypeName(v)}`
 export const unknownProofKind = (kind: unknown) => `unknown proof kind ${pyTruncRepr(kind)}, ignored`
+// G4 (attest-v0.2.md §11.1): evidence declares an anchor_profile outside {absent, null, 'note-v1', 'signed-note-v2'}.
+export const evidenceAnchorProfileInvalid = (v: unknown) =>
+  `evidence.anchor_profile must be 'note-v1' or 'signed-note-v2', got ${pyTruncRepr(v)}`
 
 // `anchor._trunc`: safely render an untrusted scalar for a bounded warning —
 // never invoke a hostile object's own stringification, only these three cases.
@@ -222,6 +233,11 @@ export const TRANSPARENCY_WARN = {
   EQUIVOCATION_DETECTED: 'log_equivocation_detected',
   ANCHORS_INVALID: 'anchors_invalid',
   ANCHOR_TIME_INVALID: 'anchor_time_invalid',
+  // G4 (attest-v0.2.md §11.1): an anchor that established standing via the
+  // legacy note-bytes-only commitment (AnchorVerdict.noteOnly) — still
+  // fully verifiable (eternal verifiability, attest-versioning.md §3), just
+  // classified as the weaker profile.
+  ANCHOR_NOTE_ONLY: 'anchor_note_only',
   POST_HORIZON_UNANCHORED: 'post_horizon_unanchored',
   EVIDENCE_EVALUATION_FAILED: 'evidence_evaluation_failed',
 } as const

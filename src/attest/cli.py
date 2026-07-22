@@ -1160,6 +1160,35 @@ def _cmd_log_anchor(args: argparse.Namespace) -> int:
             f"match this log's origin {origin!r}"
         )
 
+    # G4/I1 (attest-v0.2.md §11.1.1): an anchors evidence bundle carries
+    # exactly one anchor_profile, and every proof in it MUST commit under
+    # that profile — this command only ever produces `signed-note-v2`
+    # proofs (see below), so appending to a bundle that already carries
+    # proofs under a DIFFERENT profile would silently relabel those retained
+    # proofs' profile without re-anchoring them. Refuse instead of
+    # overwriting; check this BEFORE reading --ots-proof at all, since the
+    # append is refused regardless of what it contains.
+    existing_anchors = evidence.get("anchors")
+    existing_proofs: list[Any] = (
+        existing_anchors["proofs"]
+        if isinstance(existing_anchors, dict) and isinstance(existing_anchors.get("proofs"), list)
+        else []
+    )
+    if existing_proofs:
+        existing_profile = (
+            existing_anchors.get("anchor_profile") if isinstance(existing_anchors, dict) else None
+        )
+        if existing_profile is None:
+            existing_profile = "note-v1"
+        if existing_profile != "signed-note-v2":
+            raise CliUsageError(
+                f"{args.evidence} already carries {len(existing_proofs)} proof(s) under "
+                f"anchor_profile {existing_profile!r}; an anchors evidence bundle carries "
+                "exactly one anchor_profile and every proof MUST commit under it "
+                "(attest-v0.2.md §11.1.1) — produce a fresh signed-note-v2 bundle instead, "
+                "or re-anchor every proof in this bundle with v2 tooling"
+            )
+
     ots_proof = _read_json(
         args.ots_proof, max_bytes=_MAX_STAGE2_INPUT_BYTES["json"], input_name="--ots-proof"
     )
@@ -1169,8 +1198,8 @@ def _cmd_log_anchor(args: argparse.Namespace) -> int:
     # its content: this mirrors --attest-version selecting the signing
     # profile elsewhere in this CLI, not the fail-open "trust the artifact's
     # own self-description" antipattern (there is no accept/reject decision
-    # here — attaching is purely mechanical; `verify --transparency` is the
-    # one boundary that actually judges this evidence).
+    # here about `kind` — `verify --transparency` is still the one boundary
+    # that judges the evidence's cryptographic standing).
     new_proofs: list[dict[str, Any]] = [{**ots_proof, "kind": "ots"}]
     if args.rfc3161_token is not None:
         token_b64 = base64.b64encode(
@@ -1182,16 +1211,55 @@ def _cmd_log_anchor(args: argparse.Namespace) -> int:
         ).decode("ascii")
         new_proofs.append({"kind": "rfc3161", "token_b64": token_b64})
 
-    existing_anchors = evidence.get("anchors")
-    existing_proofs: list[Any] = (
-        existing_anchors["proofs"]
-        if isinstance(existing_anchors, dict) and isinstance(existing_anchors.get("proofs"), list)
-        else []
+    # G4/I2 (attest-v0.2.md §11.1.1): this command only ever stamps
+    # `anchor_profile: "signed-note-v2"` (below), so a --ots-proof whose
+    # op-chain does not actually commit over `signed_note_bytes` would
+    # produce evidence that mislabels its own commitment — catch that here,
+    # at attachment time, instead of only failing later inside
+    # `verify --transparency`'s fail-closed op-chain replay.
+    v2_seed = hashlib.sha256(evidence_checkpoint.signed_note_bytes).digest()
+    v2_accumulator, v2_warning = anchor.replay_ots_op_chain(v2_seed, ots_proof.get("ops"))
+    proof_root = ots_proof.get("header_merkle_root")
+    v2_matches = (
+        v2_warning is None
+        and v2_accumulator is not None
+        and isinstance(proof_root, str)
+        and v2_accumulator.hex() == proof_root
     )
+    if not v2_matches:
+        legacy_seed = hashlib.sha256(evidence_checkpoint.note_bytes).digest()
+        legacy_accumulator, legacy_warning = anchor.replay_ots_op_chain(
+            legacy_seed, ots_proof.get("ops")
+        )
+        legacy_matches = (
+            legacy_warning is None
+            and legacy_accumulator is not None
+            and isinstance(proof_root, str)
+            and legacy_accumulator.hex() == proof_root
+        )
+        if legacy_matches:
+            raise CliUsageError(
+                f"{args.ots_proof}'s op-chain was produced by pre-G4 tooling committing "
+                "note_bytes (the unsigned checkpoint header alone); anchor_profile "
+                "signed-note-v2 requires the full signed note (signed_note_bytes) — "
+                "re-produce the OTS proof against the signed checkpoint"
+            )
+        raise CliUsageError(
+            f"{args.ots_proof}'s op-chain does not replay to its own header_merkle_root "
+            f"from the signed-note-v2 seed SHA256(signed_note_bytes)={v2_seed.hex()} — "
+            "re-produce the OTS proof against this evidence's checkpoint"
+        )
+
     updated_evidence = dict(evidence)
     updated_evidence["anchors"] = {
         "checkpoint": checkpoint_text,
         "proofs": [*existing_proofs, *new_proofs],
+        # G4 (attest-v0.2.md §11.1.1): newly-produced anchor evidence MUST
+        # declare the v2 commitment profile; the seed check above already
+        # confirmed --ots-proof's op-chain replays from
+        # SHA-256(checkpoint.signed_note_bytes) (header AND signature
+        # lines), not the legacy SHA-256(checkpoint.note_bytes)-only seed.
+        "anchor_profile": "signed-note-v2",
     }
     serialized = canon.dumps(updated_evidence)
     if len(serialized) > verify._MAX_TRANSPARENCY_EVIDENCE_LEN:
