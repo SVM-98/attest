@@ -43,13 +43,14 @@ _VERSIONING_REQUIRED_SUITES: tuple[str, ...] = ("`ed25519`", "`ed25519+ml-dsa-65
 # §4's algorithm lifecycle defines exactly these three states.
 _VERSIONING_LIFECYCLE_STATES: tuple[str, ...] = ("`active`", "`deprecated`", "`unsafe`")
 
-# §6.3 lists the existing revocation classes, plus the separate reserved
-# `transferred` row for the future transfer profile.
+# §6.3 lists the existing `license.revocability` classes (v0.1 §5.5), plus the
+# separate reserved `transferred` row for the future transfer profile.
+# `compromised` is NOT one of these: it is a key lifecycle STATUS (v0.1 §7.3),
+# not a revocation class, and does not belong in this registry (2026-07-23 fix).
 _VERSIONING_REQUIRED_REVOCATION_CLASSES: tuple[str, ...] = (
     "`none`",
     "`refund_window`",
     "`policy`",
-    "`compromised`",
 )
 
 # Required traceability-matrix coverage: every numbered section of the two
@@ -546,6 +547,7 @@ def collect_errors(
         f"attest-versioning.md: {e}" for e in check_versioning_lifecycle_exception(versioning)
     ]
     errors += check_revision_logs(spec_v01, spec_v02)
+    errors += _check_revision_log(versioning, "attest-versioning.md")
     errors += check_receipt_id_pattern(spec_v01, schema)
     return errors
 

@@ -603,5 +603,26 @@ describe('manifests', () => {
     it('true when candidate is legacy (no manifest_version)', () => {
       expect(checkArtifactContinuity(parse(am1), parse(amLegacy))).toBe(true)
     })
+
+    it('true for a same-version re-delivery of the value-identical manifest', () => {
+      // Re-fetching the same trusted manifest it already holds must stay continuous.
+      expect(checkArtifactContinuity(parse(am1), parse(am1))).toBe(true)
+    })
+
+    it('false for two DIFFERENT manifests at the SAME manifest_version (equivocation)', () => {
+      const am1Variant = signManifest(
+        {
+          issuer: ISSUER,
+          series: SERIES,
+          version: 1,
+          manifest_version: 1,
+          released_at: '2025-03-02T00:00:00Z',
+          artifacts: [artifactEntry()],
+        },
+        kid1,
+        seed1,
+      )
+      expect(checkArtifactContinuity(parse(am1), parse(am1Variant))).toBe(false)
+    })
   })
 })

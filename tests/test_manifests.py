@@ -364,7 +364,9 @@ def test_verify_artifact_manifest_rejects_signed_zero_manifest_version() -> None
     )
     manifest["manifest_version"] = 0
     manifest["manifest_signature"] = manifests.sign_signature_block(
-        manifests._signable(manifest), KP1, KID1  # type: ignore[attr-defined]
+        manifests._signable(manifest),
+        KP1,
+        KID1,  # type: ignore[attr-defined]
     )
     assert manifests.verify_artifact_manifest(manifest, key_manifest) is False
 
@@ -454,6 +456,33 @@ def test_artifact_manifest_continuity_legacy_candidate_warn_only() -> None:
     trusted = _artifact_manifest(1, 1)
     candidate = _artifact_manifest(2, None)
     assert manifests.check_artifact_continuity(trusted=trusted, candidate=candidate) is True
+
+
+def test_artifact_manifest_same_version_value_identical_accepted() -> None:
+    """A same-version RE-DELIVERY of the byte-identical manifest is continuous
+    (e.g. a caller re-fetching the same trusted manifest it already holds)."""
+    m1 = _artifact_manifest(1, 1)
+    m1_again = dict(m1)
+    assert manifests.check_artifact_continuity(trusted=m1, candidate=m1_again) is True
+
+
+def test_artifact_manifest_same_version_distinct_content_rejected() -> None:
+    """Equivocation shape: two DIFFERENT manifests at the SAME manifest_version
+    must NOT be treated as continuous — the caller routes this to
+    `unverified_rotation` instead of silently accepting either."""
+    m1 = _artifact_manifest(1, 1)
+    m1_variant = manifests.build_artifact_manifest(
+        ISSUER,
+        SERIES,
+        1,
+        "2026-03-02T00:00:00Z",
+        [_artifact()],
+        KP1,
+        KID1,
+        manifest_version=1,
+    )
+    assert m1 != m1_variant
+    assert manifests.check_artifact_continuity(trusted=m1, candidate=m1_variant) is False
 
 
 def test_verify_artifact_manifest_false_over_entries_ceiling() -> None:
