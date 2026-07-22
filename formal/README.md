@@ -74,7 +74,7 @@ bounds the prover subprocess.
 CI runs the corpus as a five-shard matrix (the `formal` job in
 `.github/workflows/ci.yml`): the two scheduled long-runners each get a
 dedicated shard, the revocation chain is split across two more (one tamarin
-process proving all 14 revocation lemmas peaked at 5.7 GB locally and was
+process proving all 14 revocation lemmas peaked at 8.2 GB locally and was
 OOM-killed on hosted runners), and every remaining
 contract lemma is the fifth. The shard lists live in the workflow and are
 pinned against drift by tests in `tests/tools/test_check_formal.py` that

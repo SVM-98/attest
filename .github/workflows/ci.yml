@@ -108,8 +108,8 @@ jobs:
   # no_downgrade_revocation_allhybrid (~829s) and acceptance_issuer_signed
   # (~602s) are scheduled long-runners and get their own shards; the
   # revocation chain is the next-heaviest cluster and is split in TWO —
-  # one tamarin process proving all 14 revocation lemmas peaked at 5.7 GB
-  # locally and was twice OOM-killed on hosted runners at the same
+  # one tamarin process proving all 14 revocation lemmas peaked at 8.2 GB
+  # locally (measured) and was twice OOM-killed on hosted runners at the same
   # progression point ("runner has received a shutdown signal", 2026-07-22);
   # `rest` is every remaining
   # CONTRACT lemma. The checker gets a per-shard timeout 300 seconds below
