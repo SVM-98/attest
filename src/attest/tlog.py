@@ -506,12 +506,26 @@ class Checkpoint:
     `note_bytes` is exactly the bytes a note signature is computed over:
     the three header lines (origin, tree size, base64 root) through their
     final newline, excluding the blank line separating them from signatures.
+
+    `signed_note_bytes` is the FULL checkpoint text as parsed — the same
+    header lines, the blank line, AND every C2SP signature line, byte-for-
+    byte the original input to `parse_checkpoint`/`verify_checkpoint`
+    (never re-serialized). `anchor.py`'s v2 anchor profile
+    (`"signed-note-v2"`, attest-v0.2.md §11.1) commits an OTS op-chain over
+    this instead of `note_bytes` alone: `note_bytes` is unsigned-header-only
+    text that exists identically before and after the note is actually
+    signed, so a v1 (`note_bytes`-only) OTS anchor proves only that SOME
+    note with this header existed by a given time, not that anyone had
+    signed it yet — the pre-anchor-then-sign gap TM-33's residual risk
+    documents. `signed_note_bytes` contains the real signature-line bytes,
+    so a v2 anchor cannot exist before the note was actually signed.
     """
 
     origin: str
     tree_size: int
     root: bytes
     note_bytes: bytes
+    signed_note_bytes: bytes
 
 
 @dataclass(frozen=True)
@@ -695,7 +709,22 @@ def _parse(text: str) -> tuple[Checkpoint, list[tuple[str, bytes]]]:
         raise TlogError(f"root must decode to {_HASH_LEN} bytes, got {len(root)}")
     signatures = _parse_signature_lines(sig_lines)
     note_bytes = _note_bytes(header)
-    checkpoint = Checkpoint(origin=origin, tree_size=tree_size, root=root, note_bytes=note_bytes)
+    # `text` is NOT pure ASCII (each C2SP signature line opens with the
+    # em dash U+2014, a 3-byte UTF-8 sequence) but IS guaranteed valid UTF-8
+    # by this point: `_validate_origin`, `_parse_tree_size`, base64 root
+    # decoding, and `_parse_signature_lines` (key-name grammar + base64 blob
+    # charset) each already constrain their slice of `text` to printable
+    # ASCII, and the em dash itself came from this same already-decoded
+    # `str`, so `.encode()` can't raise here — this is not a
+    # re-serialization, it's the original input bytes back.
+    signed_note_bytes = text.encode()
+    checkpoint = Checkpoint(
+        origin=origin,
+        tree_size=tree_size,
+        root=root,
+        note_bytes=note_bytes,
+        signed_note_bytes=signed_note_bytes,
+    )
     return checkpoint, signatures
 
 

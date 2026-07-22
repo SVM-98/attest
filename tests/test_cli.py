@@ -807,11 +807,28 @@ def test_manifest_artifacts_rejects_nonpositive_manifest_version(capsys: CapSys)
     with pytest.raises(SystemExit) as exc:
         parser.parse_args(
             [
-                "manifest", "artifacts", "--in", "key-manifest.json", "--issuer", ISSUER,
-                "--series", f"{ISSUER}/works/EXG-001", "--version", "1",
-                "--manifest-version", "0", "--released-at", VALID_FROM,
-                "--artifacts", "artifacts.json", "--signing-kid", KID,
-                "--signing-seed", "issuer.seed", "--out", "artifact-manifest.json",
+                "manifest",
+                "artifacts",
+                "--in",
+                "key-manifest.json",
+                "--issuer",
+                ISSUER,
+                "--series",
+                f"{ISSUER}/works/EXG-001",
+                "--version",
+                "1",
+                "--manifest-version",
+                "0",
+                "--released-at",
+                VALID_FROM,
+                "--artifacts",
+                "artifacts.json",
+                "--signing-kid",
+                KID,
+                "--signing-seed",
+                "issuer.seed",
+                "--out",
+                "artifact-manifest.json",
             ]
         )
     assert exc.value.code == 2
@@ -828,8 +845,7 @@ def test_load_trust_dir_scopes_artifact_chains_by_issuer_and_series(tmp_path: Pa
     assert set(trust_store.artifact_manifests) == {ISSUER, "other.example.com"}
     assert trust_store.artifact_manifests[ISSUER][series]["issuer"] == ISSUER
     assert (
-        trust_store.artifact_manifests["other.example.com"][series]["issuer"]
-        == "other.example.com"
+        trust_store.artifact_manifests["other.example.com"][series]["issuer"] == "other.example.com"
     )
 
 
@@ -2318,6 +2334,35 @@ def _minimal_anchor_evidence() -> dict[str, str]:
     return {"checkpoint": checkpoint}
 
 
+def _v2_ots_proof(checkpoint_text: str) -> dict[str, object]:
+    """Build an `--ots-proof` file whose op-chain genuinely replays from
+    `SHA256(signed_note_bytes)` (the signed-note-v2 seed) — the single
+    `["sha256"]` op, so `header_merkle_root` is just `SHA256(that seed)`.
+    Used by tests that only care about reaching code AFTER attachment-time
+    seed validation (G4/I2), not about the op-chain's own shape."""
+    signed_note_bytes = tlog.parse_checkpoint(checkpoint_text).signed_note_bytes
+    seed = hashlib.sha256(signed_note_bytes).digest()
+    return {
+        "ops": [["sha256"]],
+        "header_merkle_root": hashlib.sha256(seed).hexdigest(),
+        "header_hash": "11" * 32,
+        "header_time": 1700000000,
+    }
+
+
+def _v1_ots_proof(checkpoint_text: str) -> dict[str, object]:
+    """Same as `_v2_ots_proof` but seeded from `SHA256(note_bytes)` (the
+    legacy pre-G4 seed) — used to exercise the legacy-diagnostic error."""
+    note_bytes = tlog.parse_checkpoint(checkpoint_text).note_bytes
+    seed = hashlib.sha256(note_bytes).digest()
+    return {
+        "ops": [["sha256"]],
+        "header_merkle_root": hashlib.sha256(seed).hexdigest(),
+        "header_hash": "11" * 32,
+        "header_time": 1700000000,
+    }
+
+
 @pytest.mark.parametrize("flag", ["--transparency", "--log-keys", "--anchor-policy"])
 def test_verify_rejects_oversized_stage2_json_input(
     tmp_path: Path, capsys: CapSys, flag: str
@@ -2413,10 +2458,13 @@ def test_log_anchor_max_cap_rfc3161_token_stays_within_verifier_evidence_ceiling
     the cap must leave room for the base64 expansion PLUS checkpoint and JSON
     overhead inside the same evidence object."""
     log_dir = _log_init(tmp_path)
+    minimal_evidence = _minimal_anchor_evidence()
     evidence_path = tmp_path / "evidence.json"
-    evidence_path.write_text(json.dumps(_minimal_anchor_evidence()), encoding="utf-8")
+    evidence_path.write_text(json.dumps(minimal_evidence), encoding="utf-8")
     ots_proof_path = tmp_path / "ots-proof.json"
-    ots_proof_path.write_text("{}", encoding="utf-8")
+    ots_proof_path.write_text(
+        json.dumps(_v2_ots_proof(minimal_evidence["checkpoint"])), encoding="utf-8"
+    )
     max_cap_token = tmp_path / "max-cap-rfc3161.tsr"
     with max_cap_token.open("wb") as file:
         file.truncate(cli._MAX_STAGE2_INPUT_BYTES["rfc3161"])
@@ -2459,7 +2507,7 @@ def test_log_anchor_refuses_evidence_exceeding_verifier_ceiling(
     evidence_path = tmp_path / "evidence.json"
     evidence_path.write_text(json.dumps({"checkpoint": checkpoint}), encoding="utf-8")
     ots_proof_path = tmp_path / "ots-proof.json"
-    ots_proof_path.write_text("{}", encoding="utf-8")
+    ots_proof_path.write_text(json.dumps(_v2_ots_proof(checkpoint)), encoding="utf-8")
     max_cap_token = tmp_path / "max-cap-rfc3161.tsr"
     with max_cap_token.open("wb") as file:
         file.truncate(cli._MAX_STAGE2_INPUT_BYTES["rfc3161"])
@@ -2746,8 +2794,12 @@ def test_verify_crqc_horizon_before_anchor_time_caps_transparency(
     evidence_path = _log_prove(tmp_path, log_dir, 0)
 
     checkpoint_text = checkpoint_path.read_text(encoding="utf-8")
-    note_bytes = tlog.parse_checkpoint(checkpoint_text).note_bytes
-    accumulator_start = hashlib.sha256(note_bytes).digest()
+    # `attest log anchor` stamps `anchor_profile: "signed-note-v2"` on every
+    # newly-attached anchor (G4, attest-v0.2.md §11.1), so the op-chain this
+    # externally-obtained OTS proof replays must commit over the checkpoint's
+    # FULL signed note (`signed_note_bytes`), not just its unsigned header.
+    signed_note_bytes = tlog.parse_checkpoint(checkpoint_text).signed_note_bytes
+    accumulator_start = hashlib.sha256(signed_note_bytes).digest()
     header_merkle_root = hashlib.sha256(accumulator_start).digest().hex()
     header_hash = hashlib.sha256(b"attest-cli-test-anchor-header-v1").hexdigest()
     header_time = 1700000000  # transparency.py's own documented KAT: -> 2023-11-14T22:13:20Z
@@ -2835,6 +2887,272 @@ def test_verify_crqc_horizon_before_anchor_time_caps_transparency(
     result = json.loads(capsys.readouterr().out)
     assert rc == 0
     assert result["transparency"] == "not_checked"
+
+
+# --------------------------------------------------------------------------
+# I1 (attest-v0.2.md §11.1.1): single-profile rule — `log anchor` must
+# refuse to append a v2 proof to a bundle whose retained proofs are v1, and
+# must not silently relabel those retained proofs' profile.
+# --------------------------------------------------------------------------
+
+
+def test_log_anchor_refuses_to_append_v2_proof_to_existing_v1_bundle(
+    tmp_path: Path, capsys: CapSys
+) -> None:
+    minimal_evidence = _minimal_anchor_evidence()
+    checkpoint_text = minimal_evidence["checkpoint"]
+    log_dir = _log_init(tmp_path, origin=LOG_ORIGIN)
+
+    # First anchor attach: no prior proofs, so it succeeds and the tool
+    # stamps `anchor_profile: "signed-note-v2"` on the (only) retained proof
+    # — but simulate a pre-G4 bundle that already carries a `note-v1`-shaped
+    # proof by hand-writing `anchors` directly, exactly the shape pre-fix
+    # tooling could have produced (proofs present, no anchor_profile field).
+    v1_evidence = dict(minimal_evidence)
+    v1_evidence["anchors"] = {
+        "checkpoint": checkpoint_text,
+        "proofs": [{**_v1_ots_proof(checkpoint_text), "kind": "ots"}],
+    }
+    evidence_path = tmp_path / "evidence.json"
+    evidence_path.write_text(json.dumps(v1_evidence), encoding="utf-8")
+
+    ots_proof_path = tmp_path / "ots-proof.json"
+    ots_proof_path.write_text(json.dumps(_v2_ots_proof(checkpoint_text)), encoding="utf-8")
+    out_path = tmp_path / "anchored.json"
+
+    capsys.readouterr()
+    rc = cli.main(
+        [
+            "log",
+            "anchor",
+            "--dir",
+            str(log_dir),
+            "--evidence",
+            str(evidence_path),
+            "--ots-proof",
+            str(ots_proof_path),
+            "--out",
+            str(out_path),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "note-v1" in captured.err
+    assert "exactly one anchor_profile" in captured.err
+    assert "fresh signed-note-v2 bundle" in captured.err
+    assert not out_path.exists()
+
+
+def test_log_anchor_refuses_to_append_to_existing_bundle_declaring_explicit_note_v1(
+    tmp_path: Path, capsys: CapSys
+) -> None:
+    """Same refusal when the retained bundle explicitly declares
+    `anchor_profile: "note-v1"` rather than leaving it absent."""
+    minimal_evidence = _minimal_anchor_evidence()
+    checkpoint_text = minimal_evidence["checkpoint"]
+    log_dir = _log_init(tmp_path, origin=LOG_ORIGIN)
+
+    v1_evidence = dict(minimal_evidence)
+    v1_evidence["anchors"] = {
+        "checkpoint": checkpoint_text,
+        "proofs": [{**_v1_ots_proof(checkpoint_text), "kind": "ots"}],
+        "anchor_profile": "note-v1",
+    }
+    evidence_path = tmp_path / "evidence.json"
+    evidence_path.write_text(json.dumps(v1_evidence), encoding="utf-8")
+
+    ots_proof_path = tmp_path / "ots-proof.json"
+    ots_proof_path.write_text(json.dumps(_v2_ots_proof(checkpoint_text)), encoding="utf-8")
+    out_path = tmp_path / "anchored.json"
+
+    capsys.readouterr()
+    rc = cli.main(
+        [
+            "log",
+            "anchor",
+            "--dir",
+            str(log_dir),
+            "--evidence",
+            str(evidence_path),
+            "--ots-proof",
+            str(ots_proof_path),
+            "--out",
+            str(out_path),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "note-v1" in captured.err
+    assert not out_path.exists()
+
+
+def test_log_anchor_permits_appending_a_second_v2_proof_to_a_v2_bundle(
+    tmp_path: Path, capsys: CapSys
+) -> None:
+    """The single-profile rule only refuses a MISMATCHED profile — appending
+    another v2 proof to an already-v2 bundle stays allowed."""
+    minimal_evidence = _minimal_anchor_evidence()
+    checkpoint_text = minimal_evidence["checkpoint"]
+    log_dir = _log_init(tmp_path, origin=LOG_ORIGIN)
+
+    v2_evidence = dict(minimal_evidence)
+    v2_evidence["anchors"] = {
+        "checkpoint": checkpoint_text,
+        "proofs": [{**_v2_ots_proof(checkpoint_text), "kind": "ots"}],
+        "anchor_profile": "signed-note-v2",
+    }
+    evidence_path = tmp_path / "evidence.json"
+    evidence_path.write_text(json.dumps(v2_evidence), encoding="utf-8")
+
+    ots_proof_path = tmp_path / "ots-proof.json"
+    ots_proof_path.write_text(json.dumps(_v2_ots_proof(checkpoint_text)), encoding="utf-8")
+    out_path = tmp_path / "anchored.json"
+
+    capsys.readouterr()
+    rc = cli.main(
+        [
+            "log",
+            "anchor",
+            "--dir",
+            str(log_dir),
+            "--evidence",
+            str(evidence_path),
+            "--ots-proof",
+            str(ots_proof_path),
+            "--out",
+            str(out_path),
+        ]
+    )
+    capsys.readouterr()
+
+    assert rc == 0
+    written = json.loads(out_path.read_text(encoding="utf-8"))
+    assert len(written["anchors"]["proofs"]) == 2
+    assert written["anchors"]["anchor_profile"] == "signed-note-v2"
+
+
+# --------------------------------------------------------------------------
+# I2(a) (attest-v0.2.md §11.1.1): attachment-time seed validation — `log
+# anchor` refuses an --ots-proof whose op-chain does not commit over the
+# signed-note-v2 seed, with a dedicated diagnostic for the common mistake
+# of supplying a pre-G4 (note_bytes-only) proof.
+# --------------------------------------------------------------------------
+
+
+def test_log_anchor_refuses_pre_g4_note_bytes_seeded_ots_proof(
+    tmp_path: Path, capsys: CapSys
+) -> None:
+    minimal_evidence = _minimal_anchor_evidence()
+    checkpoint_text = minimal_evidence["checkpoint"]
+    log_dir = _log_init(tmp_path, origin=LOG_ORIGIN)
+
+    evidence_path = tmp_path / "evidence.json"
+    evidence_path.write_text(json.dumps(minimal_evidence), encoding="utf-8")
+    ots_proof_path = tmp_path / "ots-proof.json"
+    ots_proof_path.write_text(json.dumps(_v1_ots_proof(checkpoint_text)), encoding="utf-8")
+    out_path = tmp_path / "anchored.json"
+
+    capsys.readouterr()
+    rc = cli.main(
+        [
+            "log",
+            "anchor",
+            "--dir",
+            str(log_dir),
+            "--evidence",
+            str(evidence_path),
+            "--ots-proof",
+            str(ots_proof_path),
+            "--out",
+            str(out_path),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "pre-G4 tooling" in captured.err
+    assert "note_bytes" in captured.err
+    assert "signed-note-v2 requires the full signed note" in captured.err
+    assert not out_path.exists()
+
+
+def test_log_anchor_refuses_ots_proof_with_unrelated_seed(tmp_path: Path, capsys: CapSys) -> None:
+    minimal_evidence = _minimal_anchor_evidence()
+    log_dir = _log_init(tmp_path, origin=LOG_ORIGIN)
+
+    evidence_path = tmp_path / "evidence.json"
+    evidence_path.write_text(json.dumps(minimal_evidence), encoding="utf-8")
+    ots_proof_path = tmp_path / "ots-proof.json"
+    bogus_seed = hashlib.sha256(b"not-derived-from-this-checkpoint-at-all").digest()
+    ots_proof_path.write_text(
+        json.dumps(
+            {
+                "ops": [["sha256"]],
+                "header_merkle_root": hashlib.sha256(bogus_seed).hexdigest(),
+                "header_hash": "11" * 32,
+                "header_time": 1700000000,
+            }
+        ),
+        encoding="utf-8",
+    )
+    out_path = tmp_path / "anchored.json"
+
+    capsys.readouterr()
+    rc = cli.main(
+        [
+            "log",
+            "anchor",
+            "--dir",
+            str(log_dir),
+            "--evidence",
+            str(evidence_path),
+            "--ots-proof",
+            str(ots_proof_path),
+            "--out",
+            str(out_path),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "does not replay to its own header_merkle_root" in captured.err
+    assert "signed-note-v2 seed SHA256(signed_note_bytes)=" in captured.err
+    assert not out_path.exists()
+
+
+def test_log_anchor_accepts_v2_seeded_ots_proof(tmp_path: Path, capsys: CapSys) -> None:
+    """Positive counterpart: a genuinely v2-seeded proof is still accepted
+    (RED-first control for the two refusal tests above)."""
+    minimal_evidence = _minimal_anchor_evidence()
+    checkpoint_text = minimal_evidence["checkpoint"]
+    log_dir = _log_init(tmp_path, origin=LOG_ORIGIN)
+
+    evidence_path = tmp_path / "evidence.json"
+    evidence_path.write_text(json.dumps(minimal_evidence), encoding="utf-8")
+    ots_proof_path = tmp_path / "ots-proof.json"
+    ots_proof_path.write_text(json.dumps(_v2_ots_proof(checkpoint_text)), encoding="utf-8")
+    out_path = tmp_path / "anchored.json"
+
+    capsys.readouterr()
+    rc = cli.main(
+        [
+            "log",
+            "anchor",
+            "--dir",
+            str(log_dir),
+            "--evidence",
+            str(evidence_path),
+            "--ots-proof",
+            str(ots_proof_path),
+            "--out",
+            str(out_path),
+        ]
+    )
+    assert rc == 0
+    written = json.loads(out_path.read_text(encoding="utf-8"))
+    assert written["anchors"]["anchor_profile"] == "signed-note-v2"
 
 
 def test_export_import_carries_proofs_via_proof_dir(tmp_path: Path, capsys: CapSys) -> None:

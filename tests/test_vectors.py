@@ -226,10 +226,10 @@ def test_vectors_directory_is_nonempty() -> None:
     # parity leaf (27, 2026-07-17) + 14 transparency/corroboration conformance
     # leaves (28, 2026-07-18) + 2 normative-ceiling leaves (29, 2026-07-22) +
     # 2 mixed-keyset leaves (30, 2026-07-22) + 5 manifest-currency leaves
-    # (31, 2026-07-22):
+    # (31, 2026-07-22) + 3 anchor-profile-v2 leaves (32, 2026-07-22, G4):
     # 19 a/b, 20 a-c, 21 a-g, 22 a-c, 23 a/b, 24, 25 a/b, 26 a-h, 28 a-n,
-    # 29 a/c, 30 a/b, 31 a-e.
-    assert len(_VECTOR_DIRS) >= 75
+    # 29 a/c, 30 a/b, 31 a-e, 32 a-c.
+    assert len(_VECTOR_DIRS) >= 78
 
 
 _CANONICAL_DIRS = [p for p in _VECTOR_DIRS if (p / "canonical.json").exists()]
