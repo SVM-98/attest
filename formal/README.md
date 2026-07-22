@@ -32,7 +32,7 @@ maude --version
 
 ## Running the gate
 
-CI runs the four sharded invocations in [Shards (`--only`)](#shards---only)
+CI runs the five sharded invocations in [Shards (`--only`)](#shards---only)
 below. For a local one-shot reproduction of the full corpus:
 
 ```sh
@@ -71,12 +71,14 @@ contract lemma fails. An unknown name or an empty scope such as
 `--only ','` or `--only ''` is a usage error (exit 2). `--timeout <seconds>`
 bounds the prover subprocess.
 
-CI runs the corpus as a four-shard matrix (the `formal` job in
+CI runs the corpus as a five-shard matrix (the `formal` job in
 `.github/workflows/ci.yml`): the two scheduled long-runners each get a
-dedicated shard, the revocation chain is a third, and every remaining
-contract lemma is the fourth. The shard lists live in the workflow and are
+dedicated shard, the revocation chain is split across two more (one tamarin
+process proving all 14 revocation lemmas peaked at 5.7 GB locally and was
+OOM-killed on hosted runners), and every remaining
+contract lemma is the fifth. The shard lists live in the workflow and are
 pinned against drift by tests in `tests/tools/test_check_formal.py` that
-parse the workflow and assert the four `--only` lists are pairwise disjoint
+parse the workflow and assert the five `--only` lists are pairwise disjoint
 with union exactly equal to the checker contract — a lemma added to the
 contract without a shard assignment turns CI red in pytest before any prover
 minute is spent. A further semantic test asserts the job's run steps invoke

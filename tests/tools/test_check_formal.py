@@ -747,7 +747,7 @@ def test_round3_repro_quoted_comment_opener_rejected(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------
-# CI shard anti-drift (Task 8): the `formal` job's four `--only` lists in
+# CI shard anti-drift (Task 8): the `formal` job's five `--only` lists in
 # .github/workflows/ci.yml must partition CONTRACT exactly. A lemma added to
 # CONTRACT without a shard assignment (or assigned twice) must turn CI red
 # HERE, in pytest, before any prover minute is spent.
@@ -889,7 +889,7 @@ def _matrix_list_item_count(formal_block: str) -> int:
 
 
 def ci_formal_shards(workflow: Path | None = None) -> dict[str, list[str]]:
-    """Extract the formal job's four shard -> lemma-list mappings from ci.yml."""
+    """Extract the formal job's five shard -> lemma-list mappings from ci.yml."""
     formal_block = ci_formal_job_block(workflow)
     entries = [
         (match.group("shard"), match.group("lemmas").split(","))
@@ -907,21 +907,22 @@ def ci_formal_shards(workflow: Path | None = None) -> dict[str, list[str]]:
             f"{len(entries)} parse as shard entries — fix ci.yml or this "
             "parser, do not let entries go dark"
         )
-    if len(entries) != 4:
+    if len(entries) != 5:
         raise AssertionError(
-            f"formal job must declare exactly 4 shard entries, found {len(entries)}"
+            f"formal job must declare exactly 5 shard entries, found {len(entries)}"
         )
     shard_names = [name for name, _ in entries]
-    if len(set(shard_names)) != 4:
+    if len(set(shard_names)) != 5:
         raise AssertionError(f"formal job shard names must be distinct, found {shard_names}")
     return dict(entries)
 
 
-def test_ci_formal_matrix_declares_exactly_the_four_shards() -> None:
+def test_ci_formal_matrix_declares_exactly_the_five_shards() -> None:
     assert set(ci_formal_shards()) == {
         "heavy-revdowngrade",
         "heavy-acceptance",
-        "revocation",
+        "revocation-core",
+        "revocation-classes",
         "rest",
     }
 
@@ -1171,7 +1172,7 @@ def test_ci_formal_shards_rejects_duplicate_entry(tmp_path: Path) -> None:
     workflow = tmp_path / "ci.yml"
     workflow.write_text(mutated, encoding="utf-8")
 
-    with pytest.raises(AssertionError, match="exactly 4 shard entries"):
+    with pytest.raises(AssertionError, match="exactly 5 shard entries"):
         ci_formal_shards(workflow)
 
 
