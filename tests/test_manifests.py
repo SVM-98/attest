@@ -288,6 +288,115 @@ def test_artifact_manifest_released_within_window_true() -> None:
     assert manifests.verify_artifact_manifest(am, key_manifest)
 
 
+# --- G1 normative ceilings (attest-versioning.md §5 amendment) --------------
+
+
+def _filler_key_entries(count: int, prefix: str) -> list[dict[str, Any]]:
+    """`count` distinct, deterministic Ed25519 key entries — no wall-clock or
+    CSPRNG randomness, matching `tools/gen_vectors.py`'s determinism
+    discipline (this file has no such existing rule, but generated
+    filler at ceiling scale should still be reproducible on inspection)."""
+    entries = []
+    for i in range(count):
+        seed = hashlib.sha256(f"{prefix}-{i}".encode()).digest()
+        kp = keys.from_seed(seed)
+        entries.append(
+            manifests.key_entry(
+                f"{ISSUER}/keys/test#filler-{i}", kp.pub, "2026-01-01T00:00:00Z", None, "active"
+            )
+        )
+    return entries
+
+
+def test_verify_key_manifest_true_at_key_ceiling() -> None:
+    entries = [manifests.key_entry(KID1, KP1.pub, "2026-01-01T00:00:00Z", None, "active")]
+    entries += _filler_key_entries(manifests.MAX_MANIFEST_KEYS - 1, "test-manifest-ceiling-at")
+    assert len(entries) == manifests.MAX_MANIFEST_KEYS
+    manifest = manifests.build_key_manifest(ISSUER, 1, "2026-01-01T00:00:00Z", entries, KP1, KID1)
+    assert manifests.verify_key_manifest(manifest) is True
+
+
+def test_verify_key_manifest_false_over_key_ceiling() -> None:
+    entries = [manifests.key_entry(KID1, KP1.pub, "2026-01-01T00:00:00Z", None, "active")]
+    entries += _filler_key_entries(manifests.MAX_MANIFEST_KEYS, "test-manifest-ceiling-over")
+    assert len(entries) == manifests.MAX_MANIFEST_KEYS + 1
+    manifest = manifests.build_key_manifest(ISSUER, 1, "2026-01-01T00:00:00Z", entries, KP1, KID1)
+    assert manifests.verify_key_manifest(manifest) is False
+
+
+def test_verify_artifact_manifest_true_at_entries_ceiling() -> None:
+    key_manifest = _v1_manifest()
+    artifacts = [_artifact() for _ in range(manifests.MAX_ARTIFACT_ENTRIES)]
+    am = manifests.build_artifact_manifest(
+        ISSUER, SERIES, 1, "2026-03-01T00:00:00Z", artifacts, KP1, KID1
+    )
+    assert manifests.verify_artifact_manifest(am, key_manifest) is True
+
+
+def test_verify_artifact_manifest_false_over_entries_ceiling() -> None:
+    key_manifest = _v1_manifest()
+    artifacts = [_artifact() for _ in range(manifests.MAX_ARTIFACT_ENTRIES + 1)]
+    am = manifests.build_artifact_manifest(
+        ISSUER, SERIES, 1, "2026-03-01T00:00:00Z", artifacts, KP1, KID1
+    )
+    assert manifests.verify_artifact_manifest(am, key_manifest) is False
+
+
+# --- G6 mixed-keyset prohibition (v0.2 §2.3/§13 amendment) ------------------
+
+
+def _hybrid_entry(kid: str, kp: Any, status: str = "active") -> dict[str, Any]:
+    return manifests.key_entry(
+        kid, kp.pub, "2026-01-01T00:00:00Z", None, status, pub_ml_dsa_65=bytes(1952)
+    )
+
+
+def test_has_active_ed_only_sibling_true_when_ed_only_key_active() -> None:
+    manifest = {
+        "keys": [
+            _hybrid_entry(KID1, KP1, status="active"),
+            manifests.key_entry(KID2, KP2.pub, "2026-01-01T00:00:00Z", None, "active"),
+        ]
+    }
+    assert manifests.has_active_ed_only_sibling(manifest) is True
+
+
+def test_has_active_ed_only_sibling_false_when_sibling_retired() -> None:
+    manifest = {
+        "keys": [
+            _hybrid_entry(KID1, KP1, status="active"),
+            manifests.key_entry(KID2, KP2.pub, "2026-01-01T00:00:00Z", None, "retired"),
+        ]
+    }
+    assert manifests.has_active_ed_only_sibling(manifest) is False
+
+
+def test_has_active_ed_only_sibling_false_when_no_hybrid_key_at_all() -> None:
+    manifest = {
+        "keys": [
+            manifests.key_entry(KID1, KP1.pub, "2026-01-01T00:00:00Z", None, "active"),
+            manifests.key_entry(KID2, KP2.pub, "2026-01-01T00:00:00Z", None, "active"),
+        ]
+    }
+    assert manifests.has_active_ed_only_sibling(manifest) is False
+
+
+def test_has_active_ed_only_sibling_false_when_all_keys_hybrid() -> None:
+    manifest = {
+        "keys": [
+            _hybrid_entry(KID1, KP1, status="active"),
+            _hybrid_entry(KID2, KP2, status="active"),
+        ]
+    }
+    assert manifests.has_active_ed_only_sibling(manifest) is False
+
+
+def test_has_active_ed_only_sibling_malformed_keys_fails_closed_no_raise() -> None:
+    assert manifests.has_active_ed_only_sibling({"keys": "not-a-list"}) is False
+    assert manifests.has_active_ed_only_sibling({"keys": [None, 42, "x"]}) is False
+    assert manifests.has_active_ed_only_sibling({}) is False
+
+
 # --- rotate_key_manifest: retirement / compromise ----------------------------
 
 

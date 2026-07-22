@@ -97,6 +97,10 @@ _REVISION_LOG_ENTRY_RE = re.compile(
     r"^- \*\*\d{4}-\d{2}-\d{2} \(rev \d+\)\*\*: .+ — vectors: \S.*$"
 )
 
+# §5.1's `receipt_id` row inlines the ULID regex in backticks, e.g.:
+# `| \`receipt_id\` | string, ULID (\`^[0-7][0-9A-HJKMNP-TV-Z]{25}$\`) | REQUIRED | ... |`
+_RECEIPT_ID_PROSE_ROW_RE = re.compile(r"\| `receipt_id` \| string, ULID \(`([^`]+)`\) \|")
+
 
 class TmEntry(NamedTuple):
     """One `#### TM-nn` attack-catalog entry and its raw block text."""
@@ -435,6 +439,56 @@ def _check_revision_log(spec_text: str, filename: str) -> list[str]:
     return errors
 
 
+def check_receipt_id_pattern(spec_v01: str, schema: dict[str, object]) -> list[str]:
+    """§5.1's inline `receipt_id` ULID regex MUST equal the schema's own
+    `properties.receipt_id.pattern` — the two describe the same wire
+    constraint (a Crockford base32 ULID whose leading character is bounded
+    to `[0-7]`, since a 26-char ULID otherwise overflows 128 bits) and must
+    never drift (2026-07-22 fix: the prose lacked that high-bit guard while
+    the schema already had it).
+
+    Skips ONLY when NEITHER side models `receipt_id` at all — most fixture
+    docs in this test module carry no full §5.1 table and no `receipt_id`
+    schema property, and are not meant to exercise this check; that is not a
+    drift signal. A ONE-SIDED absence, though, IS a drift signal (a prose row
+    added/removed without touching the schema, or vice versa) and is now an
+    explicit, fail-closed error (M2, 2026-07-22 fix wave 2 — this function
+    used to `return []` on either side's absence alone, silently blessing
+    exactly that drift). The real spec and schema always carry both.
+    """
+    match = _RECEIPT_ID_PROSE_ROW_RE.search(spec_v01)
+
+    properties = schema.get("properties")
+    receipt_id_schema = properties.get("receipt_id") if isinstance(properties, dict) else None
+    schema_pattern = (
+        receipt_id_schema.get("pattern") if isinstance(receipt_id_schema, dict) else None
+    )
+
+    if match is None and schema_pattern is None:
+        return []
+
+    if match is None:
+        return [
+            f"attest-v0.1.md: schema defines receipt_id.pattern {schema_pattern!r} but "
+            "§5.1 has no receipt_id prose row (fail-closed: one-sided absence is drift)"
+        ]
+
+    prose_pattern = match.group(1)
+
+    if schema_pattern is None:
+        return [
+            f"attest-v0.1.md: §5.1 receipt_id prose pattern {prose_pattern!r} but schema "
+            "defines no receipt_id.pattern (fail-closed: one-sided absence is drift)"
+        ]
+
+    if prose_pattern != schema_pattern:
+        return [
+            f"attest-v0.1.md: §5.1 receipt_id prose pattern {prose_pattern!r} diverges from "
+            f"schema pattern {schema_pattern!r}"
+        ]
+    return []
+
+
 def check_revision_logs(spec_v01: str, spec_v02: str) -> list[str]:
     """Both normative specs have non-empty revision logs with valid entries."""
     return _check_revision_log(spec_v01, "attest-v0.1.md") + _check_revision_log(
@@ -492,6 +546,7 @@ def collect_errors(
         f"attest-versioning.md: {e}" for e in check_versioning_lifecycle_exception(versioning)
     ]
     errors += check_revision_logs(spec_v01, spec_v02)
+    errors += check_receipt_id_pattern(spec_v01, schema)
     return errors
 
 

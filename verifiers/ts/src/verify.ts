@@ -1,11 +1,13 @@
 import { sha256 } from '@noble/hashes/sha2'
 import { bytesToHex } from '@noble/curves/utils.js'
 import { JsonObject, JsonValue, canonicalBytes, dumps, CanonError, loadsStrict } from './canon.js'
-import { TrustStore, findKey, withinValidity, chainContinuous } from './manifests.js'
+import {
+  TrustStore, findKey, withinValidity, chainContinuous, MAX_MANIFEST_KEYS, hasActiveEdOnlySibling,
+} from './manifests.js'
 import { verifyStrict, Ed25519LengthError } from './ed25519.js'
 import { verifyStrict as verifyMldsaStrict, ML_DSA_65_ALG } from './mldsa.js'
 import { b64uDecode } from './b64u.js'
-import { validatePayload, SCHEMA_TOP_LEVEL_KEYS } from './schema.js'
+import { validatePayload, SCHEMA_TOP_LEVEL_KEYS, validateEnvelopeSize } from './schema.js'
 import { classifyRevocation, MAX_REVOCATION_RECORDS } from './revocation.js'
 import { computeCommitment, verifyChallenge } from './commitment.js'
 import { b64uEncode } from './b64u.js'
@@ -23,7 +25,7 @@ import {
   ERR, WARN, unsupportedAttestVersion, signaturesCount, unsupportedSigAlg, noTrustedManifest,
   noKeyInManifest, keyCompromised, keyRetired, issuedAtOutsideWindow, malformedKeyMaterial,
   malformedSigMaterial, unknownField, unknownEol, keyEntryNotHybrid, pyRepr, codePointLength,
-  VERIFY_TRANSPARENCY_WARN,
+  VERIFY_TRANSPARENCY_WARN, manifestExceedsKeys,
 } from './messages.js'
 
 // attest_version values this verifier's verify() step 1 accepts (v0.1 single-sig,
@@ -406,12 +408,35 @@ export function verify(
     }
   }
 
-  // Step 0 — strict parse
+  // --- G1 normative ceiling (attest-versioning.md §5 amendment; v0.1 §11/
+  // §15, v0.2 §6/§16): the raw envelope MUST NOT exceed MAX_ENVELOPE_BYTES.
+  // Checked on the undecoded bytes, before ANY parsing work. Reported as
+  // schema: 'invalid' (not the 'not_checked' default every other
+  // precondition failure below uses): this ceiling is conformance-surface,
+  // not a parse-shape failure.
+  const sizeViolations = validateEnvelopeSize(envelopeBytes)
+  if (sizeViolations.length > 0) return invalid(sizeViolations[0]!, 'invalid')
+
+  // Step 0 — strict parse.
+  //
+  // G1 normative ceiling (attest-versioning.md §5 amendment; v0.1 §11.3):
+  // the parsed envelope tree's nesting depth MUST NOT exceed
+  // schema.ts's MAX_JSON_DEPTH (== canon.ts's MAX_DEPTH, 256). Enforced
+  // entirely by loadsStrict itself during parsing (CanonError, "maximum
+  // nesting depth exceeded") — there is deliberately no separate walk of
+  // the parsed tree here (2026-07-22 fix wave): the parser's own structural
+  // safety cap already IS this ceiling, so a second, redundant check could
+  // never fire (see schema.ts's MAX_JSON_DEPTH doc comment). A receipt that
+  // trips it never produces a parsed object at all, so it is reported the
+  // same way every other malformed-envelope failure is, schema:
+  // 'not_checked' — unlike the byte-size/manifest-array ceilings, which run
+  // AFTER a successful parse and are conformance-surface checks.
   let parsed: JsonValue
   try { parsed = loadsStrict(envelopeBytes) }
   catch (e) { if (e instanceof CanonError) return invalid(e.message); throw e }
   const envelope = obj(parsed)
   if (!envelope) return invalid(ERR.ENVELOPE_NOT_OBJECT)
+
   const payload = obj(envelope['payload'])
   if (!payload) return invalid(ERR.MISSING_PAYLOAD)
   const signatures = envelope['signatures']
@@ -424,6 +449,22 @@ export function verify(
   if (typeof issuerId === 'string') {
     trust = trustStore.provenance[issuerId] === 'tls' ? 'verified' : 'unauthenticated_tofu'
     issuerManifestForTransparency = trustStore.manifests[issuerId]
+
+    // G1 ceiling + G6 detection preflight — moved ABOVE the chain handling
+    // (2026-07-22 fix wave 2 round 2, finding I1 residual): the chain
+    // tail compare below canonicalizes the resolved manifest via dumps(),
+    // which is exactly the unbounded work the ceiling exists to prevent on
+    // a hostile keys[] array. See the block comment further down.
+    if (issuerManifestForTransparency != null) {
+      const preflightKeys = issuerManifestForTransparency['keys']
+      if (Array.isArray(preflightKeys) && preflightKeys.length > MAX_MANIFEST_KEYS) {
+        return invalid(manifestExceedsKeys(MAX_MANIFEST_KEYS), 'invalid')
+      }
+      if (payload['attest_version'] === '0.2' && hasActiveEdOnlySibling(issuerManifestForTransparency)) {
+        warnings.push(WARN.MIXED_KEYSET_ACTIVE_ED_ONLY_SIBLING)
+      }
+    }
+
     const chain = trustStore.chains?.[issuerId]
     if (chain && chain.length > 0) {
       // A chain that doesn't end at the manifest being used proves nothing about
@@ -434,6 +475,32 @@ export function verify(
       if (!chainContinuous(chain) || !tailMatchesUsed) trust = 'unverified_rotation'
     }
   }
+
+  // --- G1 normative ceiling, hoisted (attest-versioning.md §5 amendment;
+  // v0.1 §11.3): the issuer manifest's keys[] array MUST NOT exceed
+  // MAX_MANIFEST_KEYS — checked the moment the manifest is resolved from
+  // the trust store, BEFORE any canonicalization/hash/signature/
+  // transparency use of it. This MUST run before the transparency block
+  // below: evaluateTransparencyClaim canonicalizes and hashes
+  // issuerManifestForTransparency whole to check a key-manifest claim,
+  // exactly the unbounded work a structural ceiling exists to prevent on a
+  // hostile array (2026-07-22 fix wave 2, review finding I1 — this check
+  // used to live only after Step 1/2 below, letting transparency/signature
+  // work run on an oversized manifest first).
+  //
+  // G6 mixed-keyset detection is hoisted alongside it (review finding I2):
+  // the warning must fire for every v0.2 resolution of a mixed manifest,
+  // independent of whether the receipt's signatures go on to verify (v0.2
+  // §13/§2.3 amendment) — it used to live only after both signature legs
+  // verified, so a tampered/failed receipt never carried it. Detection only
+  // depends on the manifest's own keyset and the payload's claimed
+  // attest_version, neither of which requires any of the crypto/schema
+  // work Step 1-4 below still gate their OWN errors on.
+  //
+  // Round 2 (finding I1 residual): the check itself now lives INSIDE the
+  // trust-resolution block above, before the chain-continuity tail compare —
+  // that compare canonicalizes the resolved manifest via dumps(), which is
+  // already the unbounded work the ceiling must precede.
 
   // --- Transparency/corroboration (Stage 2, informational only): resolved
   // here, before any pass/fail branching below, so a receipt that later
@@ -488,6 +555,12 @@ export function verify(
     if (typeof issuerId !== 'string') return invalid(ERR.MISSING_ISSUER_ID)
     manifest = trustStore.manifests[issuerId]
     if (manifest == null) return invalid(noTrustedManifest(issuerId))
+
+    // G1's manifest-keys ceiling and G6's mixed-keyset detection are both
+    // handled above, hoisted immediately after issuerManifestForTransparency
+    // (== this same manifest) is resolved from the trust store — see the
+    // comment there (2026-07-22 fix wave 2, findings I1/I2).
+
     if (kid.split('/')[0] !== issuerId || manifest['issuer'] !== issuerId) return invalid(ERR.ISSUER_MISMATCH)
 
     // Step 3 (shared with v0.1) — key resolution + status + validity window
@@ -533,6 +606,12 @@ export function verify(
     if (typeof issuerId !== 'string') return invalid(ERR.MISSING_ISSUER_ID)
     manifest = trustStore.manifests[issuerId]
     if (manifest == null) return invalid(noTrustedManifest(issuerId))
+
+    // G1's manifest-keys ceiling is handled above, hoisted immediately after
+    // issuerManifestForTransparency (== this same manifest) is resolved from
+    // the trust store — see the comment there (2026-07-22 fix wave 2,
+    // finding I1).
+
     if (kid.split('/')[0] !== issuerId || manifest['issuer'] !== issuerId) return invalid(ERR.ISSUER_MISMATCH)
 
     // Step 3 — key resolution + status + validity window

@@ -90,6 +90,10 @@ _WARN_TRANSPARENCY_CONFIG_MISSING = "transparency_config_missing"
 _WARN_TRANSPARENCY_CLAIM_UNRESOLVABLE = "transparency_claim_unresolvable"
 _WARN_ROTATION_CHAIN_REQUIRED = "corroboration_requires_rotation_chain"
 
+# G6 mixed-keyset prohibition (v0.2 §2.3/§13 amendment) — the wire warning
+# string, exact and cross-language (TS parity: messages.ts).
+_WARN_MIXED_KEYSET_ACTIVE_ED_ONLY_SIBLING = "mixed_keyset_active_ed_only_sibling"
+
 # This outer cap must COVER everything the downstream evaluators' own inner
 # caps accept, or evaluator-valid evidence gets falsely rejected here.
 # Worst-case legitimate bundle, derived from those inner caps: checkpoint +
@@ -796,9 +800,33 @@ def verify(
             errors=tuple(errors),
         )
 
+    # --- G1 normative ceiling (attest-versioning.md §5 amendment; v0.1 §11/
+    # §15, v0.2 §6/§16): the raw envelope MUST NOT exceed MAX_ENVELOPE_BYTES.
+    # Checked on the undecoded bytes, before ANY parsing work — the cheapest
+    # possible check on input a hostile sender fully controls the size of.
+    # Reported as `schema: "invalid"` (not the "not_checked" default every
+    # other precondition failure below uses): this ceiling is conformance-
+    # surface, not a parse-shape failure.
+    size_violations = validate.validate_envelope_size(envelope_bytes)
+    if size_violations:
+        return _invalid(size_violations[0], schema=_SCHEMA_INVALID)
+
     # --- Step 0: preconditions — parse once, strictly. All later steps and
     # all downstream consumers operate on this single parsed object, never
     # on the raw bytes (kills sign-vs-parse splits).
+    #
+    # G1 normative ceiling (attest-versioning.md §5 amendment; v0.1 §11.3):
+    # the parsed envelope tree's nesting depth MUST NOT exceed
+    # `validate.MAX_JSON_DEPTH` (== `canon.MAX_DEPTH`, 256). Enforced entirely
+    # by `canon.loads_strict` itself during parsing (`CanonError`, "maximum
+    # nesting depth exceeded") — there is deliberately no separate walk of
+    # the parsed tree here (2026-07-22 fix wave): the parser's own structural
+    # safety cap already IS this ceiling, so a second, redundant check could
+    # never fire (see `validate.py`'s `MAX_JSON_DEPTH` docstring). A receipt
+    # that trips it never produces a parsed object at all, so it is reported
+    # the same way every other malformed-envelope failure is, `schema:
+    # "not_checked"` — unlike the byte-size/manifest-array ceilings below,
+    # which run AFTER a successful parse and are conformance-surface checks.
     try:
         parsed = canon.loads_strict(envelope_bytes)
     except canon.CanonError as exc:
@@ -830,12 +858,61 @@ def verify(
         provenance = trust_store.provenance.get(issuer_id)
         trust = _TRUST_VERIFIED if provenance == _PROVENANCE_TLS else _TRUST_TOFU
         issuer_manifest = trust_store.manifests.get(issuer_id)
+
+        # G1 ceiling + G6 detection preflight — ABOVE the chain handling, for
+        # structural parity with verify.ts (2026-07-22 fix wave 2 round 2,
+        # finding I1 residual: the TS chain tail compare canonicalizes the
+        # manifest, so its preflight had to precede the chain block; Python's
+        # chain compare is plain equality, but the two verifiers keep the
+        # same order so trust in an early-rejection result matches). See the
+        # block comment below.
+        if isinstance(issuer_manifest, dict):
+            issuer_manifest_keys = issuer_manifest.get("keys")
+            if (
+                isinstance(issuer_manifest_keys, list)
+                and len(issuer_manifest_keys) > manifests.MAX_MANIFEST_KEYS
+            ):
+                return _invalid(
+                    f"issuer manifest exceeds {manifests.MAX_MANIFEST_KEYS} keys",
+                    schema=_SCHEMA_INVALID,
+                )
+
+            if payload.get("attest_version") == "0.2" and manifests.has_active_ed_only_sibling(
+                issuer_manifest
+            ):
+                warnings.append(_WARN_MIXED_KEYSET_ACTIVE_ED_ONLY_SIBLING)
+
         chain = trust_store.chains.get(issuer_id)
         if chain and (not _chain_continuous(chain) or chain[-1] != issuer_manifest):
             # A chain that does not actually end at the manifest being used proves
             # nothing about it — treat it as a discontinuous rotation (2026-07-13
             # review, finding 8).
             trust = _TRUST_UNVERIFIED_ROTATION
+
+    # --- G1 normative ceiling, hoisted (attest-versioning.md §5 amendment;
+    # v0.1 §11.3): the issuer manifest's `keys[]` array MUST NOT exceed
+    # manifests.MAX_MANIFEST_KEYS — checked the moment the manifest is
+    # resolved from the trust store, BEFORE any canonicalization/hash/
+    # signature/transparency use of it. This MUST run before the transparency
+    # block below: `_evaluate_transparency_claim` canonicalizes and SHA-256s
+    # `issuer_manifest` whole (via `_resolve_transparency_claim`) to check a
+    # key-manifest claim, which is exactly the unbounded work a structural
+    # ceiling exists to prevent on a hostile array (2026-07-22 fix wave 2,
+    # review finding I1 — this check used to live only after Step 1/2 below,
+    # letting transparency/signature work run on an oversized manifest first).
+    #
+    # G6 mixed-keyset detection is hoisted alongside it (review finding I2):
+    # the warning must fire for every v0.2 resolution of a mixed manifest,
+    # independent of whether the receipt's signatures go on to verify (v0.2
+    # §13/§2.3 amendment) — it used to live only after both signature legs
+    # verified, so a tampered/failed receipt never carried it. Detection only
+    # depends on the manifest's own keyset and the payload's claimed
+    # `attest_version`, neither of which requires any of the crypto/schema
+    # work Step 1-4 below still gate their OWN errors on.
+    #
+    # Round 2 (finding I1 residual): the check itself now lives INSIDE the
+    # trust-resolution block above, before the chain handling — mirroring
+    # verify.ts, whose chain tail compare canonicalizes the manifest.
 
     # --- Transparency/corroboration (Stage 2, informational only): resolved
     # here, before any pass/fail branching below, so a receipt that later
@@ -904,6 +981,11 @@ def verify(
         manifest = trust_store.manifests.get(issuer_id)
         if manifest is None:
             return _invalid(f"no trusted manifest for issuer {issuer_id!r}")
+
+        # G1's manifest-keys ceiling and G6's mixed-keyset detection are both
+        # handled above, hoisted immediately after `issuer_manifest` (== this
+        # same `manifest`) is resolved from the trust store — see the comment
+        # there (2026-07-22 fix wave 2, findings I1/I2).
 
         if kid.split("/")[0] != issuer_id or manifest.get("issuer") != issuer_id:
             return _invalid("issuer_mismatch: kid domain does not match payload issuer.id")
@@ -982,6 +1064,11 @@ def verify(
         manifest = trust_store.manifests.get(issuer_id)
         if manifest is None:
             return _invalid(f"no trusted manifest for issuer {issuer_id!r}")
+
+        # G1's manifest-keys ceiling is handled above, hoisted immediately
+        # after `issuer_manifest` (== this same `manifest`) is resolved from
+        # the trust store — see the comment there (2026-07-22 fix wave 2,
+        # finding I1).
 
         if kid.split("/")[0] != issuer_id or manifest.get("issuer") != issuer_id:
             return _invalid("issuer_mismatch: kid domain does not match payload issuer.id")

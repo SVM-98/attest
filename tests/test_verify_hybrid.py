@@ -167,3 +167,86 @@ def test_non_string_attest_version_is_invalid_not_raised() -> None:
     assert result.ok is False
     assert result.signature == "invalid"
     assert result.errors == ("unsupported attest_version: ['0.2']",)
+
+
+# --- G6 mixed-keyset prohibition (v0.2 §2.3/§13 amendment) ------------------
+
+_LEGACY_KID = f"{ISSUER}/keys/test#ed25519-legacy-1"
+_LEGACY_KP = keys.from_seed(bytes([22]) * 32)
+
+
+def _mixed_keyset_manifest(legacy_status: str) -> dict[str, Any]:
+    entries = [
+        manifests.key_entry(
+            KID, _HK.ed.pub, VALID_FROM, None, "active", pub_ml_dsa_65=_HK.mldsa.pub
+        ),
+        manifests.key_entry(_LEGACY_KID, _LEGACY_KP.pub, VALID_FROM, None, legacy_status),
+    ]
+    return manifests.build_key_manifest(ISSUER, 1, VALID_FROM, entries, _HK, KID)
+
+
+def test_mixed_keyset_active_ed_only_sibling_warns() -> None:
+    manifest = _mixed_keyset_manifest("active")
+    envelope = _hybrid_envelope()
+
+    result = verify.verify(_to_bytes(envelope), _trust_store(manifest))
+
+    assert result.signature == "valid"
+    assert "mixed_keyset_active_ed_only_sibling" in result.warnings
+    assert result.ok is True  # the warning is the whole contract — no field caps this
+
+
+def test_mixed_keyset_no_warning_when_sibling_retired() -> None:
+    """v0.2 §13's migration ceremony: the same `manifest_version` that
+    introduces the hybrid key retires every Ed25519-only key — a cleanly
+    completed migration carries no mixed-keyset warning."""
+    manifest = _mixed_keyset_manifest("retired")
+    envelope = _hybrid_envelope()
+
+    result = verify.verify(_to_bytes(envelope), _trust_store(manifest))
+
+    assert result.signature == "valid"
+    assert "mixed_keyset_active_ed_only_sibling" not in result.warnings
+
+
+def test_no_mixed_keyset_warning_without_ed_only_sibling() -> None:
+    envelope = _hybrid_envelope()
+
+    result = verify.verify(_to_bytes(envelope), _trust_store(_hybrid_manifest()))
+
+    assert result.signature == "valid"
+    assert "mixed_keyset_active_ed_only_sibling" not in result.warnings
+
+
+def test_mixed_keyset_warning_present_on_tampered_ed_leg() -> None:
+    """I2 (2026-07-22 fix wave 2, review round-1): the G6 warning must fire
+    for every v0.2 resolution of a mixed manifest, independent of whether the
+    receipt's own signatures then verify — a tampered/failed receipt must
+    still carry it, not just the happy path."""
+    manifest = _mixed_keyset_manifest("active")
+    envelope = _hybrid_envelope()
+    raw = bytearray(keys.b64u_decode(envelope["signatures"][0]["sig"]))
+    raw[0] ^= 0xFF
+    envelope["signatures"][0]["sig"] = keys.b64u(bytes(raw))
+
+    result = verify.verify(_to_bytes(envelope), _trust_store(manifest))
+
+    assert result.signature == "invalid"
+    assert result.errors == ("signature verification failed",)
+    assert "mixed_keyset_active_ed_only_sibling" in result.warnings
+
+
+def test_mixed_keyset_warning_present_on_tampered_mldsa_leg() -> None:
+    """I2 companion: the same must hold when the failing leg is the
+    ML-DSA-65 signature instead of the Ed25519 one."""
+    manifest = _mixed_keyset_manifest("active")
+    envelope = _hybrid_envelope()
+    raw = bytearray(keys.b64u_decode(envelope["signatures"][1]["sig"]))
+    raw[0] ^= 0xFF
+    envelope["signatures"][1]["sig"] = keys.b64u(bytes(raw))
+
+    result = verify.verify(_to_bytes(envelope), _trust_store(manifest))
+
+    assert result.signature == "invalid"
+    assert result.errors == ("ML-DSA-65 signature verification failed",)
+    assert "mixed_keyset_active_ed_only_sibling" in result.warnings

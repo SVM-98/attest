@@ -11,12 +11,25 @@ non-conforming envelope came to exist.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any
 
 import pytest
 
-from attest import canon, commitment, issue, keys, manifests, revocation, verify
+from attest import (
+    anchor,
+    canon,
+    commitment,
+    issue,
+    keys,
+    manifests,
+    pq,
+    revocation,
+    tlog,
+    validate,
+    verify,
+)
 from tests.helpers import make_payload
 
 ISSUER = "store.example.com"
@@ -731,3 +744,162 @@ def test_no_chain_recorded_is_backward_compatible() -> None:
     envelope = issue.issue(make_payload(), KP, KID)
     result = verify.verify(_to_bytes(envelope), trust_store)
     assert result.trust == "verified"
+
+
+# --- G1 normative ceilings (attest-versioning.md §5 amendment) --------------
+
+
+def test_envelope_over_byte_ceiling_rejected() -> None:
+    padding = validate.MAX_ENVELOPE_BYTES + 4096
+    payload = make_payload(work={"title": "x" * padding})
+    envelope = issue.issue(payload, KP, KID)
+    raw = json.dumps(envelope).encode("utf-8")
+    assert len(raw) > validate.MAX_ENVELOPE_BYTES  # sanity: genuinely over the ceiling
+
+    result = verify.verify(raw, _trust_store(_key_manifest()))
+
+    assert result.schema == "invalid"
+    assert any("envelope exceeds" in e for e in result.errors)
+    assert result.ok is False
+
+
+def test_envelope_at_byte_ceiling_not_rejected_for_size() -> None:
+    """The boundary is strict `>`: at exactly the ceiling, the size check
+    does not fire (the receipt may still fail schema validation for other
+    reasons, e.g. `work.title` is required to be non-empty but has no upper
+    length bound — so this only asserts the size-specific error is absent)."""
+    payload = make_payload()
+    envelope = issue.issue(payload, KP, KID)
+    raw = json.dumps(envelope).encode("utf-8")
+    assert len(raw) < validate.MAX_ENVELOPE_BYTES  # sanity: a real receipt is tiny
+
+    result = verify.verify(raw, _trust_store(_key_manifest()))
+
+    assert not any("envelope exceeds" in e for e in result.errors)
+
+
+def test_envelope_nesting_depth_over_ceiling_rejected() -> None:
+    """The nesting-depth ceiling (`validate.MAX_JSON_DEPTH`, an alias of
+    `canon.MAX_DEPTH` since the 2026-07-22 fix wave — see `validate.py`'s
+    docstring) is enforced entirely by `canon.loads_strict` during parsing:
+    an over-ceiling envelope never produces a parsed object, so it is
+    reported the same way any other malformed envelope is, `schema:
+    "not_checked"` (never the `"invalid"` conformance-surface tag the
+    byte-size/manifest-array ceilings use, since those run AFTER a
+    successful parse)."""
+    nested: Any = "leaf"
+    for _ in range(validate.MAX_JSON_DEPTH + 1):
+        nested = {"n": nested}
+    payload = make_payload()
+    payload["_depth_probe"] = nested  # unrecognized top-level field, schema-legal (§11.2)
+    envelope = issue.issue(payload, KP, KID)
+
+    result = verify.verify(_to_bytes(envelope), _trust_store(_key_manifest()))
+
+    assert result.schema == "not_checked"
+    assert any("maximum nesting depth exceeded" in e for e in result.errors)
+    assert result.ok is False
+
+
+def test_envelope_shallow_nesting_not_rejected_for_depth() -> None:
+    envelope = issue.issue(make_payload(), KP, KID)
+
+    result = verify.verify(_to_bytes(envelope), _trust_store(_key_manifest()))
+
+    assert not any("maximum nesting depth exceeded" in e for e in result.errors)
+
+
+def test_issuer_manifest_over_key_ceiling_rejected() -> None:
+    entries = [manifests.key_entry(KID, KP.pub, "2026-01-01T00:00:00Z", None, "active")]
+    for i in range(manifests.MAX_MANIFEST_KEYS):
+        filler_kp = keys.from_seed(
+            hashlib.sha256(f"test-verify-ceiling-filler-{i}".encode()).digest()
+        )
+        entries.append(
+            manifests.key_entry(
+                f"{ISSUER}/keys/test#filler-{i}",
+                filler_kp.pub,
+                "2026-01-01T00:00:00Z",
+                None,
+                "active",
+            )
+        )
+    oversized_manifest = manifests.build_key_manifest(
+        ISSUER, 1, "2026-01-01T00:00:00Z", entries, KP, KID
+    )
+    envelope = issue.issue(make_payload(), KP, KID)
+
+    result = verify.verify(_to_bytes(envelope), _trust_store(oversized_manifest))
+
+    assert result.schema == "invalid"
+    assert any("issuer manifest exceeds" in e for e in result.errors)
+    assert result.ok is False
+
+
+def test_issuer_manifest_at_key_ceiling_not_rejected_for_size() -> None:
+    result = verify.verify(
+        _to_bytes(issue.issue(make_payload(), KP, KID)), _trust_store(_key_manifest())
+    )
+    assert not any("issuer manifest exceeds" in e for e in result.errors)
+
+
+def test_issuer_manifest_over_key_ceiling_rejected_before_canonicalization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """I1 (2026-07-22 fix wave 2): the G1 key-manifest ceiling must bound work
+    BEFORE any cryptographic or schema work on the hostile manifest (spec
+    v0.1 §11.3) — an oversized manifest must be rejected without ever being
+    passed to `canon.canonical_bytes` (the entrypoint transparency-claim
+    hashing and signature verification both use on manifest/payload data)."""
+    entries = [manifests.key_entry(KID, KP.pub, "2026-01-01T00:00:00Z", None, "active")]
+    for i in range(manifests.MAX_MANIFEST_KEYS):
+        filler_kp = keys.from_seed(
+            hashlib.sha256(f"test-verify-ceiling-precanon-filler-{i}".encode()).digest()
+        )
+        entries.append(
+            manifests.key_entry(
+                f"{ISSUER}/keys/test#precanon-filler-{i}",
+                filler_kp.pub,
+                "2026-01-01T00:00:00Z",
+                None,
+                "active",
+            )
+        )
+    oversized_manifest = manifests.build_key_manifest(
+        ISSUER, 1, "2026-01-01T00:00:00Z", entries, KP, KID
+    )
+    envelope = issue.issue(make_payload(), KP, KID)
+
+    canonicalized: list[object] = []
+    original_canonical_bytes = canon.canonical_bytes
+
+    def _counting_canonical_bytes(obj: object) -> bytes:
+        canonicalized.append(obj)
+        return original_canonical_bytes(obj)
+
+    monkeypatch.setattr(canon, "canonical_bytes", _counting_canonical_bytes)
+
+    # A key-manifest transparency claim is the concrete path (Stage 2) that
+    # canonicalizes/hashes the issuer manifest — `_resolve_transparency_claim`
+    # runs `canon.canonical_bytes(issuer_manifest)` unconditionally once it
+    # sees `entry.type == "key-manifest"`, regardless of whether the rest of
+    # the evidence is otherwise valid. Feeding one in makes the pre-fix
+    # ordering (transparency resolved before the ceiling) observable.
+    hk = pq.HybridSigningKeys(ed=keys.generate(), mldsa=pq.generate())
+    log_key = tlog.LogKey(
+        origin="log.attest.example/2026",
+        name="attest-log-1",
+        ed25519_pub=hk.ed.pub,
+        mldsa_pub=hk.mldsa.pub,
+    )
+    result = verify.verify(
+        _to_bytes(envelope),
+        _trust_store(oversized_manifest),
+        transparency={"entry": {"type": "key-manifest"}},
+        log_keys=[log_key],
+        anchor_policy=anchor.AnchorPolicy(pinned_headers={}, crqc_horizon=None),
+    )
+
+    assert result.schema == "invalid"
+    assert result.ok is False
+    assert not any(obj is oversized_manifest for obj in canonicalized)

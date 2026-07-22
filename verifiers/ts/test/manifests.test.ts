@@ -10,6 +10,7 @@ import {
   checkContinuity,
   chainContinuous,
   verifyArtifactManifest,
+  MAX_ARTIFACT_ENTRIES,
 } from '../src/manifests.js'
 
 const enc = (s: string) => new TextEncoder().encode(s)
@@ -429,6 +430,48 @@ describe('manifests', () => {
       const t = JSON.parse(JSON.stringify(am))
       t.version = 2
       expect(verifyArtifactManifest(parse(t), parse(v1))).toBe(false)
+    })
+
+    // --- I3(b) (2026-07-22 fix wave 2): G1 artifact-entries ceiling boundary —
+    // mirrors Python's test_manifests.py test_verify_artifact_manifest_true_at_entries_ceiling
+    // / test_verify_artifact_manifest_false_over_entries_ceiling pair.
+    const _fillerArtifacts = (count: number) =>
+      Array.from({ length: count }, (_, i) => ({
+        role: 'installer',
+        platform: 'windows-x86_64',
+        filename: `example-game-1.0-setup-${i}.exe`,
+        size_bytes: 734003200,
+        sha256: '0'.repeat(64),
+      }))
+
+    it('accepts an artifact manifest at MAX_ARTIFACT_ENTRIES', () => {
+      const atCeiling = signManifest(
+        {
+          issuer: ISSUER,
+          series: `${ISSUER}/works/EXG-001`,
+          version: 1,
+          released_at: '2025-03-01T00:00:00Z',
+          artifacts: _fillerArtifacts(MAX_ARTIFACT_ENTRIES),
+        },
+        kid1,
+        seed1,
+      )
+      expect(verifyArtifactManifest(parse(atCeiling), parse(v1))).toBe(true)
+    })
+
+    it('rejects an artifact manifest one entry over MAX_ARTIFACT_ENTRIES', () => {
+      const overCeiling = signManifest(
+        {
+          issuer: ISSUER,
+          series: `${ISSUER}/works/EXG-001`,
+          version: 1,
+          released_at: '2025-03-01T00:00:00Z',
+          artifacts: _fillerArtifacts(MAX_ARTIFACT_ENTRIES + 1),
+        },
+        kid1,
+        seed1,
+      )
+      expect(verifyArtifactManifest(parse(overCeiling), parse(v1))).toBe(false)
     })
   })
 })
