@@ -32,7 +32,7 @@ the full conformance suite before review:
 
 - reproduce the expected `VerificationResult` for **every** vector under
   `docs/spec/vectors/` — 66 leaf vectors, zero skipped;
-- keep both existing suites green: `.venv/bin/pytest -q` (Python, 769 tests) and
+- keep both existing suites green: `.venv/bin/pytest -q` (Python, 881 tests) and
   `npm test` in `verifiers/ts/` (526 tests, conformance 66/66);
 - `ruff` + `mypy` clean for Python, `tsc --noEmit` clean for TypeScript.
 

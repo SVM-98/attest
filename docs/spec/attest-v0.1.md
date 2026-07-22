@@ -439,6 +439,10 @@ The conformance vectors under [`docs/spec/vectors/`](vectors/) are the attest co
 
 ## Appendix A — Threat model summary (non-normative)
 
+> **Superseded (2026-07-18).** This summary is retained for historical continuity.
+> The normative, maintained threat model is [`attest-threat-model.md`](attest-threat-model.md);
+> privacy analysis lives in [`attest-privacy.md`](attest-privacy.md).
+
 | Threat | Answer |
 | --- | --- |
 | Receipt forgery | Pinned-ruleset Ed25519 (§10) + issuer key manifests (§7.1). |

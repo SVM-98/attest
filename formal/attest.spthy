@@ -1,0 +1,2102 @@
+theory attest
+begin
+
+builtins: signing
+
+/* Post-quantum public-key constructor: the hybrid key-entry carries REAL PQ
+   material `pk_pq(~skPQ)` (a one-way public projection of a fresh PQ secret
+   ~skPQ). Declared since Task 2 as the frozen producer of hybrid PQ material;
+   Task 5 (below) turns it into a full signature theory. */
+functions: pk_pq/1
+
+/* Task 5 -- POST-QUANTUM SIGNATURE PRIMITIVE (ML-DSA-65 abstraction). A second,
+   INDEPENDENT signature theory, distinct from the builtin `signing` (Ed25519):
+   `sig_pq(m, sk)` is a PQ signature over m under PQ secret sk, and
+   `verify_pq(sig, m, pubkey)` reduces to the builtin constant `true` exactly when
+   sig = sig_pq(m, sk) and pubkey = pk_pq(sk). It reuses the one-way `pk_pq/1`
+   already declared above, and the builtin `true/0` from `signing` -- neither is
+   re-declared (re-declaration is a wellformedness error). The hybrid v0.2 profile
+   signs the SAME receipt payload with BOTH Ed (`sign`) and PQ (`sig_pq`);
+   Accept_v02 requires BOTH verifications. Because ~skPQ lives ONLY in !PqKeyMat and
+   is NEVER placed on Out (no rule exports it -- EdBroken/Reveal_Key export only the
+   Ed half), a verify_pq-true signature is UNFORGEABLE by the Dolev-Yao attacker:
+   its sole producer is the honest hybrid issuance rule. That single-producer fact
+   is what makes no_cross_version_confusion hold over ALL heads (even TOFU/flagged),
+   where the Ed-only v0.1 path cannot. The equation is subterm-convergent and
+   structurally identical to the signing builtin's own verify equation, so it adds
+   no open chains / partial deconstructions. */
+functions: sig_pq/2, verify_pq/3
+equations: verify_pq(sig_pq(m, sk), m, pk_pq(sk)) = true
+
+/* Public free successor constructor for manifest versions (review-3 fix 1).
+   Honest transitions mint version vnext(ver) from the parent's ver; the genesis
+   version is an opaque fresh nonce. Each honest rule publishes a public header
+   <'mhdr', I, ver, mid> (atomic terms only — no entry tuples, so no
+   deconstruction chains), which makes version terms attacker-knowable: an
+   attacker manifest can then carry an EXISTING honest version (same-version
+   conflict), a constructed vnext(x) (gap/successor candidate), or garbage.
+   Task 3's continuity rule consumes exactly this distinction. */
+functions: vnext/1
+
+/* Fresh-key registration, minimal, just to make the toolchain sanity trace runnable. */
+rule Register_Key:
+    [ Fr(~sk) ]
+  --[ KeyRegistered($A, pk(~sk)) ]->
+    [ !Ltk($A, ~sk), !Pk($A, pk(~sk)), Out(pk(~sk)) ]
+
+/* ---------------------------------------------------------------------------
+   ISSUER SIDE
+   --------------------------------------------------------------------------- */
+
+/* Genesis: issuer $I publishes its first manifest (fresh identity ~mid, fresh
+   opaque version ~ver) with a single Ed-only active key minted fresh here. The
+   manifest is authentically served at the issuer's own domain (§7.4 root of
+   trust) -> !AuthManifest. IssuerGen threads the (<=2) current key ENTRY TUPLES
+   <kid, alg, pubkey, pk_pq, status> ('none' for an empty slot) so the lifecycle
+   transitions can carry the keyset forward without re-reading !ManifestEntry. */
+rule Genesis_v01:
+    let kid = <$I, ~name>
+        e1  = <kid, 'ed_only', pk(~sk), 'none', 'active'>
+    in
+    [ Fr(~name), Fr(~sk), Fr(~mid), Fr(~ver) ]
+  --[ Genesis($I), GenesisMid($I, ~mid), EntryActive(~mid, kid) ]->
+    [ !ManifestEntry(~mid, kid, 'ed_only', pk(~sk), 'none', 'active')
+    , !KeyMat(kid, ~sk)
+    , !Manifest(~mid, $I, ~ver)
+    , !AuthManifest(~mid, $I, ~ver)
+    , IssuerGen($I, ~ver, ~mid, e1, 'none')
+    , Out(<'mhdr', $I, ~ver, ~mid>) ]
+
+/* Receipt issuance (§7.3): signs with a key that is 'active in SOME published
+   manifest generation. Reads ONLY persistent facts (!ManifestEntry + !KeyMat) so
+   that tracing an accepted receipt's signature back to its honest issuance does
+   NOT drag in a linear-state chain (the dominant proof-search cost otherwise).
+   Any 'active key of any published manifest may issue (slot-agnostic); the
+   verifier's status gate at ACCEPTANCE -- resolved against the trusted manifest,
+   not the issuance manifest -- is where §7.3 fail-closed / retired-warning
+   semantics are enforced. The transmitted receipt carries the signer `kid`:
+   <payload, kid, sig>, onto the Dolev-Yao channel. */
+/* Receipt-id BIRTH (review C1 fix, tractability-preserving split): a fresh
+   receipt id is born ONCE, yielding two LINEAR seeds -- the issuance seed
+   consumed by Issue_Receipt_v01 and the class-choice seed consumed by exactly
+   one Mint_Revocable_* rule. Receipts and revocability classes therefore live
+   in the SAME id space (an honestly issued receipt CAN acquire !Revocability --
+   witnessed by sanity_issued_receipt_revoked), and each rid still has AT MOST
+   one issuance and AT MOST one class (seed linearity). Crucially the
+   revocation-side backward search justifies a class via Birth_Rid alone
+   (premise Fr -- trivial source), NOT via the receipt-signer resolution:
+   direct threading (the class token emitted by Issue_Receipt_v01 itself) was
+   MEASURED intractable on this model -- the cheapest 9-step revocation witness
+   exceeded 180s and the full revocation group exceeded 600s against its 40s
+   baseline, the same two-active-key blow-up recorded in task-4-report.md. */
+rule Birth_Rid:
+    [ Fr(~rid) ]
+  --[ RidBorn(~rid) ]->
+    [ RidIssueSeed(~rid), RevClassChoice(~rid) ]
+
+rule Issue_Receipt_v01:
+    let payload = <'0.1', 'receipt', rid, $I>
+        kid     = <$I, kname>
+    in
+    [ !ManifestEntry(mid, kid, alg, pk(~sk), pq, 'active')
+    , !KeyMat(kid, ~sk)
+    , RidIssueSeed(rid) ]
+  --[ Issued($I, rid), UsesKey($I, kid), IssueMid($I, mid, kid)
+    /* TASK 5: additive version tag, consumed only by no_cross_version_confusion
+       (never renames/replaces Issued). One per issuance; 1:1 with the signed
+       payload's version literal. */
+    , IssuedVersion($I, rid, '0.1') ]->
+    [ Out(<payload, kid, sign(payload, ~sk)>)
+    /* Review C2 fix: a persistent marker that rid names a genuinely ISSUED
+       receipt, read by Reject_v01_revoked so the reject is tied to a real
+       receipt (not a fabricated token). Additive -- no frozen lemma reads it. */
+    , !IssuedReceipt($I, rid) ]
+
+/* TASK 5 -- HYBRID (v0.2) RECEIPT ISSUANCE (§ hybrid profile). Signs the SAME
+   receipt payload -- now carrying the version literal '0.2' -- with BOTH the Ed
+   key (`sign`, builtin) AND the PQ key (`sig_pq`), requiring the signer entry to
+   be a 'hybrid entry carrying REAL PQ material pk_pq(~skPQ) (never 'none) with its
+   secret ~skPQ in !PqKeyMat. Mirrors Issue_Receipt_v01: reads ONLY persistent
+   facts (!ManifestEntry + !KeyMat + !PqKeyMat) so signature provenance never drags
+   in linear state; consumes the SAME linear RidIssueSeed(rid) from Birth_Rid, so a
+   given rid is issued AT MOST ONCE and under EXACTLY ONE version (v0.1 XOR v0.2) --
+   the seed-linearity that makes no_cross_version_confusion's issuance-uniqueness
+   conjunct hold. The transmitted envelope is a 4-tuple <payload, kid, sigEd, sigPQ>
+   (v0.1's is a 3-tuple), so the two accept paths can never cross-consume each
+   other's envelopes. */
+rule Issue_Receipt_v02_hybrid:
+    let payload = <'0.2', 'receipt', rid, $I>
+        kid     = <$I, kname>
+    in
+    [ !ManifestEntry(mid, kid, 'hybrid', pk(~sk), pk_pq(~skPQ), 'active')
+    , !KeyMat(kid, ~sk)
+    , !PqKeyMat(kid, ~skPQ)
+    , RidIssueSeed(rid) ]
+  --[ Issued($I, rid), UsesKey($I, kid), IssueMid($I, mid, kid)
+    , IssuedVersion($I, rid, '0.2') ]->
+    [ Out(<payload, kid, sign(payload, ~sk), sig_pq(payload, ~skPQ)>)
+    , !IssuedReceipt($I, rid) ]
+
+/* Add-key rotation (§7.3 continuity): mints a successor manifest (fresh identity
+   ~mid2, fresh opaque version ~ver2, succession recorded by VerSucc) carrying the
+   FULL keyset forward -- the existing active entry E is PRESERVED and a SECOND
+   active entry (a fresh HYBRID key H) is introduced, giving a mixed keyset
+   (Ed-only E + hybrid H both active in ~mid2). H carries REAL PQ material
+   pk_pq(~skPQ), with ~skPQ kept in !PqKeyMat and NEVER on Out. The candidate is
+   signed by E (an 'active key in the PARENT manifest) over the adversarial channel
+   as a non-deconstructible signature blob committing to the FULL entry tuples
+   (kid+alg+pubkey+pk_pq+status); the authentic-channel copy (!AuthManifest) lets a
+   fresh verifier bootstrap the successor. New secrets ~skH/~skPQ are fresh,
+   necessarily distinct from the signer's ~skE. Transitions thread the keyset
+   through IssuerGen and re-emit fresh entries under the successor `mid`, so they
+   NEVER re-read !ManifestEntry (keeping its source non-recursive). */
+rule AddKey_Rotate_v01:
+    let kidH = <$I, ~name2>
+        e1   = <kidE, algE, pk(~skE), pqE, 'active'>
+        eH   = <kidH, 'hybrid', pk(~skH), pk_pq(~skPQ), 'active'>
+    in
+    [ IssuerGen($I, ver, mid, e1, 'none')
+    , !KeyMat(kidE, ~skE)
+    , Fr(~name2), Fr(~skH), Fr(~skPQ), Fr(~mid2) ]
+  --[ Rotate($I, ver, vnext(ver), kidE)
+    /* TASK 6 (G6): the SIGNER's algorithm, exposed as an ADDITIVE action label.
+       The rule already carries algE (the preserved parent entry's algorithm) in
+       its pattern but never published it, so no lemma could say "this authority
+       transition was authorised by an Ed-ONLY key while a hybrid key was already
+       active in the same manifest" -- which is exactly the mixed-keyset gap G6
+       records. Additive: no premise, conclusion or existing action arity changes,
+       and no fact gains a producer, so every frozen proof is unaffected by
+       construction. Consumed ONLY by attack_mixed_keyset_hijack. */
+    , RotateSignerAlg($I, vnext(ver), kidE, algE)
+    , NewManifest($I, ver, vnext(ver))
+    , VerSucc($I, ver, vnext(ver))
+    , HybridActiveIn($I, ~mid2)
+    , HybridKey($I, kidH)
+    , EntryActive(~mid2, kidE)
+    , EntryActive(~mid2, kidH) ]->
+    [ !ManifestEntry(~mid2, kidE, algE, pk(~skE), pqE, 'active')
+    , !ManifestEntry(~mid2, kidH, 'hybrid', pk(~skH), pk_pq(~skPQ), 'active')
+    , !KeyMat(kidH, ~skH)
+    , !PqKeyMat(kidH, ~skPQ)
+    , !Manifest(~mid2, $I, vnext(ver))
+    , !AuthManifest(~mid2, $I, vnext(ver))
+    , IssuerGen($I, vnext(ver), ~mid2, e1, eH)
+    , Out(<'mhdr', $I, vnext(ver), ~mid2>)
+    , Out(sign(<'manifest', $I, vnext(ver), ~mid2, e1, eH>, ~skE))
+    /* Task 3 continuity token (§7.3): a signature by the parent-active key ~skE
+       over the successor's CONTENT-IDENTITY header <'manifest', I, N+1, mid2>.
+       In this model `mid2` IS the per-manifest content identity (trust binds to
+       mid; Task-2 frozen contract), so binding mid2 commits to the successor
+       manifest's content -- its entries are authenticated by living in the
+       persistent !ManifestEntry(mid2,...) this same rule emits. Signing atomic
+       header terms (no entry tuples in the verifier's verify() goal) is what keeps
+       the continuity check tractable, mirroring the Task-2 acceptance fix. The
+       full-entry signature above is retained as the frozen on-the-wire manifest
+       signature. */
+    , Out(sign(<'manifest', $I, vnext(ver), ~mid2>, ~skE)) ]
+
+/* Retire (§7.3, single-entry manifest): flip the sole active key to 'retired in a
+   fresh successor, signed by that key while still 'active in the PARENT. The
+   signed candidate carries the FULL retired entry tuple. §11 step 3: receipts made
+   while active remain acceptable via the retired-key branch (with a warning). */
+rule Retire_Key_v01:
+    let e1  = <kid, alg, pk(~sk), pq, 'active'>
+        e1r = <kid, alg, pk(~sk), pq, 'retired'>
+    in
+    [ IssuerGen($I, ver, mid, e1, 'none')
+    , !KeyMat(kid, ~sk)
+    , Fr(~mid2) ]
+  --[ Retire($I, kid), NewManifest($I, ver, vnext(ver)), VerSucc($I, ver, vnext(ver))
+    , EntryRetired(~mid2, kid) ]->
+    [ !ManifestEntry(~mid2, kid, alg, pk(~sk), pq, 'retired')
+    , !Manifest(~mid2, $I, vnext(ver))
+    , !AuthManifest(~mid2, $I, vnext(ver))
+    , IssuerGen($I, vnext(ver), ~mid2, e1r, 'none')
+    , Out(<'mhdr', $I, vnext(ver), ~mid2>)
+    , Out(sign(<'manifest', $I, vnext(ver), ~mid2, e1r>, ~sk))
+    /* C2 fix: EVERY honest lifecycle successor emits the same atomic
+       content-identity continuity token its add-key sibling does, signed by the
+       same parent-active key as the full-body signature -- §7.3 continuity is a
+       property of the whole manifest chain, not of add-key rotations only. */
+    , Out(sign(<'manifest', $I, vnext(ver), ~mid2>, ~sk)) ]
+
+/* Compromise-marking (§7.3 fail-closed, single-entry manifest): flip the sole
+   active key to 'compromised in a fresh successor, signing the FULL compromised
+   entry tuple. Any receipt resolving to it must be rejected -- the accept rules
+   never pattern-match a 'compromised entry (fail-closed), while the rejected
+   submission trace is NOT deleted. */
+rule Compromise_Key_v01:
+    let e1  = <kid, alg, pk(~sk), pq, 'active'>
+        e1c = <kid, alg, pk(~sk), pq, 'compromised'>
+    in
+    [ IssuerGen($I, ver, mid, e1, 'none')
+    , !KeyMat(kid, ~sk)
+    , Fr(~mid2) ]
+  --[ Compromise($I, kid), NewManifest($I, ver, vnext(ver)), VerSucc($I, ver, vnext(ver))
+    , EntryCompromised(~mid2, kid) ]->
+    [ !ManifestEntry(~mid2, kid, alg, pk(~sk), pq, 'compromised')
+    , !Manifest(~mid2, $I, vnext(ver))
+    , !AuthManifest(~mid2, $I, vnext(ver))
+    , IssuerGen($I, vnext(ver), ~mid2, e1c, 'none')
+    , Out(<'mhdr', $I, vnext(ver), ~mid2>)
+    , Out(sign(<'manifest', $I, vnext(ver), ~mid2, e1c>, ~sk))
+    /* C2 fix: atomic continuity token, same signer as the full body. */
+    , Out(sign(<'manifest', $I, vnext(ver), ~mid2>, ~sk)) ]
+
+/* Compromise ONE entry, preserve the sibling (two-entry manifest): flip the
+   slot-2 entry to 'compromised while PRESERVING the slot-1 sibling 'active, signed
+   by the surviving sibling. This lets the newly-added hybrid key (slot 2 after
+   AddKey) itself be marked compromised while its Ed-only sibling stays active --
+   the honest 'add hybrid H, then compromise H' step; a verifier trusting the
+   result rejects H-signed receipts (fail-closed) yet still accepts E-signed ones. */
+rule Compromise_One_Preserve_Sibling_v01:
+    let eS  = <kidS, algS, pk(~skS), pqS, 'active'>
+        eC  = <kidC, algC, pk(~skC), pqC, 'active'>
+        eCc = <kidC, algC, pk(~skC), pqC, 'compromised'>
+    in
+    [ IssuerGen($I, ver, mid, eS, eC)
+    , !KeyMat(kidC, ~skC)
+    , !KeyMat(kidS, ~skS)
+    , Fr(~mid2) ]
+  --[ Compromise($I, kidC), NewManifest($I, ver, vnext(ver)), VerSucc($I, ver, vnext(ver))
+    , EntryActive(~mid2, kidS), EntryCompromised(~mid2, kidC) ]->
+    [ !ManifestEntry(~mid2, kidS, algS, pk(~skS), pqS, 'active')
+    , !ManifestEntry(~mid2, kidC, algC, pk(~skC), pqC, 'compromised')
+    , !Manifest(~mid2, $I, vnext(ver))
+    , !AuthManifest(~mid2, $I, vnext(ver))
+    , IssuerGen($I, vnext(ver), ~mid2, eS, eCc)
+    , Out(<'mhdr', $I, vnext(ver), ~mid2>)
+    , Out(sign(<'manifest', $I, vnext(ver), ~mid2, eS, eCc>, ~skS))
+    /* C2 fix: atomic continuity token, same signer as the full body. */
+    , Out(sign(<'manifest', $I, vnext(ver), ~mid2>, ~skS)) ]
+
+/* Compromise SLOT-1 entry, preserve the SLOT-2 sibling (review-3 fix 3): the
+   mirror of the rule above — flips the slot-1 entry (e.g. the legacy Ed-only key
+   E) to 'compromised while PRESERVING the slot-2 sibling (e.g. the hybrid key H)
+   'active, signed by the surviving sibling. This makes an ALL-HYBRID active
+   authority set reachable (E compromised, only H active), which the
+   no_downgrade_*_allhybrid theorems (Task 6) quantify over — without it they
+   would verify vacuously. */
+rule Compromise_Slot1_Preserve_Sibling_v01:
+    let eC  = <kidC, algC, pk(~skC), pqC, 'active'>
+        eS  = <kidS, algS, pk(~skS), pqS, 'active'>
+        eCc = <kidC, algC, pk(~skC), pqC, 'compromised'>
+    in
+    [ IssuerGen($I, ver, mid, eC, eS)
+    , !KeyMat(kidC, ~skC)
+    , !KeyMat(kidS, ~skS)
+    , Fr(~mid2) ]
+  --[ Compromise($I, kidC), NewManifest($I, ver, vnext(ver)), VerSucc($I, ver, vnext(ver))
+    , EntryCompromised(~mid2, kidC), EntryActive(~mid2, kidS) ]->
+    [ !ManifestEntry(~mid2, kidC, algC, pk(~skC), pqC, 'compromised')
+    , !ManifestEntry(~mid2, kidS, algS, pk(~skS), pqS, 'active')
+    , !Manifest(~mid2, $I, vnext(ver))
+    , !AuthManifest(~mid2, $I, vnext(ver))
+    , IssuerGen($I, vnext(ver), ~mid2, eCc, eS)
+    , Out(<'mhdr', $I, vnext(ver), ~mid2>)
+    , Out(sign(<'manifest', $I, vnext(ver), ~mid2, eCc, eS>, ~skS))
+    /* C2 fix: atomic continuity token, same signer as the full body. */
+    , Out(sign(<'manifest', $I, vnext(ver), ~mid2>, ~skS)) ]
+
+/* Retire SLOT-1 entry, preserve the SLOT-2 sibling (review-3 fix 3): sibling-
+   preserving retirement — the slot-1 entry goes 'retired while the slot-2 sibling
+   stays 'active, signed by the surviving sibling. Together with the rule above
+   this covers the §7.3 lifecycle where the legacy key is decommissioned (retired
+   or compromised) and the added key carries the authority forward. */
+rule Retire_Slot1_Preserve_Sibling_v01:
+    let eR  = <kidR, algR, pk(~skR), pqR, 'active'>
+        eS  = <kidS, algS, pk(~skS), pqS, 'active'>
+        eRr = <kidR, algR, pk(~skR), pqR, 'retired'>
+    in
+    [ IssuerGen($I, ver, mid, eR, eS)
+    , !KeyMat(kidR, ~skR)
+    , !KeyMat(kidS, ~skS)
+    , Fr(~mid2) ]
+  --[ Retire($I, kidR), NewManifest($I, ver, vnext(ver)), VerSucc($I, ver, vnext(ver))
+    , EntryActive(~mid2, kidS), EntryRetired(~mid2, kidR) ]->
+    [ !ManifestEntry(~mid2, kidR, algR, pk(~skR), pqR, 'retired')
+    , !ManifestEntry(~mid2, kidS, algS, pk(~skS), pqS, 'active')
+    , !Manifest(~mid2, $I, vnext(ver))
+    , !AuthManifest(~mid2, $I, vnext(ver))
+    , IssuerGen($I, vnext(ver), ~mid2, eRr, eS)
+    , Out(<'mhdr', $I, vnext(ver), ~mid2>)
+    , Out(sign(<'manifest', $I, vnext(ver), ~mid2, eRr, eS>, ~skS))
+    /* C2 fix: atomic continuity token, same signer as the full body. */
+    , Out(sign(<'manifest', $I, vnext(ver), ~mid2>, ~skS)) ]
+
+/* ---------------------------------------------------------------------------
+   ATTACKER SIDE
+   --------------------------------------------------------------------------- */
+
+/* Key theft: the Dolev-Yao attacker learns a key's private (Ed) material.
+   TASK 5: this rule also emits EdBroken(kid) -- the "Ed half of key kid is
+   broken" event T6 reasons over (Ed compromised, PQ intact). EdBroken is realised
+   as an ADDITIONAL LABEL on the sole Ed-secret reveal rule, NOT a separate rule,
+   on purpose: a second structurally-identical [!KeyMat] -> Out(~sk) rule would
+   DOUBLE the Out(~sk) source, and the T4 report MEASURED acceptance_issuer_signed
+   / rev_record_authentic as acutely sensitive to exactly such added reveal sources
+   (a single extra signing rule took acceptance_issuer_signed 60s -> 540s). The
+   label is additive -- no frozen theorem references EdBroken, so all frozen proofs
+   are byte-unchanged. Only !KeyMat (Ed) is ever exported; !PqKeyMat (PQ) has no
+   reveal rule, so EdBroken(kid) always leaves kid's PQ half secret -- the hybrid
+   asymmetry T6 needs. */
+rule Reveal_Key:
+    [ !KeyMat(kid, ~sk) ]
+  --[ RevealKey(kid), EdBroken(kid) ]->
+    [ Out(~sk) ]
+
+/* Attacker-published manifest (representational hook for F1 / DoD 3b): the
+   attacker forges a manifest for issuer $I with its OWN fresh key (secret leaked
+   over Out) and a DISTINCT fresh identity ~midA. It carries NO !AuthManifest, so a
+   'verified verifier can never bootstrap it; and because ~midA is a fresh nonce
+   distinct from every honest `mid`, and acceptance resolves entries by the `mid`
+   bound in VerifierTrust, this manifest can never alias a verified verifier's
+   trust. The full attacker-adoption-into-trust surface (TOFU forgery TM-11) is
+   Task 6. */
+rule Attacker_Manifest_v01:
+    let kid_att = <$I, ~nameA> in
+    [ In(<'forge', $I, verA>), Fr(~nameA), Fr(~midA), Fr(~skA) ]
+  --[ AttackerManifest($I, ~midA), AttackerManifestVer($I, ~midA, verA)
+    , EntryActive(~midA, kid_att) ]->
+    [ !Manifest(~midA, $I, verA)
+    , !ManifestEntry(~midA, kid_att, 'ed_only', pk(~skA), 'none', 'active')
+    /* C2/I4 fix: the forged manifest's public header is PUBLISHED like every
+       honest one -- without this Out the fresh ~midA never reaches attacker
+       knowledge and no forged candidate can ever be PRESENTED to a verifier
+       (the Group-B witnesses would be unreachable by construction). */
+    , Out(<'mhdr', $I, verA, ~midA>)
+    /* T4b fix: the forged entry's key NAME is published for exactly the reason
+       the line below publishes ~midA. Without it the attacker could never put
+       its own kid <$I, ~nameA> into any envelope, so no rule matching
+       kid = <$I, kname> could ever fire on a forged entry -- which silently
+       made the TOFU branch unreachable and let an all-heads authenticity claim
+       look provable. A published manifest's key ids are public by definition. */
+    , Out(~nameA)
+    , Out(~skA) ]
+    /* Review-3 fixes 1+2: (1) the VERSION is attacker-chosen from In() — it can
+       equal a published honest version (same-version conflict, knowable from the
+       'mhdr' headers), be vnext(x) of a known version (successor/gap candidate),
+       or be garbage; freshness no longer erases the conflict cases §7.3 requires.
+       (2) NO !KeyMat is emitted for the attacker key: !KeyMat is honest-issuer
+       key material, so Issue_Receipt_v01 can never emit the issuer-honesty event
+       `Issued` under an attacker key. The attacker still KNOWS ~skA (leaked via
+       Out) and can sign receipts itself from knowledge — the Task 6 TOFU-forgery
+       exhibit needs exactly that, not the honest issuance rule. */
+
+/* ---------------------------------------------------------------------------
+   VERIFIER SIDE
+   --------------------------------------------------------------------------- */
+
+/* Verifier BOOTSTRAP over the authentic channel (§7.4 TLS root): first/only
+   trust-store fetch. Fresh ~vid = one verifier session; trust = verified, bound
+   to the exact `mid`. Only consumer of !AuthManifest (honest-only) -> a
+   'verified verifier always trusts an honest manifest identity.
+   UNIFIED TRUST HEAD (C1 fix): ONE authoritative linear fact
+   TrustHead(V, I, ver, mid, prov, flag) carries the verifier's entire trust
+   state -- manifest identity, version, PROVENANCE ('verified | 'tofu, set at
+   bootstrap, never changed) and DISCONTINUITY FLAG ('clean | 'flagged, §11.1
+   lineage taint). It is moved ONLY by the continuity-advance rules. Every rule
+   that produces a TrustHead state ALSO records it as a persistent snapshot
+   !HeadState(V, I, ver, mid, prov, flag) -- the head's own state HISTORY, 1:1
+   with the head states, same parameters, same lineage. The ACCEPT rules read
+   !HeadState, so AcceptInfo.mid ranges over continuity-adopted manifests, not
+   just bootstrapped snapshots (the C1 requirement).
+   TRACTABILITY NOTE (documented over-approximation): letting acceptance read
+   any HISTORICAL head state (not only the newest) admits extra traces where a
+   verifier validates under trust it has since advanced past -- i.e. manifest
+   FRESHNESS, which is out of scope per design §5 (TM-29/32). For the
+   all-traces theorems this is a sound STRENGTHENING (they are proved over a
+   superset of the real traces); the exists-trace witnesses use the newest
+   state. The alternative -- acceptance consuming/restoring the linear head --
+   makes TrustHead's sources recursive through every acceptance and blows the
+   plain-prover search out of the CI budget (measured: ~12x on the cheapest
+   acceptance ET alone). */
+rule Bootstrap_verified_v01:
+    [ Fr(~vid), !AuthManifest(mid, $I, ver) ]
+  --[ TrustVerified(~vid, $I), VerifiedTrustMid(~vid, $I, mid)
+    , NewHead(~vid, $I, ver, mid, 'verified', 'clean') ]->
+    [ TrustHead(~vid, $I, ver, mid, 'verified', 'clean')
+    , !HeadState(~vid, $I, ver, mid, 'verified', 'clean') ]
+
+/* Verifier BOOTSTRAP over an unauthenticated path (§7.4 TOFU): the verifier
+   adopts a published manifest reached over a non-TLS path (In token,
+   attacker-triggerable). trust = unauthenticated_tofu, bound to that manifest's
+   `mid`. */
+rule Bootstrap_tofu_v01:
+    [ Fr(~vid)
+    , !Manifest(mid, $I, ver)
+    , In(<'tofu_fetch', $I>) ]
+  --[ TrustTOFU(~vid, $I)
+    , NewHead(~vid, $I, ver, mid, 'tofu', 'clean') ]->
+    [ TrustHead(~vid, $I, ver, mid, 'tofu', 'clean')
+    , !HeadState(~vid, $I, ver, mid, 'tofu', 'clean') ]
+
+/* ACCEPT (v0.1) -- signer key 'active in the EXACT trusted manifest `mid`, named
+   by the EXACT envelope `kid`. Opaque In(<payload, kid, sig>); the entry is
+   resolved from !ManifestEntry(mid, kid, ...) with `mid` taken from the UNIFIED
+   TrustHead (never a global (I, ver) lookup) -- so `mid` may be the bootstrap
+   manifest OR any continuity-adopted successor (C1 fix); verify(sig, payload,
+   pubkey)=true is the local-equality action discharged by signature_eq.
+   Structural premises: version dispatch (literal '0.1'), issuer binding ($I
+   across payload/trust/kid), kid-domain (<$I, kname>), status pattern 'active --
+   a 'compromised entry can never fire this rule while the rejected submission
+   trace is NOT deleted. Reads the persistent !HeadState snapshot (see the C1
+   note at Bootstrap_verified_v01) so a verifier can validate any number of
+   receipts without making the linear head's sources recursive. AcceptInfo
+   carries the accepted manifest's ver/mid/alg; AcceptProv carries the head
+   state's provenance + discontinuity flag, which the security theorems
+   condition on. */
+rule Accept_v01:
+    let payload = <'0.1', 'receipt', rid, $I>
+        kid     = <$I, kname>
+    in
+    [ !HeadState(V, $I, ver, mid, prov, flag)
+    , !ManifestEntry(mid, kid, alg, pubkey, pq, 'active')
+    , In(<payload, kid, sig>) ]
+  --[ Eq(verify(sig, payload, pubkey), true)
+    , SignatureValid(V, $I, rid, kid)
+    , Accept_v01(V, $I, rid, kid)
+    , AcceptInfo(V, $I, rid, kid, ver, mid, alg)
+    , AcceptProv(V, prov, flag)
+    , Ok(V, rid) ]->
+    [ ]
+
+/* ACCEPT (v0.1) -- retired-key branch (§11 step 3 asymmetry): a key 'retired in
+   the trusted manifest still validates receipts, but MUST raise a warning. Same
+   signature idiom, same mid-bound + kid-bound resolution as Accept_v01. */
+rule Accept_v01_retired:
+    let payload = <'0.1', 'receipt', rid, $I>
+        kid     = <$I, kname>
+    in
+    [ !HeadState(V, $I, ver, mid, prov, flag)
+    , !ManifestEntry(mid, kid, alg, pubkey, pq, 'retired')
+    , In(<payload, kid, sig>) ]
+  --[ Eq(verify(sig, payload, pubkey), true)
+    , SignatureValid(V, $I, rid, kid)
+    , Accept_v01(V, $I, rid, kid)
+    , AcceptInfo(V, $I, rid, kid, ver, mid, alg)
+    , AcceptProv(V, prov, flag)
+    , Ok(V, rid)
+    , RetiredKeyWarning(V, $I, kid) ]->
+    [ ]
+
+/* ACCEPT (v0.2 HYBRID) -- version-dispatched on the signed literal '0.2'. Mirrors
+   Accept_v01 (mid-bound + kid-bound resolution against the UNIFIED !HeadState,
+   opaque In() envelope, signatures checked via the Eq/verify local-equality idiom
+   discharged by signature_eq) with THREE additions: (1) the payload version term
+   is the literal '0.2' (Accept_v01 requires '0.1'), so dispatch is on the signed
+   version alone; (2) the resolved entry MUST be 'hybrid, carrying real PQ material
+   `pkpq`; (3) BOTH signatures must verify -- Ed verify(sigEd,payload,pubkey)=true
+   AND PQ verify_pq(sigPQ,payload,pkpq)=true. Status pattern 'active -- a
+   'compromised entry can never fire this rule (fail-closed by construction), and
+   a 'retired one cannot either: the spec's retired-key acceptance (receipt stays
+   valid with a warning) is NOT modeled on the v0.2 path. NO dedicated v0.2
+   fail-closed theorem shipped -- Task 6 pivoted to the admission-scoped downgrade
+   theorems -- and because this rule omits AcceptInfo (below),
+   compromised_key_rejected quantifies over the v0.1 path ONLY.
+   DELIBERATELY emits only Accept_v02 + Ok (+ the two Eq idioms), NOT AcceptInfo /
+   AcceptProv. Reason (tractability, measured): AcceptInfo/AcceptProv are the exact
+   antecedent keys of the frozen all-traces theorems acceptance_issuer_signed and
+   compromised_key_rejected; emitting them here would add a fresh induction case to
+   each, and the T4 report already measured acceptance_issuer_signed at ~540s (3204
+   steps), acutely close to the plain-prover budget. Omitting them keeps those
+   frozen proofs byte-unchanged. No coverage is lost: v0.2 acceptance authenticity
+   is delivered MORE STRONGLY by no_cross_version_confusion (Accept_v02 => a genuine
+   v0.2 issuance, UNCONDITIONALLY -- no reveal disjunct, all heads -- since the PQ
+   signature is unforgeable), strictly stronger than acceptance_issuer_signed's
+   verified/clean-scoped disjunctive form. */
+rule Accept_v02:
+    let payload = <'0.2', 'receipt', rid, $I>
+        kid     = <$I, kname>
+    in
+    [ !HeadState(V, $I, ver, mid, prov, flag)
+    , !ManifestEntry(mid, kid, 'hybrid', pubkey, pkpq, 'active')
+    , In(<payload, kid, sigEd, sigPQ>) ]
+  --[ Eq(verify(sigEd, payload, pubkey), true)
+    , Eq(verify_pq(sigPQ, payload, pkpq), true)
+    , Accept_v02(V, $I, rid, kid)
+    , Ok(V, rid) ]->
+    [ ]
+
+/* REJECT (v0.1, §7.3 fail-closed made EXPLICIT -- I4 fix): a submitted receipt
+   whose signature VERIFIES but whose envelope kid resolves to a 'compromised
+   entry of the trusted manifest is REJECTED. The accept rules never matching a
+   'compromised entry makes rejection implicit (absence of Ok); this rule makes
+   the SUBMISSION and the REJECTION first-class trace events, so the Group-B
+   witness can show a real forged submission reaching a verifier and being
+   turned away -- not merely that issuance and compromise coexist. Emits no Ok
+   and produces no state (fail-closed: nothing downstream). */
+rule Reject_v01_compromised:
+    let payload = <'0.1', 'receipt', rid, $I>
+        kid     = <$I, kname>
+    in
+    [ !HeadState(V, $I, ver, mid, prov, flag)
+    , !ManifestEntry(mid, kid, alg, pubkey, pq, 'compromised')
+    , In(<payload, kid, sig>) ]
+  --[ Eq(verify(sig, payload, pubkey), true)
+    , CompromisedSubmission(V, $I, rid, kid)
+    , Rejected(V, $I, rid, kid)
+    , RejectInfo(V, $I, rid, kid, ver, mid) ]->
+    [ ]
+
+/* CONTINUITY ADVANCE (§7.3 rotation continuity, auto-trust path) -- a verifier
+   holding a trust cursor TrustCursor(V,I,ver,mid) adopts a CANDIDATE successor
+   manifest that arrives over the adversarial channel (public header In(<'mhdr'>)
+   + In()-delivered signature blob). The successor is AUTO-TRUSTED iff (a) its
+   version is the immediate successor vnext(ver) of the currently-trusted version
+   [§7.3 "manifest_version N+1"], and (b) the candidate was SIGNED BY A KEY 'active
+   IN THE CURRENTLY-TRUSTED MANIFEST mid -- the signer key is resolved from
+   !ManifestEntry(mid, signerKid, ..., 'active') of the CURRENT trust, never a
+   global lookup. The verifier reconstructs the signed continuity token
+   <'manifest', I, vnext(ver), mid2> -- mid2 is the successor's CONTENT-IDENTITY
+   (Task-2 frozen contract: trust binds to mid, mid is 1:1 with manifest content),
+   so binding mid2 commits to the successor's content; its entries are then
+   authenticated by living in the persistent !ManifestEntry(mid2,...) -- and checks
+   verify(sig, token, spub)=true (crypto-primitive equality via signature_eq). ALL
+   checks are rule PREMISES (§5a): version-succession is the structural pattern
+   vnext(ver); active-signer is the 'active status match; signature is the Eq idiom.
+   NONE is a restriction.
+   UNIFIED HEAD (C1 fix, replaces the T3-v1 trust-cursor split): the advance
+   operates on the SAME linear TrustHead the accept rules read, so an advanced
+   head authorizes receipts. The clean advance PRESERVES provenance and requires
+   an incoming 'clean flag (once flagged, trust never silently returns to clean --
+   §11.1 lineage taint). This rule is the ONLY UNFLAGGED way the head advances.
+   BOUNDARY (branch review 2026-07-22): the signature check below is the Ed leg
+   only (verify against spub) and the resolved 'active signer entry may be
+   'hybrid -- manifest continuity for a HYBRID signer under a broken-Ed adversary
+   is therefore NOT covered by this model. The normative hybrid manifest AND-rule
+   (v0.2 §2.3) is spec-side; modeling it belongs with P1.4's mixed-keyset fix
+   (attack_mixed_keyset_hijack exhibits the consequence). */
+rule Verifier_Continuity_Advance_v01:
+    [ TrustHead(V, $I, ver, mid, prov, 'clean')
+    , !ManifestEntry(mid, signerKid, salg, spub, spq, 'active')
+    , In(<'mhdr', $I, vnext(ver), mid2>)
+    /* C2 fix: the adopted target MUST resolve to its unique manifest/content
+       fact at the header's exact version -- a revealed active key can no longer
+       drive an advance to an ORPHAN mid2 that names no represented authority
+       set. (!Manifest is emitted once per mid, honest or attacker.) */
+    , !Manifest(mid2, $I, vnext(ver))
+    , In(sig) ]
+  --[ Eq(verify(sig, <'manifest', $I, vnext(ver), mid2>, spub), true)
+    , AuthorityAdvance(V, $I, mid, mid2)
+    , AdvanceSigner(V, $I, mid, signerKid)
+    , ContinuityAdvance(V, $I, mid, mid2, signerKid)
+    , NewHead(V, $I, vnext(ver), mid2, prov, 'clean') ]->
+    [ TrustHead(V, $I, vnext(ver), mid2, prov, 'clean')
+    , !HeadState(V, $I, vnext(ver), mid2, prov, 'clean') ]
+
+/* DISCONTINUOUS ROTATION (§7.3 failure path) -- a candidate that is NOT signed by
+   a key 'active in the currently-trusted manifest (the signer key + its pubkey are
+   supplied over the channel from ATTACKER knowledge, In(<'signer',...>), i.e. an
+   attacker key or a revealed OLD key, never resolved from the trusted manifest),
+   or a candidate at a non-successor / conflicting version, is representable here.
+   The verifier CANNOT establish continuity, so it MUST report trust:
+   "unverified_rotation" (§11.1) -> UnverifiedRotation(V,I); it NEVER silently
+   auto-accepts on the clean branch. This rule models the operator adopting a
+   discontinuous/conflicting manifest AFTER being warned: the resulting trust is
+   FLAGGED (UnverifiedRotation at the same instant as the advance). The candidate
+   signature is still checked (Eq idiom) so AdvanceSigner names a real signer, but
+   under an attacker-supplied key -- exactly a signer NOT active in the trusted
+   manifest. UNIFIED HEAD (C1): consumes/produces the same TrustHead; provenance
+   is preserved, the outgoing flag is ALWAYS 'flagged (any incoming flag). */
+rule Verifier_Rotation_Discontinuous_v01:
+    [ TrustHead(V, $I, ver, mid, prov, flag)
+    , In(<'mhdr', $I, ver2, mid2>)
+    /* C2 fix: same target-content requirement as the clean branch -- even a
+       flagged adoption lands on a manifest that exists as content. */
+    , !Manifest(mid2, $I, ver2)
+    , In(<'signer', signerKid, spub>)
+    , In(sig) ]
+  --[ Eq(verify(sig, <'manifest', $I, ver2, mid2>, spub), true)
+    , AuthorityAdvance(V, $I, mid, mid2)
+    , AdvanceSigner(V, $I, mid, signerKid)
+    , UnverifiedRotation(V, $I)
+    , DiscontinuousRotation(V, $I, mid, mid2)
+    /* I4 fix: expose the HEAD version vs CANDIDATE version at the check, so the
+       Group-B witnesses can pin same-version-conflict and structural-gap
+       candidates relative to what the verifier currently trusts. */
+    , DiscontinuousVer(V, $I, ver, ver2)
+    , NewHead(V, $I, ver2, mid2, prov, 'flagged') ]->
+    [ TrustHead(V, $I, ver2, mid2, prov, 'flagged')
+    , !HeadState(V, $I, ver2, mid2, prov, 'flagged') ]
+
+/* ---------------------------------------------------------------------------
+   TASK 4 -- REVOCATION
+   Revocation records (issuer-signed <'revoke', rid, recTime>), a per-receipt
+   revocability CLASS fixed at issuance, an ABSTRACT nondeterministic window
+   predicate, and the verifier HONOR / IGNORE dispatch. All security decisions
+   are RULE PREMISES (§5a) -- the only restrictions remain the two crypto/WF ones.
+   --------------------------------------------------------------------------- */
+
+/* Revocability class MINT (§ receipt semantics -- a receipt's revocability class
+   is fixed when the receipt id is created). REVIEW C1 FIX: the class-choice seed
+   RevClassChoice(rid) comes from Birth_Rid -- the SAME birth that seeds the
+   receipt's issuance -- so classes and receipts share one id space: an issued
+   receipt CAN be classed and a classed rid CAN be issued (linkage witnessed by
+   sanity_issued_receipt_revoked). UNIQUENESS: the seed is linear and born once
+   per ~rid, so each rid gets AT MOST one class, one persistent !Revocability,
+   one RevClass action. The mint is asynchronous (a separate rule, not co-atomic
+   with issuance): the class is still fixed BEFORE any revocation processing,
+   because every revocation rule reads !Revocability(rid, class), which only the
+   mint produces. */
+rule Mint_Revocable_none:
+    [ RevClassChoice(rid) ]
+  --[ RevClass(rid, 'none'), NewRevocable(rid) ]->
+    [ !Revocability(rid, 'none') ]
+
+rule Mint_Revocable_refund_window:
+    [ RevClassChoice(rid) ]
+  --[ RevClass(rid, 'refund_window'), NewRevocable(rid) ]->
+    [ !Revocability(rid, 'refund_window') ]
+
+rule Mint_Revocable_policy:
+    [ RevClassChoice(rid) ]
+  --[ RevClass(rid, 'policy'), NewRevocable(rid) ]->
+    [ !Revocability(rid, 'policy') ]
+
+/* Revocation-record ISSUANCE (§ revocation): the honest issuer signs the small
+   record body <'revoke', rid, recTime> with a key 'active in SOME published
+   manifest (reads ONLY persistent facts, exactly like Issue_Receipt_v01 -- no
+   linear state on the signing path). rid is bound to a real revocable receipt via
+   !Revocability(rid, class); recTime is an OPAQUE fresh term (born once by
+   Birth_RecTime, consumed here via the linear RecTimeSeed -- no arithmetic --
+   the window is an abstract predicate decided by the coin below). The record
+   travels on the adversarial Out channel as the signed tuple <body, kid,
+   sign(body, ~sk)>, mirroring the receipt-envelope shape so the verifier's In()
+   deconstruction stays small.
+   TASK 6 (v0.2 §13) -- PARAMETERISED ON THE SIGNER ENTRY'S ALGORITHM. The entry
+   pattern's algorithm field, previously the free variable `alg`, is now the
+   literal 'ed_only: this rule is the Ed-only record producer, and its hybrid
+   counterpart (Issue_Revocation_v02_hybrid, below) is the hybrid one. This is a
+   NARROWING -- strictly fewer rule instances, no new producer of RevocationIssued
+   (the frozen action every T4 witness anchors on keeps EXACTLY ONE producer,
+   deliberately: T5 measured what a second producer of a downstream-consumed fact
+   does to a backward search -- reach_revoked_then_rejected went from 283s to out
+   of reach at 1500s). Every frozen revocation witness signs with the GENESIS key,
+   which is 'ed_only, so all of them keep holding. */
+rule Issue_Revocation_v01:
+    let body = <'revoke', rid, recTime>
+        kid  = <$I, kname>
+    in
+    [ !Revocability(rid, class)
+    , !ManifestEntry(mid, kid, 'ed_only', pk(~sk), pq, 'active')
+    , !KeyMat(kid, ~sk)
+    , RecTimeSeed(recTime) ]
+  --[ RevocationIssued($I, rid, kid, recTime)
+    , RevSignerMid($I, rid, kid, mid) ]->
+    [ Out(<body, kid, sign(body, ~sk)>) ]
+
+/* TASK 6 -- HYBRID REVOCATION RECORD (v0.2 §13). The sibling of the rule above,
+   selected by the SAME parameter (the signer entry's algorithm): a 'hybrid entry
+   carrying REAL PQ material signs the SAME record body with BOTH legs, and the
+   record travels as a 4-TUPLE <body, kid, sigEd, sigPQ> -- the v0.1 record is a
+   3-tuple, so the two admission paths can never cross-consume each other's
+   envelopes (the same shape device Issue_Receipt_v02_hybrid uses against
+   Issue_Receipt_v01). It consumes the same linear RecTimeSeed, so a given record
+   timestamp still backs AT MOST ONE record, Ed-only XOR hybrid.
+   It deliberately emits NEW actions (RevocationIssuedHybrid / RevSignerMidHybrid)
+   instead of the frozen RevocationIssued / RevSignerMid: those are the anchors of
+   four frozen exists-trace witnesses and the consequents of two frozen theorems,
+   and giving them a second producer is the exact T5 wall (see the note on the
+   rule above). The downgrade theorem below is stated on the new actions. */
+rule Issue_Revocation_v02_hybrid:
+    let body = <'revoke', rid, recTime>
+        kid  = <$I, kname>
+    in
+    [ !Revocability(rid, class)
+    , !ManifestEntry(mid, kid, 'hybrid', pk(~sk), pk_pq(~skPQ), 'active')
+    , !KeyMat(kid, ~sk)
+    , !PqKeyMat(kid, ~skPQ)
+    , RecTimeSeed(recTime) ]
+  --[ RevocationIssuedHybrid($I, rid, kid, recTime)
+    , RevSignerMidHybrid($I, rid, kid, mid) ]->
+    [ Out(<body, kid, sign(body, ~sk), sig_pq(body, ~skPQ)>) ]
+
+/* recTime BIRTH (review I1 fix, tractability-preserving split -- same device as
+   Birth_Rid): each record timestamp is born ONCE with two LINEAR seeds, one
+   consumed by Issue_Revocation_v01 (so ~recTime stays unique per record) and one
+   window coin. Keeping the coin's source at this Fr-only rule -- rather than
+   emitting it from Issue_Revocation_v01 -- keeps the signer resolution OUT of
+   the window chain (measured: coin-from-issuance grew the revocation group
+   186s -> 446s; see run-f2-coin.out). */
+rule Birth_RecTime:
+    [ Fr(~recTime) ]
+  --[ RecTimeBorn(~recTime) ]->
+    [ RecTimeSeed(~recTime), WindowCoinSeed(~recTime) ]
+
+/* Abstract window predicate -- ONE-SHOT nondeterministic coin per record.
+   REVIEW I1 FIX: the LINEAR WindowCoinSeed(recTime) is born exactly once per
+   record timestamp (~recTime is 1:1 with the record via RecTimeSeed linearity),
+   replacing the replayable In(<'revoke', ...>)-only source under which BOTH
+   !InWindow and !NotInWindow could coexist for the same (rid, recTime) -- the
+   reviewer's honored-AND-ignored double-window. Exactly one of the two rules
+   consumes the seed, so AT MOST ONE window fact ever exists per recTime -- the
+   branches are mutually exclusive per record, both reachable (nondeterministic
+   consumer choice), time stays entirely out of scope (no clock, no arithmetic).
+   The rid pairing still comes from the plaintext In(): an adversary may burn a
+   coin on a mismatched rid, which DENIES the record a window decision (neither
+   honor-in-window nor ignore-out-of-window fires -- a liveness non-issue, rules
+   are never forced to fire) but can never produce two opposing facts for the
+   signed record's own (rid, recTime). InWindowActive / OutWindowMark are the
+   independent witnesses refund_window_bound and revocation_effectiveness
+   quantify over (emitted at the coin, not at the honor/ignore). */
+rule Window_In:
+    [ WindowCoinSeed(recTime), In(<'revoke', rid, recTime>) ]
+  --[ InWindowActive(rid, recTime) ]->
+    [ !InWindow(rid, recTime) ]
+
+rule Window_Out:
+    [ WindowCoinSeed(recTime), In(<'revoke', rid, recTime>) ]
+  --[ OutWindowMark(rid, recTime) ]->
+    [ !NotInWindow(rid, recTime) ]
+
+/* Record ADMISSION (review I2 fix, single authentication point): V resolves the
+   record's signer 'active from its TRUSTED manifest (!HeadState +
+   !ManifestEntry(mid, kid, ..., 'active') -- SAME trust source as Accept_v01,
+   C1 unified head) and checks the signature over the record body ONCE
+   (Eq/verify idiom discharged by signature_eq); the persistent !AuthRevRecord
+   is what the class/window DISPATCH rules (HONOR x2, IGNORE x2) consume --
+   v0.1 §12.2 applies class dispatch to "an authenticated, matching record",
+   and this fact IS that precondition. An UNAUTHENTICATED record is a different
+   spec path (§12.1: ignored with a warning, never class-dispatched),
+   deliberately not modeled -- no theorem quantifies over it.
+   TRACTABILITY (measured): inlining these auth premises into all four dispatch
+   rules made the source-saturation precomputation itself exceed 590s
+   (run-f3-ignauth.out); a SINGLE In() consumer for the signed record envelope
+   keeps it tractable. (This differs from the implementer's rejected cached
+   `!Valid` fact only in that the dispatch rules now carry NO crypto at all;
+   the co-emission lemma that measured worse under caching no longer exists --
+   effectiveness was restated on the ignore side.) */
+/* TASK 6 (v0.2 §13) -- FAIL-CLOSED HALF OF THE HYBRID AND-RULE, and the only
+   premise of a frozen T4 rule this task touches. The signer-entry pattern's
+   algorithm field, previously the free variable `alg`, is now the literal
+   'ed_only. §13 is normative that an Ed25519-only signature "against a hybrid
+   key's authority is never honored, regardless of how early or late it is
+   presented" (conformance vector 28m), and with `alg` free this rule DID admit
+   exactly that record: an attacker holding the Ed half of a hybrid key (post-CRQC:
+   Reveal_Key/EdBroken, with ~skPQ still secret) produced a verify-true <'revoke',
+   ...> record and it was admitted as authentic. Leaving the premise free would
+   have made no_downgrade_revocation_allhybrid FALSE for the model's own reason,
+   not for a modelling artefact. The change is a NARROWING (strictly fewer
+   instances, no new fact producer): every all-traces theorem stays true over a
+   subset of its old traces, and every frozen witness anchors its admission on the
+   GENESIS manifest, whose entry is 'ed_only. Measured before/after -- see
+   task-6-report.md. */
+rule Admit_Revocation_Record:
+    let body = <'revoke', rid, recTime>
+        kid  = <$I, kname>
+    in
+    [ !HeadState(V, $I, ver, mid, prov, flag)
+    , !ManifestEntry(mid, kid, 'ed_only', pubkey, pq, 'active')
+    , In(<body, kid, sig>) ]
+  --[ Eq(verify(sig, body, pubkey), true)
+    , RevRecordAdmitted(V, $I, rid, kid, recTime, mid)
+    /* T4b: the head's provenance and discontinuity flag at the moment of
+       admission, co-timed with the admission itself, so the authenticity lemma
+       can be scoped to clean-verified trust exactly like acceptance is. */
+    , RevAdmitProv(V, prov, flag) ]->
+    [ !AuthRevRecord(V, $I, rid, kid, recTime, mid, prov, flag) ]
+
+/* TASK 6 -- HYBRID REVOCATION ADMISSION (v0.2 §13), scoped to the AUTHENTICATION
+   boundary ON PURPOSE. This rule is the model's single hybrid-record admission
+   point: it deconstructs the 4-tuple envelope once and checks BOTH signature legs
+   against the resolved 'hybrid entry. The downgrade theorem below is stated on
+   its RevRecordAdmittedHybrid action, and admission is the property's honest
+   home: the downgrade is an attack on AUTHENTICATION, and every honor path in
+   this theory consumes an ADMITTED record (the frozen dispatch consumes
+   !AuthRevRecord, produced only by Admit_Revocation_Record), so a record that
+   cannot be admitted forged cannot be honored forged, transitively. What happens
+   AFTER admission -- class/window dispatch, !HonoredRevocation, the
+   reject-revoked path -- is model completeness, not the §13 downgrade thesis.
+
+   HYBRID DISPATCH (honor/ignore/reject) IS EXPLICITLY OUT OF SCOPE, and the
+   reason is structural, not an accident: the frozen T4 theorem
+   revocation_auth_soundness demands, for every RevocationHonored under
+   verified/clean trust, a RevRecordAdmitted AND (RevocationIssued OR an
+   issuer-key reveal) -- all Ed-named facts with exactly one producer each.
+   Feeding a hybrid record into the frozen !AuthRevRecord falsifies that theorem
+   (a hybrid record emits RevocationIssuedHybrid, never RevocationIssued);
+   duplicating the dispatch tree over parallel hybrid facts (4 dispatch rules +
+   !HonoredRevocationHybrid + a hybrid reject branch) reproduces the whole T4
+   proof surface, and every PARTIAL copy is a fresh dead end -- the round-2 shape
+   honored only 'policy, so an honestly issued refund_window hybrid record was
+   admitted but never honorable, and even its 'policy honor produced no
+   !HonoredRevocation, so it could not drive `revocation: "revoked"`. Third
+   structural collision of this shape in the revocation subsystem (T4b, T5, T6):
+   the honest boundary is admission. The Python reference implementation carries
+   the full post-admission behaviour for hybrid records (Stage-2 sibling patch,
+   tests/test_sibling_hybrid_sidedocs.py); the model proves the security half.
+   The rule's conclusion is EMPTY -- the admitted record has no downstream model
+   effects, and the theorem below claims nothing beyond the admission event.
+
+   HEAD-FREE, AND THAT CHOICE IS MEASURED. The admission is off the !HeadState
+   chain -- the same lever T5 used and this task's artifact-manifest pair uses. A
+   trust-TIED variant was tried first (a head-free signature check feeding a
+   head-consuming admission whose `mid` had to match the verifier's trusted
+   head): even the reachability WITNESS was BUDGET-EXHAUSTED at 600s under it.
+   Since the downgrade property below is UNCONDITIONAL -- the PQ signature is
+   unforgeable regardless of which head a verifier holds -- the trust tie buys
+   the theorem nothing and costs it its tractability.
+   THE SCOPE THIS COSTS, STATED NOT HIDDEN. Admission resolves the signer entry
+   from !ManifestEntry directly, so `mid` ranges over ANY published manifest
+   carrying that 'hybrid entry 'active, not specifically the verifier's own
+   trusted manifest -- a strict OVER-APPROXIMATION (the admitted set is a
+   superset of the real one), so the all-traces theorem is proved over more
+   traces than the protocol admits, never fewer. No attacker entry can fire it
+   anyway: Attacker_Manifest_v01 mints 'ed_only entries, and this rule
+   pattern-matches 'hybrid. The trust-scoped authenticity of records under
+   verified/clean heads is the Ed path's job (rev_record_authentic).
+   $V is a free verifier label. */
+rule Admit_Revocation_Record_hybrid:
+    let body = <'revoke', rid, recTime>
+        kid  = <$I, kname>
+    in
+    [ !ManifestEntry(mid, kid, 'hybrid', pubkey, pkpq, 'active')
+    , In(<body, kid, sigEd, sigPQ>) ]
+  --[ Eq(verify(sigEd, body, pubkey), true)
+    , Eq(verify_pq(sigPQ, body, pkpq), true)
+    , RevRecordAdmittedHybrid($V, $I, rid, kid, recTime, mid) ]->
+    [ ]
+
+/* Verifier HONOR (refund_window branch) -- §5a premise discipline, ALL checks
+   are rule premises: (1) the record is ADMITTED (authenticated against V's
+   trusted manifest -- rule above); (2) class 'refund_window; (3) window admits
+   (!InWindow). Emits RevocationHonored + the soundness witnesses; produces the
+   persistent !HonoredRevocation(V, rid) the reject-revoked path reads
+   (Ok-linkage). WindowOk(rid, recTime) binds the honored record's recTime for
+   refund_window_bound; AuthMatchingInClassInWindow marks the full-guard instant
+   for the ignore-side effectiveness reasoning. */
+rule Honor_Revocation_refund_window:
+    [ !AuthRevRecord(V, $I, rid, kid, recTime, mid, prov, flag)
+    , !Revocability(rid, 'refund_window')
+    , !InWindow(rid, recTime) ]
+  --[ RevocationHonored(V, rid)
+    , RevHonorProv(V, prov, flag)
+    , RevHonorInfo(V, $I, rid, kid, recTime, mid)
+    , ClassHonorable(rid)
+    , WindowOk(rid, recTime)
+    , HonoredClass(rid, 'refund_window')
+    , AuthMatchingInClassInWindow(V, rid, recTime) ]->
+    [ !HonoredRevocation(V, $I, rid, kid, recTime, mid) ]
+
+/* Verifier HONOR (policy branch) -- same admission precondition; the 'policy
+   class carries NO window constraint (a policy revocation is honorable
+   regardless of any window), so there is no !InWindow premise. WindowOk is
+   still emitted (soundness's window conjunct is vacuously satisfied for
+   'policy: no window applies), but HonoredClass names 'policy so
+   refund_window_bound does not apply to it. */
+rule Honor_Revocation_policy:
+    [ !AuthRevRecord(V, $I, rid, kid, recTime, mid, prov, flag)
+    , !Revocability(rid, 'policy') ]
+  --[ RevocationHonored(V, rid)
+    , RevHonorProv(V, prov, flag)
+    , RevHonorInfo(V, $I, rid, kid, recTime, mid)
+    , ClassHonorable(rid)
+    , WindowOk(rid, recTime)
+    , HonoredClass(rid, 'policy')
+    , AuthMatchingInClassInWindow(V, rid, recTime) ]->
+    [ !HonoredRevocation(V, $I, rid, kid, recTime, mid) ]
+
+/* Verifier IGNORE (class 'none): an ADMITTED (authenticated, matching) record
+   for a 'none-class receipt is IGNORED -- NO !HonoredRevocation, so acceptance
+   is left untouched; this is v0.1 §12.2's `invalid_revocation_ignored` outcome
+   (the irrevocability guarantee). REVIEW I2 FIX: dispatch now applies only to
+   admitted records (see Admit_Revocation_Record). RevIgnoreInfo carries
+   (recTime, mid) for witness anchoring. */
+rule Ignore_Revocation_none:
+    [ !AuthRevRecord(V, $I, rid, kid, recTime, mid, prov, flag)
+    , !Revocability(rid, 'none') ]
+  --[ RevocationIgnored(V, rid, 'class_none')
+    , RevIgnoreInfo(V, $I, rid, recTime, mid) ]->
+    [ ]
+
+/* Verifier IGNORE (out of window): an ADMITTED 'refund_window record whose
+   window does NOT admit (!NotInWindow) is IGNORED with reason 'out_of_window --
+   acceptance untouched (§12.2 refund_window row, out-of-window case).
+   Coin-flipped mirror. */
+rule Ignore_Revocation_out_of_window:
+    [ !AuthRevRecord(V, $I, rid, kid, recTime, mid, prov, flag)
+    , !Revocability(rid, 'refund_window')
+    , !NotInWindow(rid, recTime) ]
+  --[ RevocationIgnored(V, rid, 'out_of_window')
+    , RevIgnoreInfo(V, $I, rid, recTime, mid) ]->
+    [ ]
+
+/* REJECT-revoked (Ok-linkage -- review C2 fix). A genuine ALTERNATIVE BRANCH to
+   acceptance: a genuinely ISSUED receipt (!IssuedReceipt, emitted by
+   Issue_Receipt_v01 -- NOT a fabricated <'submit',rid> token the review rejected
+   as "not an alternative branch for the receipt envelope") whose rid carries a
+   honored revocation in V's view (!HonoredRevocation) is CONSULTED
+   (ConsultedHonored) and REJECTED, emitting NO Ok. Both premises are shallow
+   persistent facts, so the reject carries no crypto and no receipt-envelope
+   source cost -- binding the envelope In() directly (with the free unverified
+   sig, or crossed with Eq(verify) and the deep !HonoredRevocation honor chain)
+   either opened a partial deconstruction or taxed the whole theory's source
+   computation past 590s (run-d3-postf7.out / run-f1-decouple.out).
+   ABSTRACTION, STATED EXPLICITLY (re-review Q2): this rule ABSTRACTS the
+   submitted receipt rather than CONSUMING the actual envelope -- it reads the
+   persistent marker that rid was issued, not the `In(<payload, kid, sig>)` term
+   Accept_v01 consumes. So it is an alternative branch on the same receipt
+   IDENTITY, not on the same wire message; describing it as literally sharing the
+   accept path's envelope would overstate the model. The abstraction is what
+   makes it tractable, and it is sound for the property proved here
+   (revoked_view_never_ok quantifies over the invocation's actions, not over
+   envelope terms).
+   SPEC SCOPE (adjudication, v0.1 §11.1): the revocation view is a PER-INVOCATION
+   input -- `unknown`/`not_revoked_as_of` do NOT degrade `ok`. So the plan's
+   absolute "a revoked rid's later Accept is UNREACHABLE" (plan:228) is STRONGER
+   than the spec (a feed that withholds the record yields a legitimate ok, its
+   staleness surfaced via the §12.3 freshness anchor). The provable, spec-true
+   property is PER-INVOCATION: an invocation that CONSULTS a honored record for
+   rid cannot emit ok for rid (revoked_view_never_ok). Accept_v01 firing for the
+   same rid in a DIFFERENT invocation (view withheld) is spec-correct and does
+   not violate it. Flagged to Samu as a plan amendment. */
+rule Reject_v01_revoked:
+    [ !IssuedReceipt($I, rid)
+    , !HonoredRevocation(V, $I, rid, rkid, rrecTime, rmid) ]
+  --[ ConsultedHonored(V, rid)
+    , RevokedSubmission(V, rid)
+    , RejectRevokedInfo(V, $I, rid, rkid, rrecTime, rmid)
+    , Rejected_revoked(V, $I, rid) ]->
+    [ ]
+
+/* ---------------------------------------------------------------------------
+   TASK 6 -- ARTIFACT MANIFESTS (v0.2 §13, the second side-document)
+   A minimal issue+accept pair, hybrid-only: §13 extends the hybrid AND-rule to
+   artifact manifests exactly as it does to revocation records, and this pair is
+   the model surface the downgrade theorem needs (no artifact-manifest rules
+   existed before this task).
+   DELIBERATELY OFF THE !HeadState CHAIN (documented over-approximation). The
+   acceptance resolves the signer entry from !ManifestEntry directly instead of
+   from a verifier's trusted head. Two reasons, one measured and one semantic.
+   MEASURED: T5's bisection isolated reading the head chain with free prov/flag as
+   what took no_cross_version_confusion from 64s to beyond 600s. SEMANTIC: this is
+   a STRENGTHENING, not a convenience -- the theorem below then quantifies over
+   acceptances against ANY published manifest entry, a strict superset of the
+   traces a real verifier (which requires the entry to live in its own trusted
+   manifest) can produce. Trust resolution itself is not re-litigated here; it is
+   what acceptance_issuer_signed and rotation_no_hijack already prove for the
+   receipt and rotation paths. Note also that no attacker-published entry can ever
+   fire these rules: Attacker_Manifest_v01 mints 'ed_only entries with 'none PQ
+   material, and both rules pattern-match a 'hybrid entry.
+   SCOPE (stated, not hidden): only the HYBRID side-document path is modelled.
+   §13's other direction -- an Ed-only signer's artifact manifest carrying a stray
+   PQ leg must also fail closed -- has no model surface here because there is no
+   Ed-only artifact-manifest path at all, which is the fail-closed outcome by
+   construction rather than by proof. */
+
+/* Artifact-manifest ISSUANCE, hybrid signer: the issuer signs the side-document
+   body <'amanifest', I, ~aid> with BOTH legs under a 'hybrid entry 'active in some
+   published manifest, exactly like Issue_Receipt_v02_hybrid signs a receipt
+   payload. ~aid is the fresh per-document identity, so the signed body is 1:1 with
+   this rule instance. The tag 'amanifest is distinct from 'revoke, 'manifest,
+   'mhdr and the version-led receipt payloads, so no signature from another path
+   can ever be replayed as an artifact manifest (the message-origin argument the
+   [reuse] helper below rests on). */
+rule Issue_Artifact_Manifest_v02_hybrid:
+    let amb = <'amanifest', $I, ~aid>
+        kid = <$I, kname>
+    in
+    [ !ManifestEntry(mid, kid, 'hybrid', pk(~sk), pk_pq(~skPQ), 'active')
+    , !KeyMat(kid, ~sk)
+    , !PqKeyMat(kid, ~skPQ)
+    , Fr(~aid) ]
+  --[ ArtifactManifestIssued($I, ~aid, kid) ]->
+    [ Out(<amb, kid, sign(amb, ~sk), sig_pq(amb, ~skPQ)>) ]
+
+/* Artifact-manifest ACCEPTANCE, hybrid signer: an opaque 4-tuple off the wire is
+   accepted iff the named kid resolves to a 'hybrid entry 'active in a published
+   manifest AND BOTH legs verify against that entry's own material (the AND-rule).
+   $V names the accepting verifier as a free public name -- it is a label, not a
+   trust state (see the head-free note above). */
+rule Accept_Artifact_Manifest_v02_hybrid:
+    let amb = <'amanifest', $I, aid>
+        kid = <$I, kname>
+    in
+    [ !ManifestEntry(mid, kid, 'hybrid', pubkey, pkpq, 'active')
+    , In(<amb, kid, sigEd, sigPQ>) ]
+  --[ Eq(verify(sigEd, amb, pubkey), true)
+    , Eq(verify_pq(sigPQ, amb, pkpq), true)
+    , ArtifactManifestAccepted($V, $I, aid, kid) ]->
+    [ ]
+
+/* ---------------------------------------------------------------------------
+   RESTRICTIONS -- local well-formedness / crypto-primitive equalities only (5a)
+   --------------------------------------------------------------------------- */
+restriction genesis_unique:
+  "All I #i #j. Genesis(I) @ #i & Genesis(I) @ #j ==> #i = #j"
+
+restriction signature_eq:
+  "All a b #i. Eq(a, b) @ #i ==> a = b"
+
+/* ---------------------------------------------------------------------------
+   GROUP-A SANITY LEMMAS (exists-trace)
+   --------------------------------------------------------------------------- */
+
+lemma sanity_toolchain:
+  exists-trace
+  "Ex A key #i. KeyRegistered(A, key) @ #i"
+
+/* Honest v0.1 accept: acceptance of an honestly-issued receipt under the GENESIS
+   manifest that the verifier trusts as 'verified. The extra conjuncts pin the
+   intended honest witness (prior Issued, verified trust on the genesis mid). */
+lemma sanity_v01_accept:
+  exists-trace
+  "Ex V I rid kid mid alg ver #a #i #t #g.
+     Accept_v01(V, I, rid, kid) @ #a
+   & Ok(V, rid) @ #a
+   & AcceptInfo(V, I, rid, kid, ver, mid, alg) @ #a
+   & VerifiedTrustMid(V, I, mid) @ #t
+   & GenesisMid(I, mid) @ #g
+   & Issued(I, rid) @ #i
+   & UsesKey(I, kid) @ #i
+   & #i < #a"
+
+/* Rotation then accept: acceptance under the ROTATED (successor) manifest,
+   witnessed by a genuine honest issuance ordered #r < #i < #a -- a rotate ->
+   honest-issue -> accept path (not a Reveal_Key+forge trace). The acceptance's
+   AcceptInfo version v2 is the successor version the Rotate produced. */
+lemma sanity_rotate_then_accept:
+  exists-trace
+  "Ex I v1 v2 sk V rid kid mid alg #r #i #a #t.
+     Rotate(I, v1, v2, sk) @ #r
+   & Issued(I, rid) @ #i
+   & UsesKey(I, kid) @ #i
+   & Accept_v01(V, I, rid, kid) @ #a
+   & AcceptInfo(V, I, rid, kid, v2, mid, alg) @ #a
+   & VerifiedTrustMid(V, I, mid) @ #t
+   & #r < #i
+   & #i < #a"
+
+/* DoD 3a (representation admits a MIXED keyset): one manifest `mid` holds BOTH an
+   'active Ed-only key (used to accept a receipt -> AcceptInfo alg 'ed_only) AND an
+   'active hybrid key (HybridActiveIn) at the same time. The hybrid entry carries
+   REAL pk_pq(~skPQ) material. */
+lemma sanity_mixed_keyset:
+  exists-trace
+  /* Review-3 fix 4: the witness must be an HONEST issuance-then-acceptance under
+     the mixed manifest (prior Issued + UsesKey for the accepted kid + IssueMid on
+     the same mid, ordered) — a Reveal_Key+forge trace no longer satisfies it. */
+  "Ex I V rid kid mid v #a #h #t #i.
+     AcceptInfo(V, I, rid, kid, v, mid, 'ed_only') @ #a
+   & HybridActiveIn(I, mid) @ #h
+   & VerifiedTrustMid(V, I, mid) @ #t
+   & Issued(I, rid) @ #i
+   & UsesKey(I, kid) @ #i
+   & IssueMid(I, mid, kid) @ #i
+   & #i < #a"
+
+/* Envelope kid is resolved exactly: a receipt whose transmitted `kid` equals the
+   key the issuer signed with (UsesKey at the honest issuance #i) is accepted
+   (Accept_v01 resolving that same kid at #a). Because acceptance consumes
+   In(<payload, kid, sig>) and unifies that kid against the manifest entry, this is
+   a genuine kid-bound honest acceptance. Pinned to a verified genesis manifest so
+   the search is guided to the intended honest witness. */
+lemma sanity_kid_bound_accept:
+  exists-trace
+  "Ex V I rid kid mid alg ver #a #i #t #g.
+     Accept_v01(V, I, rid, kid) @ #a
+   & AcceptInfo(V, I, rid, kid, ver, mid, alg) @ #a
+   & VerifiedTrustMid(V, I, mid) @ #t
+   & GenesisMid(I, mid) @ #g
+   & Issued(I, rid) @ #i
+   & UsesKey(I, kid) @ #i
+   & #i < #a"
+
+/* Genuine post-retirement acceptance via the retired-key branch: an HONEST
+   issuance while the key was active (#i), then retirement (#ret), then acceptance
+   (#a) ordered #i < #ret < #a, WITH the RetiredKeyWarning emitted at #a. Not a
+   Reveal_Key+forge trace. */
+lemma sanity_retired_key_receipt_still_accepts:
+  exists-trace
+  "Ex I kid V rid mid alg v #i #ret #a #t.
+     Issued(I, rid) @ #i
+   & UsesKey(I, kid) @ #i
+   & Retire(I, kid) @ #ret
+   & Accept_v01(V, I, rid, kid) @ #a
+   & AcceptInfo(V, I, rid, kid, v, mid, alg) @ #a
+   & VerifiedTrustMid(V, I, mid) @ #t
+   & RetiredKeyWarning(V, I, kid) @ #a
+   & #i < #ret
+   & #ret < #a"
+
+/* Slot-agnostic authority: the key ADDED by add-key rotation (the hybrid key
+   kidH) can BOTH issue a receipt (UsesKey) AND itself be marked compromised
+   (Compromise), issuance ordered before compromise. Witnesses that neither
+   issuance nor compromise is limited to the genesis key. */
+lemma sanity_slot2_issue_and_compromise:
+  exists-trace
+  "Ex I kidH #h #u #c.
+     HybridKey(I, kidH) @ #h
+   & UsesKey(I, kidH) @ #u
+   & Compromise(I, kidH) @ #c
+   & #u < #c"
+
+/* DoD 3b (representation admits an attacker manifest with a DISTINCT mid): a
+   'verified verifier's trusted manifest `mid_h` and an attacker-published
+   manifest `mid_a` coexist with mid_h != mid_a -- so the attacker manifest can
+   never alias the verified verifier's trust. */
+lemma sanity_attacker_distinct_mid:
+  exists-trace
+  "Ex I V mid_h mid_a #b #f.
+     VerifiedTrustMid(V, I, mid_h) @ #b
+   & AttackerManifest(I, mid_a) @ #f
+   & not (mid_h = mid_a)"
+
+/* Review-3 fix 1 demonstrator: a SAME-VERSION CONFLICT is reachable — the
+   attacker publishes a manifest carrying the SAME version v2 that an honest
+   rotation produced (learned from the public 'mhdr' header). §7.3's conflicting-
+   manifests case is therefore representable; Task 3's continuity rule consumes
+   exactly this distinction (same-version vs successor vs gap). */
+lemma sanity_same_version_conflict:
+  exists-trace
+  "Ex I v1 v2 sk midA #r #f.
+     Rotate(I, v1, v2, sk) @ #r
+   & AttackerManifestVer(I, midA, v2) @ #f"
+
+/* Task 3 honest continuity: a verifier that VERIFIED-trusts the genesis manifest
+   `mid` advances its trust to the add-key successor `mid2` via the clean
+   continuity rule, the candidate being signed by the genesis key kidE (active in
+   `mid`). Witnesses that the auto-trust path is executable end-to-end
+   (bootstrap -> honest rotate -> continuity advance), signer = the rotation
+   signer, ordered after the bootstrap. */
+lemma sanity_continuity_advance:
+  exists-trace
+  "Ex V I mid mid2 signerKid v1 v2 #b #g #r #c.
+     VerifiedTrustMid(V, I, mid) @ #b
+   & GenesisMid(I, mid) @ #g
+   & Rotate(I, v1, v2, signerKid) @ #r
+   & AuthorityAdvance(V, I, mid, mid2) @ #c
+   & ContinuityAdvance(V, I, mid, mid2, signerKid) @ #c
+   & #b < #c
+   & #r < #c"
+
+/* C1 witness: acceptance UNDER THE ADVANCED HEAD, same verifier V end-to-end --
+   verified bootstrap at `mid`, clean continuity advance to `mid2`, then an Ok
+   whose AcceptInfo carries mid2 (a continuity-adopted manifest authorizes a
+   receipt), with verified/clean provenance at the acceptance and a genuinely
+   honest issuance under a mid2-active key. This is the executable link the
+   T3-v1 cursor split severed. */
+lemma sanity_accept_after_advance:
+  exists-trace
+  "Ex V I rid kid mid mid2 alg v2 #b #g #c #a #i.
+     VerifiedTrustMid(V, I, mid) @ #b
+   & GenesisMid(I, mid) @ #g
+   & AuthorityAdvance(V, I, mid, mid2) @ #c
+   & Ok(V, rid) @ #a
+   & AcceptInfo(V, I, rid, kid, v2, mid2, alg) @ #a
+   & AcceptProv(V, 'verified', 'clean') @ #a
+   & Issued(I, rid) @ #i
+   & UsesKey(I, kid) @ #i
+   & IssueMid(I, mid2, kid) @ #i
+   & (Ex #h. HybridActiveIn(I, mid2) @ #h)
+   & #b < #c
+   & #c < #a"
+
+/* C2 witness (multi-hop continuity across lifecycle kinds): the SAME verifier
+   advances CLEANLY twice -- genesis -> add-key successor mid2 -> sibling-
+   preserving COMPROMISE successor mid3 -- so a compromise mark is DELIVERED to
+   an existing verifier through the §7.3 continuity chain (not via a fresh
+   bootstrap). ContinuityAdvance on both hops pins the clean branch; this is
+   exactly the chain compromised_key_rejected needs to matter for advanced
+   verifiers, and it is only possible because retire/compromise successors now
+   emit the same continuity token add-key does (C2 fix). */
+lemma sanity_multihop_advance_compromise:
+  exists-trace
+  "Ex V I mid mid2 mid3 s1 s2 kidC #b #g #c1 #c2 #x.
+     VerifiedTrustMid(V, I, mid) @ #b
+   & GenesisMid(I, mid) @ #g
+   & ContinuityAdvance(V, I, mid, mid2, s1) @ #c1
+   & ContinuityAdvance(V, I, mid2, mid3, s2) @ #c2
+   & EntryCompromised(mid3, kidC) @ #x
+   & (Ex #h. HybridActiveIn(I, mid2) @ #h)
+   & #b < #c1
+   & #c1 < #c2"
+
+/* ---------------------------------------------------------------------------
+   TASK 5 -- HYBRID v0.2 SANITY (exists-trace). TDD RED FIRST: added before the
+   v0.2 issuance/acceptance rules exist, so it MUST be FALSIFIED on the first run
+   (no rule emits Accept_v02 yet); after the rules are added it turns verified.
+   --------------------------------------------------------------------------- */
+/* Honest hybrid (v0.2) acceptance: a verifier that VERIFIED-trusts a manifest
+   `mid` carrying an 'active HYBRID key (HybridActiveIn) accepts, via the dual-
+   signature Accept_v02 path, a receipt honestly issued under that same hybrid key
+   (Issued + UsesKey + IssueMid on `mid`, ordered #i < #a). Anchored exactly like
+   sanity_mixed_keyset so the plain-prover search is guided to the intended honest
+   bootstrap -> add-hybrid -> verified-bootstrap -> hybrid-issue -> accept trace,
+   not explored blindly (T2/T3 anchored-witness lesson). Accept_v02 deliberately
+   does NOT emit AcceptInfo/AcceptProv (see its rule comment for the tractability
+   reason), so this witness anchors on HybridActiveIn/IssueMid instead. */
+lemma sanity_hybrid_accept:
+  exists-trace
+  "Ex V I rid kid mid #a #i #t #h.
+     Accept_v02(V, I, rid, kid) @ #a
+   & Ok(V, rid) @ #a
+   & VerifiedTrustMid(V, I, mid) @ #t
+   & HybridActiveIn(I, mid) @ #h
+   & Issued(I, rid) @ #i
+   & UsesKey(I, kid) @ #i
+   & IssueMid(I, mid, kid) @ #i
+   & #i < #a"
+
+/* ---------------------------------------------------------------------------
+   GROUP-B ADVERSARIAL REACHABILITY (exists-trace) -- the anti-own-goal group:
+   for the negative Group-C theorems, show their premises are reachable WITH THE
+   ATTACKER ACTING, so the theorems defeat a real bad trace, not a vacuous one.
+   --------------------------------------------------------------------------- */
+
+/* I4 witness 1/3 (rotation, NON-ACTIVE OLD SIGNER -- the exact antecedent of
+   old_key_powerless): the attacker REVEALS a key that is NOT 'active in the
+   verifier's trusted manifest `mid` (no EntryActive(mid, signerKid) anywhere --
+   e.g. the genesis key after its retirement successor became the trust), signs
+   a rotation candidate with it, and the verifier -- unable to establish
+   continuity -- flags trust:"unverified_rotation" AT the check. */
+lemma reach_rotation_nonactive_signer_flagged:
+  exists-trace
+  /* Positive anchors (EntryRetired in the trusted mid + verified bootstrap)
+     guide the plain-prover search to the concrete retired-key scenario; the
+     not-EntryActive conjunct -- the theorem's actual antecedent -- is kept and
+     checked over that concrete manifest. */
+  "Ex V I mid mid2 signerKid #k #d #q #b.
+     RevealKey(signerKid) @ #k
+   & EntryRetired(mid, signerKid) @ #q
+   & VerifiedTrustMid(V, I, mid) @ #b
+   & DiscontinuousRotation(V, I, mid, mid2) @ #d
+   & AdvanceSigner(V, I, mid, signerKid) @ #d
+   & UnverifiedRotation(V, I) @ #d
+   & not (Ex #s. EntryActive(mid, signerKid) @ #s)
+   & #k < #d"
+
+/* I4 witness 2/3 (rotation, SAME-VERSION CONFLICT delivered): an honest
+   rotation produced version v2 = vnext(v1); the attacker publishes a CONFLICTING
+   manifest midA carrying that SAME v2 (version learned from the public 'mhdr'
+   header) and presents it to a verifier whose head sits at v1 -- the candidate
+   claims the successor slot the honest manifest already occupies. The verifier
+   flags it at the check (DiscontinuousVer pins head-version v1 vs candidate
+   version v2). */
+lemma reach_rotation_same_version_flagged:
+  exists-trace
+  "Ex V I mid midA v1 v2 sk #r #f #d.
+     Rotate(I, v1, v2, sk) @ #r
+   & AttackerManifestVer(I, midA, v2) @ #f
+   & DiscontinuousRotation(V, I, mid, midA) @ #d
+   & DiscontinuousVer(V, I, v1, v2) @ #d
+   & UnverifiedRotation(V, I) @ #d
+   & #r < #d"
+
+/* I4 witness 3/3 (rotation, STRUCTURAL GAP): the candidate's version is the
+   DOUBLE successor vnext(vnext(v)) of the version the verifier's head currently
+   trusts -- it skips a generation, so §7.3's every-intermediate-manifest check
+   cannot succeed and the verifier flags it. (vnext is a public constructor, so
+   the attacker can mint gap versions from any published header.) */
+lemma reach_rotation_gap_flagged:
+  exists-trace
+  "Ex V I mid midA v #f #d.
+     AttackerManifestVer(I, midA, vnext(vnext(v))) @ #f
+   & DiscontinuousRotation(V, I, mid, midA) @ #d
+   & DiscontinuousVer(V, I, v, vnext(vnext(v))) @ #d
+   & UnverifiedRotation(V, I) @ #d"
+
+/* I4 witness (compromised receipt SUBMITTED and REJECTED, end-to-end): an
+   honest receipt is issued under `kid`; `kid` is later marked 'compromised
+   (EntryCompromised in manifest `mid`); the attacker REVEALS kid's material and
+   AFTERWARD submits a forged receipt (a DIFFERENT rid2, signed from stolen
+   material) to a verifier whose trusted head is AT that compromised-marking
+   manifest `mid` -- and the verifier REJECTS it (Rejected + CompromisedSubmission
+   at the same instant, RejectInfo binding the same mid). This is the concrete
+   bad trace compromised_key_rejected defeats: submission, trust, and rejection
+   are all IN the witness now, not implied by absence. */
+lemma reach_compromised_receipt_submitted:
+  exists-trace
+  "Ex V I kid rid rid2 ver mid #i #c #x #r #j.
+     Issued(I, rid) @ #i
+   & UsesKey(I, kid) @ #i
+   & Compromise(I, kid) @ #c
+   & EntryCompromised(mid, kid) @ #x
+   & RevealKey(kid) @ #r
+   & CompromisedSubmission(V, I, rid2, kid) @ #j
+   & Rejected(V, I, rid2, kid) @ #j
+   & RejectInfo(V, I, rid2, kid, ver, mid) @ #j
+   & not (rid2 = rid)
+   /* Re-review fix: rid2 must NEVER have been honestly issued -- without this
+      the witness could be satisfied by REPLAYING a second honest receipt
+      instead of the claimed stolen-key forgery. */
+   & not (Ex #i2. Issued(I, rid2) @ #i2)
+   & #i < #c
+   & #r < #j"
+
+/* ---------------------------------------------------------------------------
+   GROUP-C SECURITY THEOREMS (all-traces)
+   --------------------------------------------------------------------------- */
+
+/* HEAD HONESTY [reuse, use_induction] -- the attacker-manifest branch, discharged
+   ONCE. A clean-verified head can only name an attacker-published manifest if some
+   key of that issuer was revealed first: Bootstrap_verified_v01 consumes
+   !AuthManifest, which Attacker_Manifest_v01 never emits (base case), and the only
+   way onward while staying ('verified','clean') is Verifier_Continuity_Advance_v01,
+   whose signer must be 'active in the CURRENTLY trusted manifest -- honest key,
+   hence a reveal (step case; the discontinuous branch always sets 'flagged, so it
+   cannot reach this head state). Proving this separately is what makes
+   rev_record_authentic tractable under a FAITHFUL attacker: without it the main
+   induction re-derives this argument at every admission step, and the whole lemma
+   exceeded the prover budget in all three shapes tried (clean-verified conditioned,
+   all-heads classification, public-name attacker). */
+lemma verified_clean_head_honest [reuse, use_induction]:
+  all-traces
+  "All V I ver mid #n.
+     NewHead(V, I, ver, mid, 'verified', 'clean') @ #n
+   & (Ex #f. AttackerManifest(I, mid) @ #f)
+     ==> (Ex nm #r. RevealKey(<I, nm>) @ #r & #r < #n)"
+
+/* PROPERTY 2 -- rotation not hijackable (§7.3, §11.1; TM-28). ANY change of a
+   verifier's authority set (an AuthorityAdvance of its trust cursor to a new
+   manifest mid2) is EITHER continuity-valid -- its candidate was signed by a key
+   that is 'active in the PREVIOUSLY-trusted manifest mid (witnessed by an
+   independent EntryActive(mid, signerKid) action emitted where that entry was
+   created 'active) -- OR the state is flagged trust:"unverified_rotation"
+   (UnverifiedRotation) AT THE INSTANT OF THAT CHANGE (I3 fix: the flag is
+   required @ #c, not at an arbitrary trace point -- a later unrelated flagged
+   rotation can no longer retroactively excuse an earlier silent hijack; §11.1
+   lets a PRIOR discontinuity taint later trust, never a future event excuse a
+   past change). No unflagged, non-active-signed authority change exists.
+   The EntryActive conjunct is INDEPENDENT of the advance rule's own labels (it is
+   emitted by the manifest-creating rules), so deleting the 'active status premise
+   from Verifier_Continuity_Advance_v01 falsifies this theorem (negative control). */
+lemma rotation_no_hijack:
+  all-traces
+  "All V I mid mid2 #c.
+     AuthorityAdvance(V, I, mid, mid2) @ #c
+   ==> ( (Ex signerKid #s. AdvanceSigner(V, I, mid, signerKid) @ #c
+                          & EntryActive(mid, signerKid) @ #s)
+       | UnverifiedRotation(V, I) @ #c )"
+
+/* PROPERTY 3 -- compromise fails closed (§7.3, §11 step 3), V0.1 PATH ONLY. Once
+   a verifier's trusted manifest `mid` marks a key `kid` 'compromised
+   (EntryCompromised(mid, kid)), no acceptance carrying AcceptInfo can ever
+   resolve to that kid under that manifest -- regardless of issued_at, regardless
+   of any prior valid receipt. SCOPE: the formula quantifies over AcceptInfo,
+   which only the v0.1 accept path emits; Accept_v02 deliberately omits it (see
+   its comment -- tractability, frozen proofs), so v0.2 acceptances are OUTSIDE
+   this theorem. The v0.2 rule is compromise-fail-closed by construction (its
+   'active pattern cannot match a 'compromised entry) and its acceptance
+   authenticity is carried by no_cross_version_confusion -- but that is rule
+   shape plus a separate theorem, not this statement. Negative control: deleting
+   the 'active (or 'retired) status premise from the v0.1 accept rules -- letting
+   them match a 'compromised entry -- falsifies this theorem. */
+lemma compromised_key_rejected:
+  all-traces
+  "not (Ex V I rid kid ver mid alg #a #x.
+       Ok(V, rid) @ #a
+     & AcceptInfo(V, I, rid, kid, ver, mid, alg) @ #a
+     & EntryCompromised(mid, kid) @ #x)"
+
+/* PROPERTY 1 -- acceptance is authentic (§10, §11; TM-01/02). If a verifier
+   accepts a receipt (Ok) under a VERIFIED-provenance, CLEAN (never-flagged)
+   trust head (AcceptProv at the acceptance -- §7.4 TLS root, possibly advanced
+   through §7.3 clean continuity; C1 fix: the head is the SAME state the advance
+   rules move, so `mid` here ranges over continuity-adopted successors too), then
+   either the honest issuer actually issued that receipt (Issued(I, rid)) OR some
+   key OF THAT ISSUER was revealed to the attacker before the acceptance.
+   The reveal disjunct is issuer-scoped rather than pinned to the accepted `kid`
+   (C1 consequence, deliberate): with clean continuity advances in scope, a
+   revealed CURRENTLY-ACTIVE key can sign a §7.3-valid successor candidate
+   carrying attacker keys -- the verifier then accepts attacker receipts under
+   the adopted manifest while the stolen key is the advance SIGNER, not the
+   accepted kid. Every such trace still requires stealing one of I's keys; with
+   NO reveal of I's keys, acceptance under a clean verified head implies honest
+   issuance. (All honest kids have the form <I, name>.) */
+lemma acceptance_issuer_signed [use_induction]:
+  all-traces
+  "All V I rid kid ver mid alg #a.
+     Ok(V, rid) @ #a
+   & AcceptInfo(V, I, rid, kid, ver, mid, alg) @ #a
+   & AcceptProv(V, 'verified', 'clean') @ #a
+   ==> ( (Ex #i. Issued(I, rid) @ #i & #i < #a)
+       | (Ex nm #r. RevealKey(<I, nm>) @ #r & #r < #a) )"
+
+/* PROPERTY 2 (continued) -- an OLD key is powerless (§7.3). Revealing a key that
+   is NOT 'active in the currently-trusted manifest `mid` can never drive an
+   UNFLAGGED authority change: if an authority advance is signed by `signerKid`,
+   that key was revealed, and it is NOT active in `mid` (no EntryActive(mid,
+   signerKid)), then the advance MUST be flagged trust:"unverified_rotation"
+   AT THAT VERY ADVANCE (I3 fix: flag @ #c, same rationale as
+   rotation_no_hijack). The clean continuity rule requires an 'active-in-mid
+   signer, so a non-active revealed key can only drive the discontinuous
+   (flagged) branch. */
+lemma old_key_powerless:
+  all-traces
+  "All V I mid mid2 signerKid #c #k.
+     AuthorityAdvance(V, I, mid, mid2) @ #c
+   & AdvanceSigner(V, I, mid, signerKid) @ #c
+   & RevealKey(signerKid) @ #k
+   & not (Ex #s. EntryActive(mid, signerKid) @ #s)
+   ==> UnverifiedRotation(V, I) @ #c"
+
+/* ---------------------------------------------------------------------------
+   TASK 4 -- REVOCATION SANITY (exists-trace) -- TDD RED FIRST
+   These are added BEFORE any revocation rule exists: both must be FALSIFIED
+   (no rule emits RevocationHonored / RevocationIgnored yet). After the rules
+   are added they must turn verified.
+   --------------------------------------------------------------------------- */
+/* Anchored honest HONOR witness (T3 anchored-witness lesson -- the bare
+   `Ex V rid #h. RevocationHonored` form wanders past the plain-prover budget).
+   Positive anchors pin the intended trace: verified trust on the GENESIS manifest
+   `mid`, a 'policy-class receipt (the branch with no window premise), an honest
+   RevocationIssued signing under a mid-resolvable key, and RevHonorInfo binding
+   the honor to that same mid -- so the search is guided straight to
+   bootstrap -> issue-receipt -> assign-policy -> issue-revocation -> verify ->
+   honor, not explored blindly. */
+lemma sanity_revocation_honored:
+  exists-trace
+  "Ex V I rid kid recTime mid #g #b #p #vi #h.
+     GenesisMid(I, mid) @ #g
+   & VerifiedTrustMid(V, I, mid) @ #b
+   & RevClass(rid, 'policy') @ #p
+   & RevocationIssued(I, rid, kid, recTime) @ #vi
+   & RevSignerMid(I, rid, kid, mid) @ #vi
+   & RevocationHonored(V, rid) @ #h
+   & RevHonorInfo(V, I, rid, kid, recTime, mid) @ #h
+   & #vi < #h"
+
+/* Anchored 'none-class IGNORE witness: same honest chain, but the receipt's
+   class is 'none, so an honestly ISSUED and ADMITTED (authenticated against the
+   genesis manifest) revocation record for it is IGNORED (reason 'class_none).
+   Review m1 fix: the witness now anchors the record's real issuance
+   (RevocationIssued) -- with the I2 admission rule the ignored record is
+   necessarily authenticated, and the honest trace routes through
+   Issue_Revocation_v01. (The previous comment referenced a nonexistent
+   `RevRecordValid` fact -- removed.) */
+lemma sanity_none_ignored:
+  exists-trace
+  "Ex V I rid kid recTime mid #g #b #p #vi #ig.
+     GenesisMid(I, mid) @ #g
+   & VerifiedTrustMid(V, I, mid) @ #b
+   & RevClass(rid, 'none') @ #p
+   & RevocationIssued(I, rid, kid, recTime) @ #vi
+   & RevSignerMid(I, rid, kid, mid) @ #vi
+   & RevocationIgnored(V, rid, 'class_none') @ #ig
+   & RevIgnoreInfo(V, I, rid, recTime, mid) @ #ig
+   & #p < #ig"
+
+/* Review C1 linkage witness: an honestly ISSUED receipt acquires a revocability
+   class and its honored revocation -- receipts and revocation machinery share
+   one id space (the direct machine-checked refutation of the review's
+   "revocation classes are disconnected from honest receipts" finding). The
+   genesis manifest/key anchors the RECORD's signer; the receipt side is linked
+   by rid alone (Issued carries no key binding here) -- enough to guide the
+   two-signer search without claiming a shared-signer bind the formula does not
+   state. */
+lemma sanity_issued_receipt_revoked:
+  exists-trace
+  "Ex V I rid kid recTime mid #g #b #iss #p #vi #h.
+     GenesisMid(I, mid) @ #g
+   & VerifiedTrustMid(V, I, mid) @ #b
+   & Issued(I, rid) @ #iss
+   & RevClass(rid, 'policy') @ #p
+   & RevocationIssued(I, rid, kid, recTime) @ #vi
+   & RevSignerMid(I, rid, kid, mid) @ #vi
+   & RevocationHonored(V, rid) @ #h
+   & RevHonorInfo(V, I, rid, kid, recTime, mid) @ #h"
+
+/* Review m1 fix: refund_window HONOR witness exercising the FULL antecedent of
+   refund_window_bound (class 'refund_window, in-window coin, honored with
+   WindowOk) -- previously the only honor witness took the window-free 'policy
+   branch, leaving the refund-window theorem's antecedent without a
+   machine-checked instance. */
+lemma reach_refund_window_honored:
+  exists-trace
+  "Ex V I rid kid recTime mid #g #b #p #vi #a #w #h.
+     GenesisMid(I, mid) @ #g
+   & VerifiedTrustMid(V, I, mid) @ #b
+   & RevClass(rid, 'refund_window') @ #p
+   & RevocationIssued(I, rid, kid, recTime) @ #vi
+   & RevSignerMid(I, rid, kid, mid) @ #vi
+   /* T4b anchor: pin the admission to the honest CLEAN-VERIFIED head. With a
+      faithful attacker the unanchored search wanders through forged-manifest
+      admissions before reaching the honest trace (measured: >570s); this also
+      makes the witness say what it should -- the refund-window path works under
+      verified trust. */
+   & RevRecordAdmitted(V, I, rid, kid, recTime, mid) @ #a
+   & RevAdmitProv(V, 'verified', 'clean') @ #a
+   & InWindowActive(rid, recTime) @ #w
+   & RevocationHonored(V, rid) @ #h
+   & HonoredClass(rid, 'refund_window') @ #h
+   & WindowOk(rid, recTime) @ #h"
+
+/* Anchored out-of-window IGNORE witness: a 'refund_window record whose coin landed
+   OUT of window (OutWindowMark) is ignored with reason 'out_of_window (the other
+   coin branch is reachable). */
+lemma reach_revocation_out_of_window:
+  exists-trace
+  "Ex V I rid kid rec mid #g #b #p #a #o #ig.
+     GenesisMid(I, mid) @ #g
+   & VerifiedTrustMid(V, I, mid) @ #b
+   & RevClass(rid, 'refund_window') @ #p
+   /* T4b anchor: same reason as reach_refund_window_honored above. */
+   & RevRecordAdmitted(V, I, rid, kid, rec, mid) @ #a
+   & RevAdmitProv(V, 'verified', 'clean') @ #a
+   & OutWindowMark(rid, rec) @ #o
+   & RevocationIgnored(V, rid, 'out_of_window') @ #ig
+   & RevIgnoreInfo(V, I, rid, rec, mid) @ #ig
+   & #p < #ig"
+
+/* WITHDRAWN IN TASK 5 -- lemma reach_revoked_then_rejected (T4 review C2 fix).
+   The ok-linkage witness below is NO LONGER in the active corpus. It stated that
+   an honestly ISSUED receipt rid whose 'policy revocation V HONORS is afterwards
+   routed to the explicit reject-revoked path (ConsultedHonored + RevokedSubmission
+   at a later #j). Formula, preserved verbatim so nothing is lost:
+
+     exists-trace
+     "Ex V I rid kid recTime mid #g #b #iss #p #vi #a #h #j.
+        GenesisMid(I, mid) @ #g
+      & VerifiedTrustMid(V, I, mid) @ #b
+      & Issued(I, rid) @ #iss
+      & RevClass(rid, 'policy') @ #p
+      & RevocationIssued(I, rid, kid, recTime) @ #vi
+      & RevSignerMid(I, rid, kid, mid) @ #vi
+      & RevRecordAdmitted(V, I, rid, kid, recTime, mid) @ #a
+      & RevocationHonored(V, rid) @ #h
+      & RevHonorInfo(V, I, rid, kid, recTime, mid) @ #h
+      & ConsultedHonored(V, rid) @ #j
+      & RevokedSubmission(V, rid) @ #j
+      & #h < #j"
+
+   WHY IT WAS WITHDRAWN. Its backward search became intractable once T5 introduced
+   the SECOND issuance rule (Issue_Receipt_v02_hybrid). Two producers of Issued /
+   !IssuedReceipt cross the source obligations of what was already the most
+   expensive exists-trace in the corpus: 283.52s / 28 steps at HEAD 66d2b16, still
+   28 steps with the PQ functions+equation alone (291.45s), then >600s as soon as
+   the hybrid rule exists -- and >600s even with that rule's Out(...) conclusion
+   deleted, so the cause is structural, not cryptographic. Isolated at a 1500s
+   budget it does NOT complete in 25 minutes. Six remedies (anchoring on
+   provenance, on IssuedVersion, a maximal anchor set, dropping the duplicate
+   !IssuedReceipt producer, dropping the Issued conjunct) were measured and all
+   overran. This is not a slow lemma; it is out of reach.
+
+   WHAT DISCHARGES THE ANTI-VACUITY DUTY INSTEAD. sanity_issued_receipt_revoked
+   above (verified) is an EXACT witness of the state in which every premise of
+   Reject_v01_revoked is satisfied: it exhibits a trace whose final state carries
+   !IssuedReceipt(I, rid) and !HonoredRevocation(V, I, rid, kid, recTime, mid) --
+   the rule's two (persistent, hence unconsumed) premises. Appending that enabled
+   instance yields the withdrawn witness's conclusion; the appending step is a
+   MANUAL argument over the rule text, not machine-checked. Full argument, the
+   measurements, and the honest limits -- notably that this is strictly weaker as
+   a regression detector, since the reject rule's existence, premise shape and
+   actions become review obligations rather than prover obligations -- are in
+   .superpowers/sdd/task-5-report.md. The per-invocation "consulting => not ok"
+   safety remains machine-checked by the theorem revoked_view_never_ok. */
+
+/* ---------------------------------------------------------------------------
+   TASK 4 -- REVOCATION THEOREMS (all-traces) -- the four required
+   --------------------------------------------------------------------------- */
+
+/* AUTHENTICITY [reuse, use_induction] -- the record-provenance source argument,
+   proven ONCE directly at the admission point (one rule from the crypto) and
+   REUSED by revocation_auth_soundness. Review I3 fix. ANY admitted record
+   (Admit_Revocation_Record verified Eq(verify(sig, <'revoke', rid, recTime>,
+   pk(sk)))=true against a key kid=<I,name> of issuer I in the verifier's trusted
+   manifest) was either really signed by the honest issuer's Issue_Revocation_v01
+   -- the ONLY honest producer of a verify-true <'revoke', ...> signature
+   (distinct tag, no receipt/rotation collision), emitting RevocationIssued -- or
+   SOME key of that issuer was revealed to the attacker beforehand (ISSUER-SCOPED
+   reveal).
+   SCOPE, and why it is a CLEAN-VERIFIED one (T4b; the history matters because an
+   earlier version of this lemma claimed ALL heads). Trust provenance is required
+   here for the same reason acceptance_issuer_signed requires it: under TOFU
+   (§7.4) a verifier adopts whatever manifest it is handed, so a record signed by
+   the adopter's own forged key is admitted with no reveal and no honest issuance.
+   That trace is not hypothetical -- it is exhibited, machine-checked, by
+   attack_tofu_revocation_forgery at the end of this theory. The earlier all-heads
+   claim was provable only because Attacker_Manifest_v01 did not publish ~nameA,
+   the key-name half of its own entry's kid, so the attacker could never NAME the
+   key it had just forged; the probe asserting the counterexample was falsified in
+   140 steps with EVERY branch closing on solve(!KU(~nameA)), including all seven
+   continuity-advance cases. That rule now publishes the name, and the boundary is
+   stated instead of hidden. Probes and prover output:
+   .superpowers/sdd/t4-mutants/probe{2,3}.spthy.
+   TRACTABILITY: with a faithful attacker this lemma does NOT prove on its own
+   within the prover budget in any shape tried (clean-verified conditioned,
+   all-heads classification, attacker-chosen public key name -- all >560s). It
+   becomes provable once verified_clean_head_honest discharges the
+   attacker-manifest branch ONCE as a [reuse] lemma instead of letting this
+   induction re-derive it at every admission step: 92 + 4775 steps, 461s together.
+   Issuer-scoping (not
+   exact-kid) is REQUIRED: the record's own signer key may be the attacker's own
+   fabricated <I,name'> whose secret was never in honest !KeyMat (never a
+   Reveal_Key target), so exact-kid RevealKey(kid) would be FALSE though an
+   issuer key WAS revealed (verified counterexample; see task-4-fixwave-plan.md
+   F6 root-cause log). It FALSIFIES if Eq(verify) is deleted from admission
+   (mutation M-verify): a forged record is then admitted with neither
+   RevocationIssued nor a reveal. As a [reuse] lemma it is available to soundness,
+   which chains through it without re-deriving the induction (the argument inlined
+   into the honored-event all-traces search did not terminate at 590s --
+   run-b3-sound590.out; this standalone admission-point form is what verifies). */
+lemma rev_record_authentic [reuse, use_induction]:
+  all-traces
+  "All V I rid kid recTime mid #a.
+     RevRecordAdmitted(V, I, rid, kid, recTime, mid) @ #a
+   & RevAdmitProv(V, 'verified', 'clean') @ #a
+     ==> ( (Ex #vi. RevocationIssued(I, rid, kid, recTime) @ #vi & #vi < #a)
+         | (Ex nm #r. RevealKey(<I, nm>) @ #r & #r < #a) )"
+
+/* THEOREM 1 -- revocation AUTHORIZATION SOUNDNESS. Every honored revocation was
+   signed by a key that is INDEPENDENTLY witnessed 'active in the manifest the
+   verifier resolved it against (EntryActive(mid, kid) is emitted at entry
+   CREATION by the manifest-producing rules, NOT by the honor rule -- so it is not
+   a tautology of the honor premise), its class is honorable, the window
+   admitted, AND (review I3 fix) the exact record is AUTHENTIC: really issued by
+   the honest issuer (RevocationIssued) or some key of that issuer was revealed
+   beforehand (issuer-scoped). SCOPED to heads with 'verified provenance and a
+   'clean flag -- the RevHonorProv premise below -- the same boundary carried by
+   rev_record_authentic (T4b): under TOFU or flagged trust this statement says
+   nothing, by design. The
+   authenticity disjunct is DISCHARGED BY the [reuse] lemma rev_record_authentic
+   (proven once at the admission point), so this all-traces statement chains
+   RevocationHonored -> !AuthRevRecord -> RevRecordAdmitted -> (reuse) ->
+   disjunct, WITHOUT the induction re-running here. It is the disjunct that DIES
+   when Eq(verify) is removed from admission (mutation M-verify ->
+   rev_record_authentic falsifies, and with it this consequent); the
+   active-status conjunct (EntryActive(mid, kid), emitted at entry CREATION, not
+   by honor) independently falsifies under the drop-signer-'active mutation. */
+lemma revocation_auth_soundness:
+  all-traces
+  "All V rid I kid recTime mid #h.
+     RevocationHonored(V, rid) @ #h
+   & RevHonorInfo(V, I, rid, kid, recTime, mid) @ #h
+   & RevHonorProv(V, 'verified', 'clean') @ #h
+     ==> ( (Ex #s. EntryActive(mid, kid) @ #s)
+         & ClassHonorable(rid) @ #h
+         & WindowOk(rid, recTime) @ #h
+         & (Ex #a. RevRecordAdmitted(V, I, rid, kid, recTime, mid) @ #a & #a < #h)
+         & ( (Ex #vi. RevocationIssued(I, rid, kid, recTime) @ #vi & #vi < #h)
+           | (Ex nm #r. RevealKey(<I, nm>) @ #r & #r < #h) ))"
+
+/* THEOREM 2 -- IGNORE-REASON INTEGRITY / no wrongful ignore.
+   NAME CAVEAT (re-review Q3): the lemma is called `revocation_effectiveness` for
+   continuity with the plan, but "effectiveness" OVERSTATES what it proves. Its
+   antecedent starts at `RevocationIgnored`, so it says nothing about a trace that
+   admits a record (persistent !AuthRevRecord) and then does NEITHER honor nor
+   ignore -- that trace satisfies this theorem vacuously. What IS proved is
+   (i) every ignore carries a legitimate reason with an independent witness, and
+   (ii) an authenticated in-class IN-WINDOW record can never be ignored. Genuine
+   supplied-record effectiveness ("a presented valid record IS honored") is NOT
+   proved and is not provable here -- see the liveness note below.
+   True honored-side completeness ("a presented valid record IS honored") is a
+   LIVENESS property -- Tamarin cannot force a rule to fire, and a co-emission
+   encoding (the honor rule emitting both a "presented" and an "honored" label
+   at the same instant) is tautological by construction. The sound SAFETY
+   content of "no silent skip" lives on the IGNORE side, STRENGTHENED by the
+   review fixes: an ignored record's reason must hold with an INDEPENDENT
+   witness emitted away from the ignore rule (RevClass at the mint for
+   'class_none; OutWindowMark at the window coin for 'out_of_window), and --
+   review C3/I1 fix, the real strengthening -- an out-of-window ignore EXCLUDES
+   the in-window branch for that exact record: the one-shot window coin makes
+   OutWindowMark and InWindowActive mutually exclusive per (rid, recTime), so an
+   AUTHENTICATED (admitted -- I2), matching, in-class, IN-WINDOW record can
+   never be ignored. Wrongful ignore is excluded as safety; only the
+   cannot-force-a-rule-to-fire liveness residue remains (documented). The
+   antecedent binds the ignored record's own recTime via RevIgnoreInfo -- the
+   theorem constrains the exact record V dispatched, not some other record.
+   Negative controls: M-none (drop !Revocability('none) from Ignore_none ->
+   falsified); M-coin (revert the window rules to the replayable In() source ->
+   the not-InWindowActive conjunct is falsified by the double-coin trace). */
+lemma revocation_effectiveness:
+  all-traces
+  "All V I rid recTime mid reason #ig.
+     RevocationIgnored(V, rid, reason) @ #ig
+   & RevIgnoreInfo(V, I, rid, recTime, mid) @ #ig
+   ==> ( (reason = 'class_none' & (Ex #n. RevClass(rid, 'none') @ #n))
+       | (reason = 'out_of_window'
+          & (Ex #o. OutWindowMark(rid, recTime) @ #o)
+          & not (Ex #w. InWindowActive(rid, recTime) @ #w)) )"
+
+/* THEOREM 3 -- IRREVOCABILITY of class 'none. A 'none-class receipt is never
+   effectively revoked: if any revocation for rid is honored, rid's class is NOT
+   'none. Provable from the LINEARITY of the class-choice token (C1 fix): each
+   issued rid carries exactly one linear RevClassChoice(rid) (minted on the
+   issuance-fresh ~rid), consumed by exactly one Mint_Revocable_* instance, so a
+   rid carries exactly one class -- honoring requires !Revocability(rid,
+   'refund_window|'policy), and RevClass(rid, 'none') exists only where the SAME
+   rid was minted 'none by the only mint it ever had -- impossible together. */
+lemma irrevocability_none:
+  all-traces
+  "All V rid #h. RevocationHonored(V, rid) @ #h
+     ==> not (Ex #n. RevClass(rid, 'none') @ #n)"
+
+/* THEOREM 4 -- REFUND-WINDOW BOUND. A 'refund_window revocation is honored ONLY
+   when its window genuinely admitted: an honored refund_window record (WindowOk
+   binds its recTime) implies an INDEPENDENT InWindowActive(rid, recTime) coin
+   witness. Adaptation vs the plan sketch (`RevClass(rid,'refund_window')@#h ==>
+   WindowOk@#h`, which double-binds recTime universally and is trivially the honor
+   rule's own label): recTime is bound by the honored record's WindowOk, the class
+   is pinned by HonoredClass('refund_window') at the honor, and the consequent is
+   the coin-side InWindowActive witness -- non-tautological and window-branch
+   sensitive. */
+lemma refund_window_bound:
+  all-traces
+  "All V rid recTime #h.
+     RevocationHonored(V, rid) @ #h
+   & HonoredClass(rid, 'refund_window') @ #h
+   & WindowOk(rid, recTime) @ #h
+     ==> (Ex #w. InWindowActive(rid, recTime) @ #w)"
+
+/* THEOREM 5 -- Ok-LINKAGE / REVOKED-VIEW SAFETY (review C2 fix, spec-faithful
+   per-invocation form). No single verification invocation both CONSULTS a
+   honored revocation record for rid and emits Ok for rid. In Tamarin's trace
+   semantics each timepoint is one rule instance, so Ok(V,rid)@#o and
+   ConsultedHonored(V,rid)@#o at the SAME #o would require one rule to emit both;
+   Accept_v01 emits Ok (never ConsultedHonored) and Reject_v01_revoked emits
+   ConsultedHonored (never Ok), so the property holds -- and it FALSIFIES under
+   mutation M-okleak (add Ok(V,rid) to Reject_v01_revoked). This is the v0.1
+   §11.1-faithful content of "honored => not ok": the revocation view is a
+   per-invocation input, so an invocation that CONSULTED the honored record for
+   rid yields not-ok; an Accept in a DIFFERENT invocation whose view withheld the
+   record is spec-legitimate and does NOT falsify this. The absolute "later
+   Accept globally unreachable" (plan:228) is deliberately NOT claimed -- it is
+   stronger than the spec (flagged to Samu as a plan amendment; see the
+   Reject_v01_revoked comment and task-4-fixwave-plan.md F7). */
+lemma revoked_view_never_ok:
+  all-traces
+  "not (Ex V rid #o. Ok(V, rid) @ #o & ConsultedHonored(V, rid) @ #o)"
+
+
+/* ATTACK EXHIBIT (T4b) -- TOFU-forged revocation, machine-checked. This is the
+   trace the pre-T4b model could not express: because Attacker_Manifest_v01 did
+   not publish its own key NAME, no forged kid could ever appear in an envelope,
+   and the authenticity lemma looked provable for ALL heads. With a faithful
+   attacker the trace exists and is exhibited here rather than hidden: a verifier
+   that bootstrapped over TOFU (§7.4) onto an attacker-published manifest ADMITS
+   as authentic a revocation record the honest issuer NEVER issued, with NO key of
+   that issuer ever revealed. Stated at the ADMISSION point because that is where
+   rev_record_authentic is stated, so this is exactly that lemma's boundary: under
+   TOFU trust record authenticity does not hold, which is TM-11 and is what §7.4
+   warns about. SCOPE OF THIS WITNESS (re-review Q3): it reaches the model's
+   authentication DECISION and produces !AuthRevRecord -- it is not a mere
+   submission of a forgery -- but it does NOT entail downstream honoring, and this
+   formula cannot: with no RevClass / !Revocability anchor, nothing here forces a
+   dispatch rule to fire. That does not weaken it as a counterexample to UNSCOPED
+   admission authenticity, which is what it exists to be. The honor-level variant
+   was measured intractable (the honor chain crossed with the two global negatives
+   exceeded 585s), so the admission-level form is what ships. */
+lemma attack_tofu_revocation_forgery:
+  exists-trace
+  "Ex V I rid kid recTime midA #f #b #a.
+     AttackerManifest(I, midA) @ #f
+   & TrustTOFU(V, I) @ #b
+   & RevRecordAdmitted(V, I, rid, kid, recTime, midA) @ #a
+   & RevAdmitProv(V, 'tofu', 'clean') @ #a
+   & not (Ex nm #r. RevealKey(<I, nm>) @ #r)
+   & not (Ex #vi. RevocationIssued(I, rid, kid, recTime) @ #vi)"
+
+/* ---------------------------------------------------------------------------
+   TASK 5 -- CROSS-VERSION DISPATCH THEOREM (all-traces)
+   --------------------------------------------------------------------------- */
+
+/* PQ SIGNATURE ORIGIN [reuse] -- the message-origin cut that makes the theorem
+   below tractable. It says: any PQ signature over a v0.2 receipt payload that the
+   ADVERSARY holds either came from a genuine v0.2 issuance, or the adversary knows
+   the PQ signing secret itself (and then made it by applying sig_pq). Both halves
+   are message-origin facts: the ONLY rule that ever emits a sig_pq term on Out is
+   Issue_Receipt_v02_hybrid (which emits IssuedVersion(I, rid, '0.2')), and the only
+   other route to a sig_pq term is the adversary's own function application, which
+   needs KU of the secret. The disjunction is what makes the statement TRUE without
+   naming any honest key: an attacker CAN mint sig_pq under a secret it owns -- what
+   it cannot do is get such a signature ACCEPTED, because Accept_v02 resolves pkpq
+   from a 'hybrid manifest entry whose PQ material is a fresh ~skPQ that no rule ever
+   exports (that half of the argument is discharged inside the theorem, by the
+   manifest premise, not here).
+   WHY IT IS STATED THIS WAY (measured, T5). no_cross_version_confusion's conjunct (1)
+   does NOT close within 600s on its own -- not with [use_induction], not with a PQ
+   secrecy auxiliary. Bisection isolated the driver: opening Accept_v02 makes the
+   prover expand the RECURSIVE !HeadState source chain with prov/flag free (dropping
+   that premise -- semantically inadmissible, kept in the rule -- takes conjunct (1)
+   to 295 steps / 64s). This helper is deliberately HEAD-FREE: it mentions no
+   !HeadState, no TrustHead, no prov/flag, and no accept-side action, so proving it
+   never enters that chain (6 steps). With it available the theorem cites the
+   signature's origin shallowly instead of re-deriving it inside every head branch:
+   272 steps / 43s.
+   NOT anchored on the Eq idiom (the first shape tried, and a trap worth recording):
+   `Eq(verify_pq(sig, payload, pk), true)` is NOT a matchable action, because the
+   restriction is discharged inside the rule VARIANTS -- the action in any trace is
+   already normalised. A lemma keyed on it is VACUOUS: it "verified" in 1 step while
+   the wellformedness checker reported `uses terms of the wrong form`, and a probe
+   asserting the antecedent is reachable was falsified in 1 step.
+   PLACED HERE, BELOW the frozen groups, ON PURPOSE. A [reuse] lemma is assumed by
+   everything that FOLLOWS it; this one has exactly ONE consumer (the theorem below),
+   unlike T4b's verified_clean_head_honest which had many. Hoisting it above the
+   frozen theorems would expose acceptance_issuer_signed (~545s) and rev_record_authentic
+   (~530s) -- both already near the 595s single-run cap -- to a gratuitous regression
+   for no gain. Only [reuse], no [use_induction]: this is finite message provenance,
+   not an induction over the trust chain. */
+lemma pq_receipt_sig_source [reuse]:
+  all-traces
+  "All I rid skPQ #k.
+     KU(sig_pq(<'0.2', 'receipt', rid, I>, skPQ)) @ #k
+     ==> ( (Ex #i. IssuedVersion(I, rid, '0.2') @ #i)
+         | (Ex #j. KU(skPQ) @ #j) )"
+/* NO CROSS-VERSION CONFUSION. Two conjuncts, both proved over ALL traces:
+
+   (1) v0.2 acceptance is version-bound to a genuine v0.2 issuance -- if a receipt
+       is accepted via the HYBRID path (Accept_v02), that exact rid WAS issued as
+       v0.2 (IssuedVersion(I, rid, '0.2')). This holds UNCONDITIONALLY -- for every
+       head, including TOFU / flagged trust, and with NO reveal disjunct -- because
+       Accept_v02 requires a verify_pq-true PQ signature over <'0.2',...,rid,...>
+       whose ONLY producer is the honest hybrid issuance rule (attacker manifests
+       are ed_only; ~skPQ is never on Out). A v0.2 acceptance can thus be neither
+       forged nor down/cross-version substituted.
+
+   (2) issuance is version-exclusive per receipt id -- no rid is ever issued under
+       BOTH v0.1 and v0.2 (the linear RidIssueSeed, born once per rid, is consumed
+       by exactly one issuance rule). So the receipt accepted at (1) as v0.2 was
+       never a v0.1 receipt: the two profiles do not share receipt identities.
+
+   ADAPTATION vs the plan sketch (righe 302-308), documented (theory-wins-over-brief,
+   as T3/T4 did). The plan's SYMMETRIC second conjunct
+   `Accept_v01(...) ==> IssuedVersion(I, rid, '0.1')` is NOT a theorem of this model
+   and is deliberately replaced by conjunct (2). The reason is exactly the property
+   the hybrid profile exists to fix: the v0.1 Ed-only path is FORGEABLE. A stolen Ed
+   key (Reveal_Key/EdBroken) or a TOFU-adopted rogue manifest lets the attacker mint
+   a verify-true v0.1 receipt for a rid never honestly issued as v0.1 (the same
+   attacker capability the machine-checked exhibits attack_tofu_revocation_forgery /
+   reach_compromised_receipt_submitted already witness), so Accept_v01 does NOT imply
+   a v0.1 issuance. The sound, honestly-scoped v0.1 statement is already a shipped
+   theorem -- acceptance_issuer_signed (Task 3): under verified/clean trust,
+   Accept_v01 ==> honest issuance OR an issuer-key reveal. Task 6 formalises the
+   resulting v0.1-vs-v0.2 downgrade asymmetry.
+   NEGATIVE CONTROL (recorded in task-5-report.md): dropping the verify_pq premise
+   from Accept_v02 falsifies conjunct (1) -- a stolen-Ed-key forgery is then accepted
+   as v0.2 with no v0.2 issuance -- confirming the PQ signature is the load-bearing
+   version binding. */
+lemma no_cross_version_confusion:
+  all-traces
+  "( All V I rid kid #a.
+       Accept_v02(V, I, rid, kid) @ #a
+       ==> (Ex #i. IssuedVersion(I, rid, '0.2') @ #i) )
+   & not (Ex I rid #i #j.
+       IssuedVersion(I, rid, '0.1') @ #i
+     & IssuedVersion(I, rid, '0.2') @ #j) "
+
+/* ---------------------------------------------------------------------------
+   TASK 6 -- GROUP D: MACHINE-CHECKED ATTACK EXHIBITS (exists-trace)
+   A trace FOUND is the pass condition. Each one exhibits a gap the threat model
+   records, so that the scope of the positive theorems is a measured boundary
+   rather than a claim. None of them weakens a theorem to make a trace appear.
+   --------------------------------------------------------------------------- */
+
+/* TM-03 -- POST-CRQC v0.1 FORGERY. The v0.1 profile's Ed-only signature is the
+   whole of its authenticity: with the signing key's Ed half broken (EdBroken,
+   emitted by Reveal_Key) an attacker mints a receipt for a rid the issuer NEVER
+   issued, and it is accepted -- under VERIFIED, CLEAN trust, on the issuer's own
+   HONEST genesis manifest. Nothing here is a modelling artefact: this is
+   acceptance_issuer_signed's reveal disjunct made concrete, and it is exactly the
+   trace no_cross_version_confusion shows CANNOT exist on the v0.2 hybrid path,
+   where acceptance additionally requires a PQ signature whose only producer is
+   the honest issuance rule. The asymmetry between this lemma and that theorem IS
+   the v0.1-vs-v0.2 downgrade result. */
+lemma attack_v01_post_crqc:
+  exists-trace
+  "Ex V I rid kid mid ver alg #a #e #t #g.
+     Accept_v01(V, I, rid, kid) @ #a
+   & Ok(V, rid) @ #a
+   & AcceptInfo(V, I, rid, kid, ver, mid, alg) @ #a
+   & AcceptProv(V, 'verified', 'clean') @ #a
+   & VerifiedTrustMid(V, I, mid) @ #t
+   & GenesisMid(I, mid) @ #g
+   & EdBroken(kid) @ #e
+   & #e < #a
+   & not (Ex #i. Issued(I, rid) @ #i)"
+
+/* TM-11 -- TOFU FORGERY ON THE ACCEPT SIDE. A verifier that bootstrapped over an
+   unauthenticated path (§7.4 TOFU) onto an ATTACKER-published manifest accepts a
+   receipt the honest issuer never issued, with NO key of that issuer ever revealed
+   -- the forgery costs the attacker nothing but the verifier's missing
+   domain-control check. This is the accept-side twin of the T4b record-side
+   exhibit attack_tofu_revocation_forgery, and it is the exact boundary of
+   acceptance_issuer_signed's verified/clean scope: outside that scope the
+   guarantee is false, and this is the trace that shows it.
+   NOT witnessable before T4b: Attacker_Manifest_v01 published ~midA but not
+   ~nameA, so the attacker could not NAME the key it had just forged and no
+   envelope could carry the forged kid. TrustTOFU fires at bootstrap #t, strictly
+   before the acceptance #a -- requiring it AT #a would make this statement
+   vacuously unsatisfiable.
+   ANCHORED, and measured: the unanchored shape (Accept_v01 + Ok + AttackerManifest
+   + TrustTOFU + the two global negatives) is BUDGET-EXHAUSTED at 600s. The anchors
+   below are the ones T4b's record-side twin already uses -- the acceptance's own
+   AcceptInfo binds the resolved manifest to the ATTACKER's midA and AcceptProv
+   binds the head to ('tofu','clean') -- so the search is guided to the intended
+   trace instead of exploring every accept path. They also make the witness say
+   more, not less: the accepted key is resolved from the forged manifest, under a
+   TOFU head that was never flagged. */
+lemma attack_tofu_forgery:
+  exists-trace
+  "Ex V I rid kid midA ver alg #a #t #f.
+     Accept_v01(V, I, rid, kid) @ #a
+   & Ok(V, rid) @ #a
+   & AcceptInfo(V, I, rid, kid, ver, midA, alg) @ #a
+   & AcceptProv(V, 'tofu', 'clean') @ #a
+   & AttackerManifest(I, midA) @ #f
+   & TrustTOFU(V, I) @ #t
+   & #t < #a
+   & not (Ex #i. Issued(I, rid) @ #i)
+   & not (Ex nm #r. RevealKey(<I, nm>) @ #r)"
+
+/* G6 -- MIXED-KEYSET HIJACK, the deliverable of this task. The gap the threat
+   model records: adding a hybrid key does not protect an authority set while an
+   Ed-ONLY key remains 'active beside it, because §7.3 continuity accepts ANY
+   'active key's signature -- so post-CRQC the classical half of a mixed keyset is
+   the weakest link, and the hybrid key's intact PQ half authorises nothing.
+   The trace: an add-key rotation builds the mixed manifest mid2 (the parent
+   Ed-only entry kidE preserved 'active beside the fresh hybrid entry kidH -- the
+   rotation itself signed by kidE, whose algorithm the new RotateSignerAlg label
+   publishes); a verifier bootstraps VERIFIED on that manifest; the attacker breaks
+   kidE's Ed half and, with nothing else, drives a CLEAN continuity advance
+   (ContinuityAdvance -- never the flagged branch) onto its OWN forged manifest.
+   The hybrid key never signs a continuity advance (the negative conjunct excludes
+   exactly that -- not every conceivable kidH signature). Trust moves silently to
+   the attacker while the manifest's PQ-protected key sits there unused.
+   The negative conjunct is what makes it G6 rather than a generic key-theft
+   witness: no authority advance ANYWHERE in the trace was signed by the hybrid
+   key. The normative fix (require a hybrid signature once any hybrid key is
+   active) is P1.4's obligation, and this lemma is what will detect it landing. */
+lemma attack_mixed_keyset_hijack:
+  exists-trace
+  "Ex V I mid2 midA kidE kidH v2 #r #b #e #c #f.
+     RotateSignerAlg(I, v2, kidE, 'ed_only') @ #r
+   & HybridKey(I, kidH) @ #r
+   & HybridActiveIn(I, mid2) @ #r
+   & EntryActive(mid2, kidE) @ #r
+   & EntryActive(mid2, kidH) @ #r
+   & VerifiedTrustMid(V, I, mid2) @ #b
+   & EdBroken(kidE) @ #e
+   & AttackerManifest(I, midA) @ #f
+   & ContinuityAdvance(V, I, mid2, midA, kidE) @ #c
+   & #b < #c
+   & #e < #c
+   & not (Ex V2 m1 m2 #c2. ContinuityAdvance(V2, I, m1, m2, kidH) @ #c2)"
+
+/* ---------------------------------------------------------------------------
+   TASK 6 -- SIDE-DOCUMENT DOWNGRADE THEOREMS (v0.2 §13)
+   --------------------------------------------------------------------------- */
+
+/* ANTI-VACUITY, stated BEFORE the [reuse] helper below so it cannot borrow it:
+   the artifact-manifest path is executable end-to-end -- an honestly issued
+   hybrid artifact manifest is accepted, issuance ordered before acceptance.
+   Without this the theorem that follows could hold because its antecedent is
+   unreachable. */
+lemma sanity_artifact_manifest_accept:
+  exists-trace
+  "Ex V I aid kid #s #x.
+     ArtifactManifestIssued(I, aid, kid) @ #s
+   & ArtifactManifestAccepted(V, I, aid, kid) @ #x
+   & #s < #x"
+
+/* ARTIFACT-MANIFEST PQ SIGNATURE ORIGIN [reuse] -- the message-origin cut, the
+   same device (and the same measured justification) as pq_receipt_sig_source: any
+   PQ signature over an artifact-manifest body that the ADVERSARY holds either came
+   from the honest issuance rule -- the only rule that ever puts a sig_pq over an
+   'amanifest body on Out -- or the adversary applied sig_pq itself, which needs KU
+   of the PQ secret. Head-free by construction (it mentions no trust state and no
+   accept-side action), so proving it never enters a state chain.
+   NOT anchored on the Eq idiom: `Eq(verify_pq(...), true)` is not a matchable
+   action -- the restriction is discharged inside the rule variants, so a lemma
+   keyed on it is VACUOUS (T5 paid for that twice: a wellformedness `terms of the
+   wrong form` error, and a reachability probe on the antecedent falsified in one
+   step). Placed here, BELOW the frozen groups, for the reason recorded at
+   pq_receipt_sig_source: a [reuse] lemma is assumed by everything that follows it,
+   and this one has exactly one consumer. */
+lemma am_pq_sig_source [reuse]:
+  all-traces
+  "All I aid skPQ #k.
+     KU(sig_pq(<'amanifest', I, aid>, skPQ)) @ #k
+     ==> ( (Ex kid #i. ArtifactManifestIssued(I, aid, kid) @ #i)
+         | (Ex #j. KU(skPQ) @ #j) )"
+
+/* NO ARTIFACT-MANIFEST DOWNGRADE (v0.2 §13). An accepted hybrid artifact manifest
+   was really issued by the honest issuer -- UNCONDITIONALLY: no reveal disjunct,
+   no trust scoping, and in particular NO assumption that the signer's Ed key is
+   intact. Breaking Ed25519 completely (EdBroken on every key) does not produce an
+   accepted artifact manifest, because acceptance requires a verify_pq-true leg
+   whose only producer is the honest issuance rule (~skPQ lives in !PqKeyMat and no
+   rule ever exports it). That is exactly §13's guarantee: "a downgraded,
+   Ed25519-only signature against a hybrid key's authority is never honored".
+   The signer kid is existentially quantified in the consequent rather than pinned
+   to the accepted `kid`, and that is not a weakening: the signed body carries the
+   fresh per-document identity `aid`, born once in the issuance rule, so at most
+   one issuance instance can match -- the theorem pins THAT document's issuance.
+   NEGATIVE CONTROL (task-6-report.md): dropping the verify_pq premise from the
+   acceptance rule falsifies this theorem -- with the Ed leg alone, a revealed Ed
+   key mints an accepted artifact manifest that was never issued. */
+lemma no_downgrade_artifact_manifest:
+  all-traces
+  "All V I aid kid #x.
+     ArtifactManifestAccepted(V, I, aid, kid) @ #x
+     ==> (Ex kid2 #s. ArtifactManifestIssued(I, aid, kid2) @ #s)"
+
+/* ANTI-VACUITY for the revocation theorem below, same discipline: the hybrid
+   record path is executable up to its authentication boundary -- issued with
+   BOTH legs by a hybrid key 'active in a published manifest, then ADMITTED (both
+   legs verified). Anchored on the honest issuance (RevSignerMidHybrid pins the
+   signing manifest, HybridActiveIn pins it as carrying the 'active hybrid entry)
+   so the plain-prover search is guided to the intended bootstrap -> add-hybrid ->
+   hybrid-issue-record -> admit trace, not explored blindly (T3/T4b
+   anchored-witness lesson). This witness is what makes
+   no_downgrade_revocation_allhybrid non-vacuous: its antecedent (an admitted
+   hybrid record) is reachable. It is head-free -- see the admission rule's
+   comment for the measured reason the trust-tied shape was rejected. */
+lemma sanity_hybrid_revocation_admitted:
+  exists-trace
+  "Ex V I rid kid recTime mid #s #a #h.
+     RevocationIssuedHybrid(I, rid, kid, recTime) @ #s
+   & RevSignerMidHybrid(I, rid, kid, mid) @ #s
+   & HybridActiveIn(I, mid) @ #h
+   & RevRecordAdmittedHybrid(V, I, rid, kid, recTime, mid) @ #a
+   & #s < #a"
+
+/* REVOCATION-RECORD PQ SIGNATURE ORIGIN [reuse] -- same cut, same reasons, over
+   the record body. The record body carries no issuer field (it is <'revoke', rid,
+   recTime> -- the frozen v0.1 shape), so the issuer is existentially quantified
+   here; the issuer binding for a record comes from the kid/manifest resolution at
+   admission, which is what rev_record_authentic proves on the Ed path. */
+lemma rev_pq_sig_source [reuse]:
+  all-traces
+  "All rid recTime skPQ #k.
+     KU(sig_pq(<'revoke', rid, recTime>, skPQ)) @ #k
+     ==> ( (Ex I kid #i. RevocationIssuedHybrid(I, rid, kid, recTime) @ #i)
+         | (Ex #j. KU(skPQ) @ #j) )"
+
+/* NO REVOCATION DOWNGRADE UNDER A HYBRID SIGNER (v0.2 §13, the gap vector 28m
+   pins), stated at the ADMISSION boundary -- the model's single authentication
+   point for hybrid records, deliberately so (see Admit_Revocation_Record_hybrid
+   for why hybrid dispatch is out of scope). If a verifier ADMITS a hybrid-signed
+   revocation for rid, then that exact record -- SAME issuer I, SAME signer key
+   kid, SAME recTime -- was really issued, WITH its PQ leg, by the honest issuer
+   beforehand (RevocationIssuedHybrid, ordered #s < #a). Unconditionally: no
+   reveal disjunct, no trust scoping. An attacker holding the Ed half of every
+   key in the manifest cannot get a forged record PAST ADMISSION through the
+   classical leg -- and since every honor path in this theory consumes an
+   admitted record, forgery stopped at admission is stopped everywhere
+   downstream. It holds because the admission's verify_pq-true PQ leg over
+   <'revoke',rid,recTime> chains to rev_pq_sig_source, whose ONLY non-adversary
+   origin is Issue_Revocation_v02_hybrid (~skPQ lives in !PqKeyMat, is never on
+   Out; attacker manifests are 'ed_only so carry no 'hybrid entry, closing the
+   KU(~skPQ) branch). Issuer/key equality (not an arbitrary I2/kid2) is what
+   makes it the anti-DOWNGRADE statement rather than a bare origin fact: the
+   admitted record's own I and kid are the ones that must have issued it.
+   The property has TWO halves and only one is this theorem. STRUCTURAL half: the
+   Ed admission rule matches 'ed_only entries ONLY (premise narrowing), so an
+   Ed-signed record against a hybrid key authenticates NOWHERE -- fail-closed
+   because no rule admits it (the downgrade direction). PROVED half: this theorem
+   -- what the hybrid admission point accepts is unforgeable.
+   ANTI-VACUITY: sanity_hybrid_revocation_admitted exhibits a reachable admitted
+   hybrid record, so the antecedent is not empty. NEGATIVE CONTROL
+   (task-6-report.md): dropping the verify_pq premise from
+   Admit_Revocation_Record_hybrid -- letting a hybrid signer's record
+   authenticate on the Ed leg alone, the exact downgrade §13 forbids -- falsifies
+   this theorem. */
+lemma no_downgrade_revocation_allhybrid:
+  all-traces
+  "All V I rid kid recTime mid #a.
+     RevRecordAdmittedHybrid(V, I, rid, kid, recTime, mid) @ #a
+     ==> (Ex #s. RevocationIssuedHybrid(I, rid, kid, recTime) @ #s & #s < #a)"
+
+end
