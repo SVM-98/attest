@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 
 import pytest
+import yaml  # type: ignore[import-untyped]  # dev-only; PyYAML ships no py.typed
 
 from tools import check_formal as cf
 
@@ -785,57 +786,31 @@ def ci_formal_job_block(workflow: Path | None = None) -> str:
 def assert_ci_formal_job_executes_matrix(workflow: Path | None = None) -> None:
     """Assert the formal job runs the checker for its actual matrix entry.
 
-    Anchored to the job's executable ``run:`` SCALARS, not the raw block text:
-    the expected command surviving in a comment (round-2 probe) or in an unused
-    ``env:`` value (round-3 probe) never satisfies this. Every live checker
-    invocation must carry both matrix placeholders, and at least one must
-    exist.
+    SEMANTIC check (rounds 2-4 of the branch review defeated three successive
+    line-based scanners with comment-, env-, and nested-``run:``-hiding): the
+    workflow is parsed with a real YAML parser and only ``jobs.formal.steps[]
+    .run`` values count. At least one step must invoke the checker, and every
+    step that invokes it must carry both matrix placeholders.
     """
-    scalars = _ci_formal_run_scalars(ci_formal_job_block(workflow))
-    checker_runs = [s for s in scalars if "tools/check_formal.py" in s]
-    assert checker_runs, "formal job has no live run step invoking tools/check_formal.py"
+    workflow = workflow or CI_WORKFLOW
+    doc = yaml.safe_load(workflow.read_text(encoding="utf-8"))
+    try:
+        steps = doc["jobs"]["formal"]["steps"]
+    except (KeyError, TypeError) as exc:
+        raise AssertionError(f"formal job with steps absent from {workflow}: {exc!r}") from None
+    runs = [
+        step["run"] for step in steps if isinstance(step, dict) and isinstance(step.get("run"), str)
+    ]
+    checker_runs = [command for command in runs if "tools/check_formal.py" in command]
+    assert checker_runs, "formal job has no run step invoking tools/check_formal.py"
     for command in checker_runs:
         assert (
             '--only "${{ matrix.lemmas }}"' in command
             and "--timeout ${{ matrix.checker_timeout }}" in command
         ), (
-            "formal job's live run step does not execute the matrix entries "
+            "formal job's run step does not execute the matrix entries "
             '(--only "${{ matrix.lemmas }}" / --timeout ${{ matrix.checker_timeout }}): ' + command
         )
-
-
-def _ci_formal_run_scalars(formal_block: str) -> list[str]:
-    """Content of every live ``run:`` scalar in the job block, comments stripped.
-
-    Single-line scalars return their remainder; block scalars (``run: |`` /
-    ``run: >`` and their chomping variants) return the space-joined body lines
-    that are more indented than the ``run:`` key. Values of other keys (e.g.
-    ``env:``) are never included — that is the point.
-    """
-    lines = [ln for ln in formal_block.splitlines() if not ln.lstrip().startswith("#")]
-    scalars: list[str] = []
-    i = 0
-    while i < len(lines):
-        m = re.match(r"^(\s*)run:\s*(.*)$", lines[i])
-        if m is None:
-            i += 1
-            continue
-        indent, rest = len(m.group(1)), m.group(2).strip()
-        if rest in ("|", "|-", "|+", ">", ">-", ">+", ""):
-            body: list[str] = []
-            i += 1
-            while i < len(lines):
-                nxt = lines[i]
-                if nxt.strip() and (len(nxt) - len(nxt.lstrip())) <= indent:
-                    break
-                if nxt.strip():
-                    body.append(nxt.strip())
-                i += 1
-            scalars.append(" ".join(body))
-        else:
-            scalars.append(rest)
-            i += 1
-    return scalars
 
 
 def _matrix_list_item_count(formal_block: str) -> int:
@@ -976,20 +951,45 @@ def test_ci_formal_job_rejects_expected_command_hidden_in_env_value(tmp_path: Pa
         assert_ci_formal_job_executes_matrix(workflow)
 
 
-def test_ci_formal_run_scalars_sees_block_scalar_run() -> None:
-    """A refactor to ``run: |`` must not blind the extractor: the command body
-    on continuation lines still counts as the step's executable scalar."""
-    block = (
+def test_ci_formal_job_check_survives_block_scalar_run(tmp_path: Path) -> None:
+    """A refactor to ``run: |`` must not blind the check: the command body on
+    continuation lines is still the step's executable scalar."""
+    workflow = tmp_path / "ci.yml"
+    workflow.write_text(
+        "jobs:\n"
         "  formal:\n"
         "    steps:\n"
         "      - name: proofs\n"
         "        run: |\n"
-        "          python3 tools/check_formal.py formal/attest.spthy \\\n"
-        '            --only "${{ matrix.lemmas }}" --timeout ${{ matrix.checker_timeout }}\n'
+        "          python3 tools/check_formal.py formal/attest.spthy"
+        ' --only "${{ matrix.lemmas }}" --timeout ${{ matrix.checker_timeout }}\n',
+        encoding="utf-8",
     )
-    scalars = _ci_formal_run_scalars(block)
-    assert len(scalars) == 1
-    assert '--only "${{ matrix.lemmas }}"' in scalars[0]
+    assert_ci_formal_job_executes_matrix(workflow)
+
+
+def test_ci_formal_job_rejects_disabled_step_with_command_in_env(tmp_path: Path) -> None:
+    """Round-4 review probe: the expected command parked inside an env folded
+    scalar (its body itself spelling ``run: ...``) while the REAL step runs a
+    bare ``echo`` must fail — only ``jobs.formal.steps[].run`` values count."""
+    source = CI_WORKFLOW.read_text(encoding="utf-8")
+    expected = (
+        "run: python3 tools/check_formal.py formal/attest.spthy "
+        '--only "${{ matrix.lemmas }}" --timeout ${{ matrix.checker_timeout }}'
+    )
+    assert expected in source
+    poisoned = source.replace(
+        expected,
+        "env:\n          UNUSED_NOTE: >-\n            "
+        + expected
+        + '\n        run: echo "formal checker disabled"',
+        1,
+    )
+    workflow = tmp_path / "ci.yml"
+    workflow.write_text(poisoned, encoding="utf-8")
+
+    with pytest.raises(AssertionError, match=r"check_formal\.py"):
+        assert_ci_formal_job_executes_matrix(workflow)
 
 
 def test_ci_formal_shard_lists_are_pairwise_disjoint() -> None:
