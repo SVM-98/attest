@@ -175,6 +175,13 @@ key transparency and timestamp anchoring, where a log corroborates a receipt's
 existence without ever being able to make an unsigned receipt look authentic —
 is specified in the same document. Transfer records are the remaining stage.
 
+[docs/spec/attest-versioning.md](docs/spec/attest-versioning.md) is the
+normative upgrade policy governing both specifications above: the additive
+pattern new extensions must follow, the eternal-verifiability guarantee, the
+three-state algorithm lifecycle (`active` / `deprecated` / `unsafe`), the
+amendment procedure, and the signature-suite, payload-field, revocation-class,
+log-entry-type, and transfer-type registries.
+
 [docs/spec/attest-threat-model.md](docs/spec/attest-threat-model.md) is the
 maintained threat model behind the two specifications above — a living
 normative companion that analyzes their mechanisms rather than imposing

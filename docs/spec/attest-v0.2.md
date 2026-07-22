@@ -422,6 +422,10 @@ The conformance leaf group [`docs/spec/vectors/28-transparency/`](vectors/28-tra
 
 **Non-normative note:** group-28 vectors are generated deterministically by [`tools/gen_vectors.py`](../../tools/gen_vectors.py)'s `gen_28_transparency`, the same generator and determinism gate as every other group. Checkpoint/log fixtures use fixed keys and seeds; the `ots`/`rfc3161` anchor fixtures are frozen and committed (a committed OTS proof plus a pinned test Bitcoin header; synthetic opaque bytes for the `rfc3161` token) — no network access occurs in any conformance test, ever.
 
+## Revision log
+
+- **2026-07-22 (rev 1)**: revision log introduced by attest-versioning.md §5; no normative change. — vectors: none
+
 ## References
 
 - [`docs/spec/attest-v0.1.md`](attest-v0.1.md) — the base specification; every section referenced above (§1, §4, §7.1, §7.2, §7.3, §7.4, §9, §10, §11, §11.1, §14.1, §15) is unchanged by this document except where explicitly stated.

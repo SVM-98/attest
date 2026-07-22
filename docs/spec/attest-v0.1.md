@@ -460,6 +460,10 @@ The conformance vectors under [`docs/spec/vectors/`](vectors/) are the attest co
 
 This appendix outlines, but v0.1 does not build, a registry layer: independent nodes replicating key/artifact manifests, license/policy texts, and revocation records, plus optional receipt-existence proofs anchored via Merkle roots. Nothing in this specification's conformance requirement (§15) depends on a registry node existing. A future revision of this specification will normatize the registry-node wire format if and when it ships.
 
+## Revision log
+
+- **2026-07-22 (rev 1)**: revision log introduced by attest-versioning.md §5; no normative change. — vectors: none
+
 ## References
 
 - RFC 2119 / RFC 8174 — normative key words.
