@@ -96,7 +96,7 @@ jobs:
   # toolchain and gates through tools/check_formal.py (statement digests,
   # census, version pins — fail-closed).
   #
-  # SHARD <-> CONTRACT COUPLING: the four `lemmas` lists below must be
+  # SHARD <-> CONTRACT COUPLING: the five `lemmas` lists below must be
   # pairwise disjoint and their union must equal tools.check_formal.CONTRACT
   # exactly. tests/tools/test_check_formal.py (the `_ci_formal_shards` tests)
   # parses THIS file and enforces both properties, so a lemma added to
