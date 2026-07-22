@@ -783,13 +783,24 @@ def ci_formal_job_block(workflow: Path | None = None) -> str:
 
 
 def assert_ci_formal_job_executes_matrix(workflow: Path | None = None) -> None:
-    """Assert the formal job runs the checker for its actual matrix entry."""
+    """Assert the formal job runs the checker for its actual matrix entry.
+
+    Only LIVE lines count: YAML comment lines are stripped first, so the
+    expected command surviving in a comment while the live step runs something
+    else (round-2 review probe) still fails loudly.
+    """
     formal_block = ci_formal_job_block(workflow)
+    live_block = "\n".join(
+        line for line in formal_block.splitlines() if not line.lstrip().startswith("#")
+    )
     expected_run = (
         "run: python3 tools/check_formal.py formal/attest.spthy "
         '--only "${{ matrix.lemmas }}" --timeout ${{ matrix.checker_timeout }}'
     )
-    assert expected_run in formal_block
+    assert expected_run in live_block, (
+        "formal job's live run step does not execute the matrix entries "
+        '(--only "${{ matrix.lemmas }}" / --timeout ${{ matrix.checker_timeout }})'
+    )
 
 
 def _matrix_list_item_count(formal_block: str) -> int:
@@ -872,6 +883,30 @@ def test_ci_formal_job_rejects_hard_coded_shard_execution(tmp_path: Path) -> Non
         expected,
         "run: python3 tools/check_formal.py formal/attest.spthy "
         "--only sanity_toolchain --timeout ${{ matrix.checker_timeout }}",
+        1,
+    )
+    workflow = tmp_path / "ci.yml"
+    workflow.write_text(poisoned, encoding="utf-8")
+
+    with pytest.raises(AssertionError, match=r"matrix\.lemmas"):
+        assert_ci_formal_job_executes_matrix(workflow)
+
+
+def test_ci_formal_job_rejects_expected_command_hidden_in_comment(tmp_path: Path) -> None:
+    """Round-2 review probe: the expected matrix command kept in a YAML COMMENT
+    while the live step hard-codes a shard must fail — the assertion must read
+    only live (non-comment) lines."""
+    source = CI_WORKFLOW.read_text(encoding="utf-8")
+    expected = (
+        "run: python3 tools/check_formal.py formal/attest.spthy "
+        '--only "${{ matrix.lemmas }}" --timeout ${{ matrix.checker_timeout }}'
+    )
+    assert expected in source
+    poisoned = source.replace(
+        expected,
+        "# " + expected + "\n        run: python3 tools/check_formal.py "
+        "formal/attest.spthy --only sanity_toolchain "
+        "--timeout ${{ matrix.checker_timeout }}",
         1,
     )
     workflow = tmp_path / "ci.yml"

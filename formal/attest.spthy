@@ -1370,15 +1370,19 @@ lemma rotation_no_hijack:
                           & EntryActive(mid, signerKid) @ #s)
        | UnverifiedRotation(V, I) @ #c )"
 
-/* PROPERTY 3 -- compromise fails closed (§7.3 unconditional, §11 step 3). Once a
-   verifier's trusted manifest `mid` marks a key `kid` 'compromised
-   (EntryCompromised(mid, kid)), NO acceptance (Ok) can ever resolve to that kid
-   under that manifest -- regardless of issued_at, regardless of any prior valid
-   receipt. The accept rules pattern-match only 'active/'retired entries, and a
-   single content-identity `mid` binds each kid to exactly one status; this theorem
-   confirms NO OTHER path yields such an Ok. Negative control: deleting the 'active
-   (or 'retired) status premise from the accept rules -- letting them match a
-   'compromised entry -- falsifies this theorem. */
+/* PROPERTY 3 -- compromise fails closed (§7.3, §11 step 3), V0.1 PATH ONLY. Once
+   a verifier's trusted manifest `mid` marks a key `kid` 'compromised
+   (EntryCompromised(mid, kid)), no acceptance carrying AcceptInfo can ever
+   resolve to that kid under that manifest -- regardless of issued_at, regardless
+   of any prior valid receipt. SCOPE: the formula quantifies over AcceptInfo,
+   which only the v0.1 accept path emits; Accept_v02 deliberately omits it (see
+   its comment -- tractability, frozen proofs), so v0.2 acceptances are OUTSIDE
+   this theorem. The v0.2 rule is compromise-fail-closed by construction (its
+   'active pattern cannot match a 'compromised entry) and its acceptance
+   authenticity is carried by no_cross_version_confusion -- but that is rule
+   shape plus a separate theorem, not this statement. Negative control: deleting
+   the 'active (or 'retired) status premise from the v0.1 accept rules -- letting
+   them match a 'compromised entry -- falsifies this theorem. */
 lemma compromised_key_rejected:
   all-traces
   "not (Ex V I rid kid ver mid alg #a #x.
