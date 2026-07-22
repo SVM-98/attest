@@ -1,6 +1,6 @@
 # attest conformance vectors
 
-This directory holds the attest conformance suite: fixed, language-neutral test cases against which any implementation can be checked. Groups `01`–`25`, `29-limits`, and `31-manifest-currency` (48 leaves) are **v0.1** conformance, against [`docs/spec/attest-v0.1.md`](../attest-v0.1.md) — `29-limits` was added by the G1 normative-ceilings amendment (attest-versioning.md §5, 2026-07-22), and `31-manifest-currency` by the G2/G3 manifest-currency amendment (attest-versioning.md rev 4, 2026-07-22, v0.1 §7.2/§7.3), both of which bind v0.1 as well as v0.2. `26-hybrid`, `27-valid-to-absent`, `28-transparency`, `30-mixed-keyset`, and `32-anchor-v2` cover **v0.2**, against [`docs/spec/attest-v0.2.md`](../attest-v0.2.md). A v0.1-only verifier must reject v0.2 envelopes and is therefore measured against the v0.1 subset (48 leaves), not all 76. Each vector is a leaf directory (identified by containing `expected.json`) holding the raw inputs to feed the verification algorithm and the exact `VerificationResult` a conformant verifier must produce.
+This directory holds the attest conformance suite: fixed, language-neutral test cases against which any implementation can be checked. Groups `01`–`25`, `29-limits`, and `31-manifest-currency` (50 leaves — corrected 2026-07-23, rev 5: `31-manifest-currency` carries 5 leaves, not the 3 an earlier count stated) are **v0.1** conformance, against [`docs/spec/attest-v0.1.md`](../attest-v0.1.md) — `29-limits` was added by the G1 normative-ceilings amendment (attest-versioning.md §5, 2026-07-22), and `31-manifest-currency` by the G2/G3 manifest-currency amendment (attest-versioning.md rev 4, 2026-07-22, v0.1 §7.2/§7.3), both of which bind v0.1 as well as v0.2. `26-hybrid`, `27-valid-to-absent`, `28-transparency`, `30-mixed-keyset`, `32-anchor-v2`, and `33-logged-revocation` cover **v0.2**, against [`docs/spec/attest-v0.2.md`](../attest-v0.2.md). A v0.1-only verifier must reject v0.2 envelopes and is therefore measured against the v0.1 subset (50 leaves), not all 82. Each vector is a leaf directory (identified by containing `expected.json`) holding the raw inputs to feed the verification algorithm and the exact `VerificationResult` a conformant verifier must produce.
 
 **Normative conformance requirement**: an implementation is attest-conformant iff it produces every vector's expected result. There is no partial conformance — any single mismatch is a conformance failure.
 
@@ -16,7 +16,8 @@ Each leaf directory contains:
 - optional `revocation.json` — a single issuer-signed revocation record, fed to the verifier as its revocation view, for vectors that check §6 step 6.
 - optional `manifest_pristine.json` — only for vector 11: the untampered, self-consistent manifest, alongside the tampered one actually used for verification.
 - optional `canonical.json` — the exact canonical serialization bytes of the leaf's payload. A conforming implementation MUST reproduce these bytes exactly when canonicalizing the parsed payload. Present on vectors 21f/21g (supplementary-plane encodings) and 24.
-- optional `transparency.json` / `log-keys.json` / `anchor-policy.json` — group 28 only: the untrusted transparency/corroboration evidence bundle, the verifier's pinned transparency-log signing identities, and its pinned Bitcoin block headers + CRQC horizon, fed to the verifier as `transparency`/`log_keys`/`anchor_policy`. Only group 28's `expected.json` carries the corresponding `transparency`/`corroboration`/`manifest_freshness` result fields.
+- optional `transparency.json` / `log-keys.json` / `anchor-policy.json` — groups 28 and 32: the untrusted transparency/corroboration evidence bundle, the verifier's pinned transparency-log signing identities, and its pinned Bitcoin block headers + CRQC horizon, fed to the verifier as `transparency`/`log_keys`/`anchor_policy`. Only groups 28 and 32's `expected.json` carry the corresponding `transparency`/`corroboration`/`manifest_freshness` result fields.
+- optional `revocation-evidence.json` — group 33 only (G5, TM-47, v0.2 §8/§15 amendment): the untrusted transparency evidence bundle for the SPECIFIC `refund_window` revocation record in `revocation.json`, fed to the verifier as `revocation_evidence` and reusing group 33's own `log-keys.json`/`anchor-policy.json`. A DIFFERENT evidence channel from `transparency.json` — group 33's `expected.json` does NOT carry `transparency`/`corroboration`/`manifest_freshness`.
 
 ## Vector index
 
@@ -155,6 +156,17 @@ Checked against [`docs/spec/attest-v0.2.md`](../attest-v0.2.md) §11.1.1 — the
 | 32a | `a-v2-valid` | `anchor_profile: "signed-note-v2"`, `ots` op-chain genuinely committing over `signed_note_bytes` — `transparency` upgrades to `anchored_before:<T>`, no `anchor_note_only` warning. |
 | 32b | `b-v2-commit-mismatch` | Same declared `"signed-note-v2"` profile, but the op-chain was built from `SHA-256(note_bytes)` alone (the legacy v1 seed) — the replayed chain lands on a different root than pinned, so the anchor FAILS (`ots op-chain result does not match header_merkle_root`): a v1-shaped commitment cannot pass as v2 proof of the signed note's existence. |
 | 32c | `c-v1-note-only-warn` | No `anchor_profile` declared (legacy), genuinely v1-shaped op-chain — verifies and upgrades standing exactly as every pre-G4 anchor always has, now carrying `anchor_note_only`. |
+
+### 33: logged revocation and deadline effectiveness (G5, TM-47, v0.2 §8/§15 amendment)
+
+Checked against [`docs/spec/attest-v0.2.md`](../attest-v0.2.md) §8/§15 item 5 — `revocation-record` is a third loggable entry type, and a `refund_window` revocation record is effective only when a Stage-2-capable verifier's `revocation_evidence` proves the record's log entry was logged and OTS-anchored no later than the receipt's own refund-window deadline (`issued_at + revocation_window_days`). One `refund_window` receipt/record fixture (14-day window) drives (a)-(c); (d) is an independent `policy`-class fixture pinning that class as unaffected.
+
+| Leaf | Name | Checks |
+| --- | --- | --- |
+| 33a | `a-timely-logged-honored` | The record's `revocation-record` log entry is genuinely logged and OTS-anchored to a pinned header BEFORE the deadline — the deadline rule is satisfied, `revocation: "revoked"`. |
+| 33b | `b-unlogged-ignored-warn` | A Stage-2-capable verifier (`log_keys`/`anchor_policy` configured), but NO `revocation_evidence` for this record at all — never proven logged, ignored: `revocation: "invalid_revocation_ignored"` plus `revocation_unlogged_deadline`. |
+| 33c | `c-late-anchor-ignored` | `revocation_evidence` present and genuinely verifies as logged, but the OTS anchor's pinned header time is AFTER the deadline — same ignored-with-warning outcome as 33b, different cause. |
+| 33d | `d-policy-class-unchanged` | A `policy`-class record (not `refund_window`) under a Stage-2-capable verifier with no `revocation_evidence` — `revocation: "revoked"`, UNCHANGED; the deadline rule never engages outside `refund_window`. |
 
 ## Regeneration
 

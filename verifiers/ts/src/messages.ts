@@ -247,4 +247,9 @@ export const VERIFY_TRANSPARENCY_WARN = {
   CONFIG_MISSING: 'transparency_config_missing',
   CLAIM_UNRESOLVABLE: 'transparency_claim_unresolvable',
   ROTATION_CHAIN_REQUIRED: 'corroboration_requires_rotation_chain',
+  // G5 (v0.2 §8/§15 amendment, TM-47): a refund_window revocation record
+  // that fails the deadline-effectiveness rule (unlogged, or anchored after
+  // the receipt's own refund-window deadline) — exact, cross-language wire
+  // string (Python parity: verify.py).
+  REVOCATION_UNLOGGED_DEADLINE: 'revocation_unlogged_deadline',
 } as const

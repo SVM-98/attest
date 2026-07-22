@@ -1,7 +1,15 @@
-import { JsonObject, JsonValue, canonicalBytes } from './canon.js'
+import { sha256 } from '@noble/hashes/sha2'
+import { bytesToHex } from '@noble/curves/utils.js'
+import { JsonObject, JsonValue, canonicalBytes, dumps, CanonError } from './canon.js'
 import { verifyKeyManifest, findKey, verifySignatureBlock } from './manifests.js'
 import { parseStrictUtc, parseIsoLenient } from './dates.js'
-import { revocationFailedVerify, outsideRefundWindow, revocationViewOversize, revocationViewOversizeRevocable, WARN } from './messages.js'
+import { LogKey, encodeEntry, TlogError } from './tlog.js'
+import { AnchorPolicy, validatePolicy } from './anchor.js'
+import { evaluateTransparency, validateLogKeys, TransparencyError } from './transparency.js'
+import {
+  revocationFailedVerify, outsideRefundWindow, revocationViewOversize, revocationViewOversizeRevocable,
+  WARN, VERIFY_TRANSPARENCY_WARN, pyRepr, codePointLength,
+} from './messages.js'
 
 function asObject(v: JsonValue | undefined): JsonObject | null {
   return v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as JsonObject) : null
@@ -11,6 +19,15 @@ function signableRecordBytes(record: JsonObject): Uint8Array {
   const body: JsonObject = Object.create(null)
   for (const k of Object.keys(record)) if (k !== 'signature') body[k] = record[k]!
   return canonicalBytes(body)
+}
+
+// G5 (v0.2 §8, TM-47): `SHA-256(JCS(record))` over the ENTIRE signed record
+// (including its `signature` member, unlike `signableRecordBytes` above,
+// which excludes it to check the signature itself) — what a
+// `revocation-record` transparency-log entry commits to. Python parity:
+// `revocation.record_hash`.
+export function recordHash(record: JsonObject): string {
+  return bytesToHex(sha256(canonicalBytes(record)))
 }
 
 // PRECONDITION: caller already established verifyKeyManifest(keyManifest) is
@@ -61,9 +78,92 @@ function refundWindowEnd(payload: JsonObject): number | null {
 // _MAX_REVOCATION_RECORDS.
 export const MAX_REVOCATION_RECORDS = 10_000
 
+const CLAIM_TYPE_REVOCATION_RECORD = 'revocation-record'
+// Mirrors verify.py's `_MAX_TRANSPARENCY_EVIDENCE_LEN` — this is the SAME
+// class of untrusted per-claim evidence bundle, just for a revocation
+// record's claim instead of a receipt/key-manifest claim.
+const MAX_REVOCATION_EVIDENCE_LEN = 10_000_000
+
+/** The single pinned origin shared by every entry in `logKeys` — trusted
+ * verifier config, never derived from untrusted evidence (mirrors
+ * verify.ts's own private `resolveLogOrigin`, duplicated here rather than
+ * imported to avoid a revocation.ts <-> verify.ts import cycle). */
+function resolveLogOrigin(logKeys: LogKey[]): string {
+  const validated = validateLogKeys(logKeys)
+  const origins = new Set(validated.map((key) => key.origin))
+  if (origins.size !== 1) {
+    throw new TransparencyError(
+      `log_keys must be a non-empty list sharing a single origin, got ${pyRepr([...origins].sort())}`,
+    )
+  }
+  return [...origins][0]!
+}
+
+function validatedRevocationEntry(candidate: Record<string, unknown>): Record<string, unknown> | null {
+  try { encodeEntry(candidate); return candidate } catch (e) { if (e instanceof TlogError) return null; throw e }
+}
+
+function isPlainRecord(v: unknown): v is Record<string, unknown> {
+  return v !== null && typeof v === 'object' && !Array.isArray(v)
+}
+
+/** G5 (v0.2 §8/§15, TM-47): True iff at least one of `effective`'s
+ * refund_window revocation records has Stage 2 evidence proving it was
+ * logged AND anchored no later than `windowEndMs` (the SAME refund-window
+ * deadline `refundWindowEnd`/the caller's own `within-window` filter already
+ * compute). Only called once the caller has established the verifier is
+ * Stage-2 capable (`logKeys`/`anchorPolicy` both supplied) and `effective`
+ * is non-empty; `revocationEvidence` may still be absent or fail to
+ * resolve, in which case this returns `false`. Every warning the shared
+ * evaluator returns for a candidate record (e.g. `anchor_note_only`,
+ * malformed-evidence reasons, `log_equivocation_detected`) is appended to
+ * `warnings` (dedup against identical strings already present) regardless
+ * of whether that record ends up timely — mirrors the direct transparency
+ * path's own `warnings.push(...result.warnings)`. Python parity:
+ * `verify._revocation_deadline_satisfied`. */
+function revocationDeadlineSatisfied(
+  effective: JsonObject[], revocationEvidence: JsonValue | null, issuerId: string | null,
+  logKeys: LogKey[], anchorPolicy: AnchorPolicy, windowEndMs: number | null, warnings: string[],
+): boolean {
+  if (revocationEvidence == null || windowEndMs === null) return false
+
+  const origin = resolveLogOrigin(logKeys)
+  validatePolicy(anchorPolicy)
+
+  let materialized: unknown
+  try {
+    const serialized = dumps(revocationEvidence)
+    if (codePointLength(serialized) > MAX_REVOCATION_EVIDENCE_LEN) return false
+    materialized = JSON.parse(serialized)
+    if (!isPlainRecord(materialized)) return false
+  } catch { return false }
+
+  for (const record of effective) {
+    let hash: string
+    try { hash = recordHash(record) } catch (e) { if (e instanceof CanonError) continue; throw e }
+    const expectedEntry = validatedRevocationEntry({
+      type: CLAIM_TYPE_REVOCATION_RECORD, issuer: issuerId, record_sha256: hash,
+    })
+    if (expectedEntry === null) continue
+    const result = evaluateTransparency(materialized as JsonObject, {
+      logKeys, expectedOrigin: origin, policy: anchorPolicy, expectedEntry,
+    })
+    for (const warning of result.warnings) {
+      if (!warnings.includes(warning)) warnings.push(warning)
+    }
+    if (!result.transparency.startsWith('anchored_before:')) continue
+    const anchoredMs = parseIsoLenient(result.transparency.slice('anchored_before:'.length))
+    if (anchoredMs === null) continue
+    if (anchoredMs <= windowEndMs) return true
+  }
+  return false
+}
+
 export function classifyRevocation(
   payload: JsonObject, view: JsonValue[] | null, issuerManifest: JsonObject, warnings: string[],
   errors: string[], maxRecords: number = MAX_REVOCATION_RECORDS,
+  logKeys: LogKey[] | null = null, anchorPolicy: AnchorPolicy | null = null,
+  revocationEvidence: JsonValue | null = null,
 ): string {
   if (!view || view.length === 0) return 'unknown'
 
@@ -115,7 +215,19 @@ export function classifyRevocation(
   if (revocability === 'refund_window') {
     const end = refundWindowEnd(payload)
     const effective = valid.filter((r) => { const ms = parseIsoLenient(r['revoked_at']); return end !== null && ms !== null && ms <= end })
-    if (effective.length > 0) return 'revoked'
+    if (effective.length > 0) {
+      // G5 (TM-47): a Stage-2-capable verifier (logKeys AND anchorPolicy
+      // both supplied — the same gate `evaluateTransparencyClaim` uses)
+      // MUST additionally apply the deadline-effectiveness rule. A verifier
+      // that never supplies them is not Stage-2 capable, so the rule does
+      // not engage and v0.1 semantics stand.
+      if (logKeys != null && anchorPolicy != null) {
+        const issuerId = typeof issuerManifest['issuer'] === 'string' ? (issuerManifest['issuer'] as string) : null
+        const timely = revocationDeadlineSatisfied(effective, revocationEvidence, issuerId, logKeys, anchorPolicy, end, warnings)
+        if (!timely) { warnings.push(VERIFY_TRANSPARENCY_WARN.REVOCATION_UNLOGGED_DEADLINE); return 'invalid_revocation_ignored' }
+      }
+      return 'revoked'
+    }
     if (valid.length > 0) { warnings.push(outsideRefundWindow(receiptId)); return 'invalid_revocation_ignored' }
     return notRevoked
   }
