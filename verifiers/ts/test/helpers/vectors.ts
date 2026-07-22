@@ -91,6 +91,14 @@ export function logKeys(dir: string): LogKey[] | null {
     mldsaPub: b64uDecode(entry.mldsa_pub_b64u),
   }))
 }
+// group 33 (logged-revocation conformance corpus, G5/TM-47) only — see
+// tools/gen_vectors.py's gen_33_logged_revocation docstring for the on-disk
+// shape. A DIFFERENT evidence channel from transparency.json: fed to
+// verify() as revocationEvidence, reusing the SAME logKeys/anchorPolicy.
+export function revocationEvidence(dir: string): JsonValue | null {
+  const p = join(dir, 'revocation-evidence.json')
+  return existsSync(p) ? loadJsonStrict(p) : null
+}
 export function anchorPolicy(dir: string): AnchorPolicy | null {
   const p = join(dir, 'anchor-policy.json')
   if (!existsSync(p)) return null

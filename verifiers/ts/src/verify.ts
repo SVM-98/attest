@@ -77,6 +77,11 @@ export interface VerifyTransparencyOptions {
   transparency?: JsonValue | null
   logKeys?: LogKey[] | null
   anchorPolicy?: AnchorPolicy | null
+  // G5 (v0.2 §8/§15 amendment, TM-47): one untrusted transparency evidence
+  // bundle for a SPECIFIC `refund_window` revocation record in
+  // `revocationView`, reusing the SAME `logKeys`/`anchorPolicy`
+  // configuration — see `classifyRevocation`'s deadline-effectiveness rule.
+  revocationEvidence?: JsonValue | null
 }
 const KNOWN_EOL = new Set(['artifacts-remain-redownloadable', 'escrow', 'none'])
 
@@ -374,6 +379,7 @@ export function verify(
   const transparencyEvidence = options.transparency ?? null
   const logKeys = options.logKeys ?? null
   const anchorPolicy = options.anchorPolicy ?? null
+  const revocationEvidence = options.revocationEvidence ?? null
 
   if (revocationView !== null && !Array.isArray(revocationView))
     throw new TypeError('revocation_view must be a list of records or None')
@@ -683,7 +689,10 @@ export function verify(
   let revocation = 'unknown'
   let binding: Binding = 'not_checked'
   if (schema === 'valid') {
-    revocation = classifyRevocation(payload, revocationView, manifest, warnings, errors, maxRevocationRecords)
+    revocation = classifyRevocation(
+      payload, revocationView, manifest, warnings, errors, maxRevocationRecords,
+      logKeys, anchorPolicy, revocationEvidence,
+    )
     binding = disclosure != null ? classifyBinding(payload, disclosure) : 'not_checked'
   }
 

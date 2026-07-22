@@ -48,8 +48,10 @@ _NODE_PREFIX = b"\x01"  # RFC 6962 §2.1: MTH(D[n]) = SHA-256(0x01 || left || ri
 
 _TYPE_KEY_MANIFEST = "key-manifest"
 _TYPE_RECEIPT = "receipt"
+_TYPE_REVOCATION_RECORD = "revocation-record"
 _KEY_MANIFEST_FIELDS = frozenset({"type", "issuer", "manifest_version", "manifest_sha256"})
 _RECEIPT_FIELDS = frozenset({"type", "issuer", "core_sha256"})
+_REVOCATION_RECORD_FIELDS = frozenset({"type", "issuer", "record_sha256"})
 
 # Same lowercase-DNS shape as the receipt schema's `issuer.id` pattern
 # (src/attest/schema/attest-receipt.schema.json) — kept in sync by hand,
@@ -356,7 +358,7 @@ def encode_entry(entry: dict[str, Any]) -> bytes:
     """Validate `entry` against a CLOSED schema and return its canonical
     (attest-JCS) bytes — the exact bytes that get leaf-hashed into the log.
 
-    Two entry types, exactly these members each (extras rejected):
+    Three entry types, exactly these members each (extras rejected):
 
     - `key-manifest`: `{"type", "issuer", "manifest_version", "manifest_sha256"}`,
       where `manifest_sha256 = SHA-256(JCS(manifest))` (lowercase hex).
@@ -365,6 +367,14 @@ def encode_entry(entry: dict[str, Any]) -> bytes:
       a NON-authenticated hint only — a convenience for log browsing/
       filtering, never a trust anchor; the receipt's own signature is what
       binds it to an issuer.
+    - `revocation-record` (v0.2 §8, G5): `{"type", "issuer", "record_sha256"}`,
+      where `record_sha256 = attest.revocation.record_hash(record)` —
+      `SHA-256(JCS(record))` over the ENTIRE signed revocation record
+      (including its own `signature` member), the same canonical form
+      `revocation.py` already builds and verifies the record's signature
+      over. `issuer` here is the same NON-authenticated browsing hint as
+      `receipt`'s — the record's own signature is what binds it to an
+      issuer, checked by `revocation.verify_record`, never by this entry.
 
     Raises `TlogError` on an unknown `type`, a missing/extra member, or a
     member with the wrong value shape.
@@ -383,6 +393,10 @@ def encode_entry(entry: dict[str, Any]) -> bytes:
         _require_fields(entry, _RECEIPT_FIELDS)
         _require_issuer(entry)
         _require_hex64(entry, "core_sha256")
+    elif entry_type == _TYPE_REVOCATION_RECORD:
+        _require_fields(entry, _REVOCATION_RECORD_FIELDS)
+        _require_issuer(entry)
+        _require_hex64(entry, "record_sha256")
     else:
         raise TlogError(f"unknown entry type: {entry_type!r}")
 

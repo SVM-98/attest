@@ -497,6 +497,7 @@ def write_vector(
     transparency: dict[str, Any] | None = None,
     log_keys: list[tlog.LogKey] | None = None,
     anchor_policy: anchor.AnchorPolicy | None = None,
+    revocation_evidence: dict[str, Any] | None = None,
 ) -> None:
     """`transparency`/`log_keys`/`anchor_policy` (group 28 only, design doc
     "transparency/corroboration layer") are the untrusted evidence bundle and
@@ -505,7 +506,14 @@ def write_vector(
     existing leaf (groups 01-27) omits all three, so `expected.json` gains no
     new members there; only group 28 leaves carry `transparency`/
     `corroboration`/`manifest_freshness` in `expected.json`, fed by the new
-    `transparency.json`/`log-keys.json`/`anchor-policy.json` files below."""
+    `transparency.json`/`log-keys.json`/`anchor-policy.json` files below.
+
+    `revocation_evidence` (group 33 only, v0.2 §8/§15 amendment, G5/TM-47) is
+    the untrusted transparency evidence bundle for a SPECIFIC `refund_window`
+    revocation record's `revocation-record` log entry, fed to `verify()` as
+    `revocation_evidence=` and reusing the SAME `log_keys`/`anchor_policy`
+    written above — see `verify.verify()`'s keyword-only argument of the
+    same name."""
     vector_dir = VECTORS_DIR / name
     if payload is not None:
         _write_json(vector_dir / "payload.json", payload)
@@ -529,6 +537,8 @@ def write_vector(
         _write_json(vector_dir / "log-keys.json", [_log_key_json(k) for k in log_keys])
     if anchor_policy is not None:
         _write_json(vector_dir / "anchor-policy.json", _anchor_policy_json(anchor_policy))
+    if revocation_evidence is not None:
+        _write_json(vector_dir / "revocation-evidence.json", revocation_evidence)
 
 
 # --- vector 01: valid-minimal ------------------------------------------------
@@ -3353,6 +3363,208 @@ def gen_32_anchor_v2() -> None:
     )
 
 
+def gen_33_logged_revocation() -> None:
+    """G5 (v0.2 §8/§15 amendment, TM-47): `revocation-record` becomes the
+    THIRD loggable entry type, and a `refund_window` revocation record is
+    effective ONLY when the verifier is Stage-2 capable (`log_keys`/
+    `anchor_policy` supplied — the same gate `28-transparency` already uses)
+    AND `revocation_evidence` proves the record's log entry was anchored no
+    later than the receipt's own refund-window deadline (`issued_at +
+    revocation_window_days`) — closing the backdating gap where an unlogged
+    or late-anchored revocation had no contradicting evidence.
+    `policy`/`compromised`/`none` classes are UNAFFECTED: logging remains
+    optional corroboration for them, never a gate.
+
+    One `refund_window` receipt (`REFUND_WINDOW_DAYS` = 14, `ISSUED_AT`
+    2025-07-02T13:50:00Z -> deadline 2025-07-16T13:50:00Z) with one
+    window-effective record (`REVOKED_INSIDE_WINDOW_AT`, 2025-07-10, reused
+    from `23-revocation-refund-window`) drives (a)-(c); (d) is an
+    independent `policy`-class fixture.
+
+    - (a) `revocation-record` log entry genuinely logged and OTS-anchored
+      BEFORE the deadline (header_time = `REVOKED_INSIDE_WINDOW_AT`) ->
+      honored, `revocation: "revoked"`.
+    - (b) Stage-2-capable verifier (`log_keys`/`anchor_policy` set), but NO
+      `revocation_evidence` at all for this record -> never proven logged,
+      ignored with `revocation_unlogged_deadline`.
+    - (c) `revocation_evidence` present and genuinely verifies, but the OTS
+      anchor's pinned header time (`REVOKED_AT`, 2025-08-01) is AFTER the
+      deadline -> ignored with the same warning.
+    - (d) `policy` class (not `refund_window`): a Stage-2-capable verifier
+      with no `revocation_evidence` still honors it — the deadline rule
+      never engages for this class.
+    """
+    payload = issue.build_payload(
+        **_base_payload_kwargs(
+            revocability="refund_window", revocation_window_days=REFUND_WINDOW_DAYS
+        )
+    )
+    _assert_schema_valid(payload)
+    envelope = issue.issue(payload, ISSUER_KP, ISSUER_KID)
+    issuer_manifest = _manifest_material(ISSUER_ID, ISSUER_KID, ISSUER_KP)
+    trust = _trust_material((ISSUER_ID, issuer_manifest, "tls"))
+
+    record = revocation.build_record(
+        RECEIPT_ID, "revoked", REVOKED_INSIDE_WINDOW_AT, ISSUER_KP, ISSUER_KID
+    )
+    assert revocation.verify_record(record, issuer_manifest) is True
+
+    entry = {
+        "type": "revocation-record",
+        "issuer": ISSUER_ID,
+        "record_sha256": revocation.record_hash(record),
+    }
+    entry_bytes = tlog.encode_entry(entry)
+    root = tlog.build_tree([entry_bytes])
+    checkpoint_text = _sign_checkpoint_oracle(LOG_ORIGIN, 1, root)
+    inclusion = _hex_proof(tlog.inclusion_proof([entry_bytes], 0))
+    signed_note_bytes = tlog.parse_checkpoint(checkpoint_text).signed_note_bytes
+
+    def _revocation_evidence(header_time: int) -> tuple[dict[str, Any], anchor.AnchorPolicy]:
+        """A genuine single-`["sha256"]`-op OTS anchor over
+        `SHA-256(checkpoint.signed_note_bytes)`, declaring `anchor_profile:
+        "signed-note-v2"` (G4, attest-v0.2.md §11.1) — newly produced anchors
+        MUST use the v2 commitment, same shape `32-anchor-v2/a-v2-valid`
+        uses, just with a caller-chosen (rather than the group-32 KAT) header
+        time so it can straddle the refund-window deadline."""
+        header_hash = hashlib.sha256(
+            f"attest-vectors-33-revocation-header-{header_time}".encode()
+        ).hexdigest()
+        accumulator_start = hashlib.sha256(signed_note_bytes).digest()
+        header_merkle_root = hashlib.sha256(accumulator_start).digest().hex()
+        policy = anchor.AnchorPolicy(
+            pinned_headers={
+                header_hash: anchor.PinnedHeader(
+                    header_hash=header_hash, merkle_root=header_merkle_root, time=header_time
+                )
+            },
+            crqc_horizon=None,
+        )
+        evidence = {
+            "entry": entry,
+            "leaf_index": 0,
+            "tree_size": 1,
+            "inclusion_proof": inclusion,
+            "checkpoint": checkpoint_text,
+            "anchors": {
+                "checkpoint": checkpoint_text,
+                "proofs": [
+                    {
+                        "kind": "ots",
+                        "ops": [["sha256"]],
+                        "header_merkle_root": header_merkle_root,
+                        "header_hash": header_hash,
+                        "header_time": header_time,
+                    }
+                ],
+                "anchor_profile": "signed-note-v2",
+            },
+        }
+        return evidence, policy
+
+    # --- (a) timely-logged-honored ---
+    # REVOKED_INSIDE_WINDOW_AT (2025-07-10T00:00:00Z) as unix seconds — inside
+    # the refund-window deadline (2025-07-16T13:50:00Z).
+    evidence_a, policy_a = _revocation_evidence(1752105600)
+    write_vector(
+        "33-logged-revocation/a-timely-logged-honored",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected={
+            "signature": "valid",
+            "schema": "valid",
+            "revocation": "revoked",
+            "binding": "not_checked",
+            "trust": "verified",
+            "ok": False,
+            "errors": [],
+            "warnings": [],
+        },
+        revocation_record=record,
+        revocation_evidence=evidence_a,
+        log_keys=[_log_key()],
+        anchor_policy=policy_a,
+    )
+
+    # --- (b) unlogged-ignored-warn ---
+    write_vector(
+        "33-logged-revocation/b-unlogged-ignored-warn",
+        payload=None,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected={
+            "signature": "valid",
+            "schema": "valid",
+            "revocation": "invalid_revocation_ignored",
+            "binding": "not_checked",
+            "trust": "verified",
+            "ok": True,
+            "errors": [],
+            "warnings": ["revocation_unlogged_deadline"],
+        },
+        revocation_record=record,
+        log_keys=[_log_key()],
+        anchor_policy=_empty_anchor_policy(),
+    )
+
+    # --- (c) late-anchor-ignored ---
+    # REVOKED_AT (2025-08-01T00:00:00Z) as unix seconds — after the deadline.
+    evidence_c, policy_c = _revocation_evidence(1754006400)
+    write_vector(
+        "33-logged-revocation/c-late-anchor-ignored",
+        payload=None,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected={
+            "signature": "valid",
+            "schema": "valid",
+            "revocation": "invalid_revocation_ignored",
+            "binding": "not_checked",
+            "trust": "verified",
+            "ok": True,
+            "errors": [],
+            "warnings": ["revocation_unlogged_deadline"],
+        },
+        revocation_record=record,
+        revocation_evidence=evidence_c,
+        log_keys=[_log_key()],
+        anchor_policy=policy_c,
+    )
+
+    # --- (d) policy-class-unchanged ---
+    policy_payload = issue.build_payload(**_base_payload_kwargs(revocability="policy"))
+    _assert_schema_valid(policy_payload)
+    policy_envelope = issue.issue(policy_payload, ISSUER_KP, ISSUER_KID)
+    policy_record = revocation.build_record(
+        policy_payload["receipt_id"], "revoked", REVOKED_AT, ISSUER_KP, ISSUER_KID
+    )
+    assert revocation.verify_record(policy_record, issuer_manifest) is True
+    write_vector(
+        "33-logged-revocation/d-policy-class-unchanged",
+        payload=policy_payload,
+        envelope=policy_envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected={
+            "signature": "valid",
+            "schema": "valid",
+            "revocation": "revoked",
+            "binding": "not_checked",
+            "trust": "verified",
+            "ok": False,
+            "errors": [],
+            "warnings": [],
+        },
+        revocation_record=policy_record,
+        log_keys=[_log_key()],
+        anchor_policy=_empty_anchor_policy(),
+    )
+
+
 def main() -> None:
     _clear_leaf_dirs(VECTORS_DIR)
     VECTORS_DIR.mkdir(parents=True, exist_ok=True)
@@ -3389,6 +3601,7 @@ def main() -> None:
     gen_30_mixed_keyset()
     gen_31_manifest_currency()
     gen_32_anchor_v2()
+    gen_33_logged_revocation()
     leaf_count = sum(1 for _ in VECTORS_DIR.rglob("expected.json"))
     print(f"generated {leaf_count} vector cases under {VECTORS_DIR}")
 

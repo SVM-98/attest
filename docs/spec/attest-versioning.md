@@ -87,7 +87,7 @@ v0.1 §5 is the authoritative payload-field registry: its per-object tables (§5
 | --- | --- | --- | --- |
 | `key-manifest` | active | v0.2 | v0.2 §8 |
 | `receipt` | active | v0.2 | v0.2 §8 |
-| `revocation-record` | reserved | — | Reserved; assigns no verifier behavior until a forthcoming revocation-transparency amendment specifies it. |
+| `revocation-record` | active | v0.2 (§8/§15 amendment, rev 5) | v0.2 §8, §15 item 5 — G5/TM-47: a `refund_window` revocation record's effectiveness gains a deadline-effectiveness rule once a verifier evaluates this entry type's transparency evidence for it. |
 
 ### 6.5 Transfer types
 

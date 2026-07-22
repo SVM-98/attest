@@ -19,6 +19,7 @@ lives in `verify.py` (§6 step 6), the one module that has both.
 
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime
 from typing import Any
 
@@ -55,6 +56,23 @@ def build_record(
         canon.canonical_bytes(record), signing_kp, kid
     )
     return record
+
+
+def record_hash(record: dict[str, Any]) -> str:
+    """`SHA-256(JCS(record))`, rendered as 64 lowercase hex characters — the
+    ENTIRE signed record dict, INCLUDING its `signature` member (unlike the
+    body-only bytes `verify_record_signature` hashes to check the signature
+    itself).
+
+    This is what a `revocation-record` transparency-log entry commits to
+    (v0.2 §8, G5): the SAME `canon.canonical_bytes` this module already uses
+    to build and verify a record's signature — one canonical form, reused,
+    never a second one invented for the log. `tlog.encode_entry` validates
+    the resulting hex string's shape; this function does no shape validation
+    of its own, mirroring how `manifests.py`/`verify.py` compute a
+    `manifest_sha256`/`core_sha256` from trusted, already-built material.
+    """
+    return hashlib.sha256(canon.canonical_bytes(record)).hexdigest()
 
 
 def verify_record_signature(record: dict[str, Any], key_manifest: dict[str, Any]) -> bool:

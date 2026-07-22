@@ -10,6 +10,6 @@
   "transparency": "logged",
   "trust": "verified",
   "warnings": [
-    "proof[0]: ots op-chain result does not match header_merkle_root; anchor_profile signed-note-v2 requires the accumulator to start from SHA256(checkpoint.signed_note_bytes) — this evidence looks like a note-v1 commitment presented as signed-note-v2"
+    "proof[0]: ots op-chain result does not match header_merkle_root; anchor_profile signed-note-v2 requires the accumulator to start from SHA256(checkpoint.signed_note_bytes) \u2014 this evidence looks like a note-v1 commitment presented as signed-note-v2"
   ]
 }

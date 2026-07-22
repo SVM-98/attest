@@ -85,10 +85,18 @@ _MANIFEST_FRESHNESS_NOT_CHECKED = "not_checked"
 
 _CLAIM_TYPE_RECEIPT = "receipt"
 _CLAIM_TYPE_KEY_MANIFEST = "key-manifest"
+_CLAIM_TYPE_REVOCATION_RECORD = "revocation-record"
 
 _WARN_TRANSPARENCY_CONFIG_MISSING = "transparency_config_missing"
 _WARN_TRANSPARENCY_CLAIM_UNRESOLVABLE = "transparency_claim_unresolvable"
 _WARN_ROTATION_CHAIN_REQUIRED = "corroboration_requires_rotation_chain"
+
+# G5 (v0.2 §8/§15 amendment, TM-47): a refund_window revocation record that
+# fails the deadline-effectiveness rule (unlogged, or logged/anchored after
+# the receipt's own refund-window deadline) — exact, cross-language wire
+# string (TS parity: messages.ts).
+_WARN_REVOCATION_UNLOGGED_DEADLINE = "revocation_unlogged_deadline"
+_ANCHORED_BEFORE_PREFIX = "anchored_before:"
 
 # G6 mixed-keyset prohibition (v0.2 §2.3/§13 amendment) — the wire warning
 # string, exact and cross-language (TS parity: messages.ts).
@@ -584,6 +592,97 @@ def _within_refund_window(record: dict[str, Any], window_end: datetime | None) -
         return False  # incomparable naive/aware mix — fail closed, never effective
 
 
+def _revocation_deadline_satisfied(
+    effective: list[dict[str, Any]],
+    revocation_evidence: dict[str, Any] | None,
+    issuer_id: str | None,
+    log_keys: list[tlog.LogKey],
+    anchor_policy: anchor.AnchorPolicy,
+    window_end: datetime | None,
+    warnings: list[str],
+) -> bool:
+    """G5 (v0.2 §8/§15, TM-47): True iff at least one of `effective`'s
+    refund_window revocation records has Stage 2 evidence proving it was
+    logged AND anchored no later than `window_end` — the SAME refund-window
+    deadline `_refund_window_end`/`_within_refund_window` already compute,
+    never a second definition of "deadline".
+
+    Only called once the caller has ALREADY established the verifier is
+    Stage-2 capable (`log_keys`/`anchor_policy` both supplied) and `effective`
+    is non-empty; `revocation_evidence` itself may still be absent or fail to
+    resolve — either way this returns `False`, so a Stage-2-capable verifier
+    with no (or unresolvable) evidence for this specific record never honors
+    it. `log_keys`/`anchor_policy` are the same trusted, verifier-config
+    values `_evaluate_transparency_claim` validates for receipt/key-manifest
+    claims; malformed ones raise `TransparencyError` here too (a config bug),
+    exactly the same discipline.
+
+    Every warning the shared evaluator returns for a candidate record (e.g.
+    `anchor_note_only`, malformed-evidence reasons, `log_equivocation_detected`)
+    is appended to `warnings` (dedup against identical strings already
+    present) regardless of whether that record ends up timely — mirrors
+    `_evaluate_transparency_claim`'s own `warnings.extend(result.warnings)`.
+    """
+    if revocation_evidence is None or window_end is None:
+        return False
+
+    origin = _resolve_log_origin(log_keys)
+    transparency_module._validate_policy(anchor_policy)
+
+    try:
+        # verify()'s untrusted-evidence boundary, mirroring
+        # `_evaluate_transparency_claim`: canonicalize and parse once so
+        # every following phase sees one ordinary JSON object, never a
+        # stateful mapping/value supplied by the caller.
+        serialized_evidence = canon.dumps(revocation_evidence)
+        if len(serialized_evidence) > _MAX_TRANSPARENCY_EVIDENCE_LEN:
+            return False
+        materialized_evidence = json.loads(serialized_evidence)
+        if not isinstance(materialized_evidence, dict):
+            return False
+    # Adversarial-boundary confinement (never BaseException): a hostile
+    # `revocation_evidence` mapping's `__eq__`/`__getitem__` must not escape
+    # as a bare exception, mirroring `_evaluate_transparency_claim`.
+    except Exception:
+        return False
+
+    for record in effective:
+        try:
+            record_hash = revocation.record_hash(record)
+        except (TypeError, canon.CanonError):
+            continue
+        expected_entry = _validated_transparency_entry(
+            {
+                "type": _CLAIM_TYPE_REVOCATION_RECORD,
+                "issuer": issuer_id,
+                "record_sha256": record_hash,
+            }
+        )
+        if expected_entry is None:
+            continue
+        result = transparency_module.evaluate_transparency(
+            materialized_evidence,
+            log_keys=log_keys,
+            expected_origin=origin,
+            policy=anchor_policy,
+            expected_entry=expected_entry,
+        )
+        for warning in result.warnings:
+            if warning not in warnings:
+                warnings.append(warning)
+        if not result.transparency.startswith(_ANCHORED_BEFORE_PREFIX):
+            continue
+        anchored_time = _parse_iso(result.transparency[len(_ANCHORED_BEFORE_PREFIX) :])
+        if anchored_time is None:
+            continue
+        try:
+            if anchored_time <= window_end:
+                return True
+        except TypeError:
+            continue  # incomparable naive/aware mix — fail closed, never timely
+    return False
+
+
 def _classify_revocation(
     payload: dict[str, Any],
     revocation_view: list[dict[str, Any]] | None,
@@ -591,6 +690,9 @@ def _classify_revocation(
     warnings: list[str],
     errors: list[str],
     max_records: int = _MAX_REVOCATION_RECORDS,
+    log_keys: list[tlog.LogKey] | None = None,
+    anchor_policy: anchor.AnchorPolicy | None = None,
+    revocation_evidence: dict[str, Any] | None = None,
 ) -> str:
     """§6 step 6 / §3.1: revocation-by-class.
 
@@ -610,6 +712,17 @@ def _classify_revocation(
     - "refund_window": an effective record is honored only if its own signed
       `revoked_at` falls within `issued_at + revocation_window_days` —
       evaluated against the record's own signed time, never local clock.
+      G5 (TM-47) adds a deadline-EFFECTIVENESS rule on top, gated on the
+      verifier being Stage-2 capable (`log_keys`/`anchor_policy` both
+      supplied, exactly `_evaluate_transparency_claim`'s existing gate): a
+      window-effective record is honored only if `revocation_evidence`
+      proves it was logged (`revocation-record` entry, §8) AND anchored no
+      later than the SAME refund-window deadline — see
+      `_revocation_deadline_satisfied`. A verifier that is not Stage-2
+      capable at all keeps v0.1 semantics unchanged (eternal verifiability:
+      the rule only engages where a verifier actually asks for it).
+      `policy`/`compromised`/`none` classes are UNAFFECTED by this rule —
+      logging remains optional corroboration for them, never a gate.
 
     The `not_revoked_as_of:<T>` freshness anchor is computed over ALL
     authenticated records in the view (any receipt_id), not the raw view —
@@ -700,6 +813,27 @@ def _classify_revocation(
         window_end = _refund_window_end(payload)
         effective = [r for r in valid if _within_refund_window(r, window_end)]
         if effective:
+            # G5 (TM-47): a Stage-2-capable verifier MUST additionally apply
+            # the deadline-effectiveness rule — a window-effective record is
+            # honored only with evidence proving it was logged and anchored
+            # no later than `window_end`. A verifier that never supplies
+            # log_keys/anchor_policy at all is not Stage-2 capable, so the
+            # rule does not engage and v0.1 semantics stand.
+            if log_keys is not None and anchor_policy is not None:
+                issuer_id = (
+                    issuer_manifest.get("issuer") if isinstance(issuer_manifest, dict) else None
+                )
+                if not _revocation_deadline_satisfied(
+                    effective,
+                    revocation_evidence,
+                    issuer_id if isinstance(issuer_id, str) else None,
+                    log_keys,
+                    anchor_policy,
+                    window_end,
+                    warnings,
+                ):
+                    warnings.append(_WARN_REVOCATION_UNLOGGED_DEADLINE)
+                    return _REVOCATION_INVALID_IGNORED
             return _REVOCATION_REVOKED
         if valid:  # matched and verified, but every one fell outside the window
             warnings.append(f"revocation record for {receipt_id!r} outside refund window, ignored")
@@ -772,6 +906,7 @@ def verify(
     transparency: dict[str, Any] | None = None,
     log_keys: list[tlog.LogKey] | None = None,
     anchor_policy: anchor.AnchorPolicy | None = None,
+    revocation_evidence: dict[str, Any] | None = None,
 ) -> VerificationResult:
     """§6 steps 0-7. `max_revocation_records` bounds the untrusted revocation
     view: a larger view is not evaluated (revocation `"unknown"`). It fails
@@ -790,6 +925,21 @@ def verify(
     malformed `log_keys`/`anchor_policy` raises `attest.transparency.
     TransparencyError` (a config bug); malformed/absent `transparency`
     evidence never raises, only degrades the three new components.
+
+    `revocation_evidence` is G5's (v0.2 §8/§15, TM-47) one exception to the
+    "Stage 2 is purely informational" rule: it carries one untrusted
+    transparency evidence bundle for a SPECIFIC `refund_window` revocation
+    record in `revocation_view`, reusing the SAME `log_keys`/`anchor_policy`
+    configuration. Once a verifier is Stage-2 capable (`log_keys` AND
+    `anchor_policy` both supplied — the same gate that already governs
+    `transparency`), a `refund_window` record is honored only if this
+    evidence proves it was logged and anchored no later than the receipt's
+    own refund-window deadline; see `_revocation_deadline_satisfied` and
+    `_classify_revocation`. A verifier that supplies neither `log_keys` nor
+    `anchor_policy` is not Stage-2 capable at all, so this rule never
+    engages and v0.1 semantics are unchanged — this is what keeps every
+    pre-G5 caller's behavior byte-for-byte identical. `policy`/`compromised`/
+    `none` revocability classes are entirely unaffected by this parameter.
     """
     # Caller-contract enforcement (security): a non-list `revocation_view`
     # must fail loud. If a lone record OBJECT slipped through here,
@@ -1190,7 +1340,15 @@ def verify(
     # module docstring.
     if schema_result == _SCHEMA_VALID:
         revocation_result = _classify_revocation(
-            payload, revocation_view, manifest, warnings, errors, max_records=max_revocation_records
+            payload,
+            revocation_view,
+            manifest,
+            warnings,
+            errors,
+            max_records=max_revocation_records,
+            log_keys=log_keys,
+            anchor_policy=anchor_policy,
+            revocation_evidence=revocation_evidence,
         )
         binding_result = (
             _classify_binding(payload, disclosure)

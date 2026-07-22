@@ -32,8 +32,10 @@ const NODE_PREFIX = Uint8Array.of(0x01) // RFC 6962 §2.1: MTH(D[n]) = SHA-256(0
 
 const TYPE_KEY_MANIFEST = 'key-manifest'
 const TYPE_RECEIPT = 'receipt'
+const TYPE_REVOCATION_RECORD = 'revocation-record'
 const KEY_MANIFEST_FIELDS = new Set(['type', 'issuer', 'manifest_version', 'manifest_sha256'])
 const RECEIPT_FIELDS = new Set(['type', 'issuer', 'core_sha256'])
+const REVOCATION_RECORD_FIELDS = new Set(['type', 'issuer', 'record_sha256'])
 // Mirrors tlog.py's `_MAX_ENTRY_SCALAR_LEN`: both cores bound free-text
 // entry scalars before regex matching, diagnostic rendering, or JCS work.
 const MAX_ENTRY_SCALAR_LEN = 500_000
@@ -240,9 +242,12 @@ function requireManifestVersion(entry: Record<string, unknown>): void {
 /** Validate `entry` against a CLOSED schema and return its canonical
  * (attest-JCS) bytes — the exact bytes that get leaf-hashed into the log.
  *
- * Two entry types, exactly these members each (extras rejected):
+ * Three entry types, exactly these members each (extras rejected):
  * - `key-manifest`: `{type, issuer, manifest_version, manifest_sha256}`.
  * - `receipt`: `{type, issuer, core_sha256}`.
+ * - `revocation-record` (v0.2 §8, G5): `{type, issuer, record_sha256}`,
+ *   where `record_sha256 = recordHash(record)` (revocation.ts) —
+ *   `SHA-256(JCS(record))` over the entire signed revocation record.
  *
  * `entry` is untrusted evidence (the "materialized", plain-JS-number
  * convention this port uses — see `transparency.ts`): `manifest_version`
@@ -267,6 +272,10 @@ export function encodeEntry(entry: unknown): Uint8Array {
     requireFields(entry, RECEIPT_FIELDS)
     requireIssuer(entry)
     requireHex64(entry, 'core_sha256')
+  } else if (entryType === TYPE_REVOCATION_RECORD) {
+    requireFields(entry, REVOCATION_RECORD_FIELDS)
+    requireIssuer(entry)
+    requireHex64(entry, 'record_sha256')
   } else {
     throw new TlogError(`unknown entry type: ${pyRepr(entryType)}`)
   }

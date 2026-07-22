@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -552,6 +553,342 @@ def test_valid_record_with_non_revoked_status_is_not_a_revocation() -> None:
     )
     assert result.revocation == "not_revoked_as_of:2026-07-05T00:00:00Z"
     assert result.ok is True
+
+
+# --- G5 (TM-47): revocation-record log entries + deadline effectiveness ----------
+#
+# `refund_window` revocation records are effective only if a matching
+# `revocation-record` log entry proves they were anchored no later than the
+# receipt's own refund-window deadline (issued_at + revocation_window_days) —
+# closing the backdating gap where a revocation with no contradicting
+# evidence could be asserted after the fact. The rule engages only once the
+# verifier is Stage-2 capable (log_keys/anchor_policy supplied, exactly the
+# existing zero-behavior-change gate for transparency/corroboration); a
+# caller that never supplies them keeps v0.1 semantics unchanged.
+# `policy`/`compromised`/`none` classes are unaffected: logging remains
+# optional corroboration for them.
+
+_REVOCATION_LOG_ORIGIN = "revocation-log.attest.example/2026"
+_REVOCATION_LOG_NAME = "attest-revocation-log-1"
+
+
+def _revocation_log_key(hk: pq.HybridSigningKeys) -> tlog.LogKey:
+    return tlog.LogKey(
+        origin=_REVOCATION_LOG_ORIGIN,
+        name=_REVOCATION_LOG_NAME,
+        ed25519_pub=hk.ed.pub,
+        mldsa_pub=hk.mldsa.pub,
+    )
+
+
+def _revocation_log_evidence(
+    record: dict[str, Any],
+    hk: pq.HybridSigningKeys,
+    header_time: int,
+    anchor_profile: str | None = None,
+) -> tuple[dict[str, Any], anchor.AnchorPolicy]:
+    """Build a genuine, single-leaf transparency-log entry for `record`,
+    hybrid-signed and OTS-anchored to a pinned header at `header_time`
+    (mirrors `tools/gen_vectors.py`'s `28-transparency`/`j-ots-anchor` shape:
+    a single `["sha256"]` op over `SHA-256(checkpoint.note_bytes)`).
+
+    `anchor_profile=None` (the default) builds a legacy note-v1 commitment
+    (`SHA-256(checkpoint.note_bytes)`, no `anchor_profile` declared) —
+    genuinely verifiable (eternal verifiability) but flagged
+    `anchor_note_only` by the shared evaluator (G4). Pass
+    `anchor_profile="signed-note-v2"` to instead commit over
+    `checkpoint.signed_note_bytes` (mirrors `32-anchor-v2/a-v2-valid`) —
+    what newly produced anchors MUST use per the spec, and what
+    `tools/gen_vectors.py`'s group 33 now generates."""
+    entry = {
+        "type": "revocation-record",
+        "issuer": ISSUER,
+        "record_sha256": revocation.record_hash(record),
+    }
+    entry_bytes = tlog.encode_entry(entry)
+    root = tlog.build_tree([entry_bytes])
+    checkpoint_text = tlog.sign_checkpoint(
+        _REVOCATION_LOG_ORIGIN, 1, root, hk, _REVOCATION_LOG_NAME
+    )
+    checkpoint = tlog.parse_checkpoint(checkpoint_text)
+    commitment_bytes = (
+        checkpoint.signed_note_bytes
+        if anchor_profile == "signed-note-v2"
+        else checkpoint.note_bytes
+    )
+    accumulator_start = hashlib.sha256(commitment_bytes).digest()
+    header_merkle_root = hashlib.sha256(accumulator_start).digest().hex()
+    header_hash = "ab" * 32
+    policy = anchor.AnchorPolicy(
+        pinned_headers={
+            header_hash: anchor.PinnedHeader(
+                header_hash=header_hash, merkle_root=header_merkle_root, time=header_time
+            )
+        },
+        crqc_horizon=None,
+    )
+    anchors: dict[str, Any] = {
+        "checkpoint": checkpoint_text,
+        "proofs": [
+            {
+                "kind": "ots",
+                "ops": [["sha256"]],
+                "header_merkle_root": header_merkle_root,
+                "header_time": header_time,
+                "header_hash": header_hash,
+            }
+        ],
+    }
+    if anchor_profile is not None:
+        anchors["anchor_profile"] = anchor_profile
+    evidence = {
+        "entry": entry,
+        "leaf_index": 0,
+        "tree_size": 1,
+        "inclusion_proof": [],
+        "checkpoint": checkpoint_text,
+        "anchors": anchors,
+    }
+    return evidence, policy
+
+
+def _unix_seconds(iso: str) -> int:
+    return int(datetime.strptime(iso, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC).timestamp())
+
+
+def _refund_window_payload() -> dict[str, Any]:
+    return make_payload(
+        license={"revocability": "refund_window", "revocation_window_days": 14},
+        issued_at="2026-07-02T14:30:00Z",
+    )
+
+
+def test_refund_window_revocation_with_timely_logged_entry_honored() -> None:
+    hk = pq.HybridSigningKeys(ed=keys.generate(), mldsa=pq.generate())
+    payload = _refund_window_payload()
+    envelope = issue.issue(payload, KP, KID)
+    record = revocation.build_record(
+        payload["receipt_id"], "revoked", "2026-07-10T00:00:00Z", KP, KID
+    )
+    # header_time inside the refund window (deadline: 2026-07-16T14:30:00Z).
+    # Default (legacy note-v1) evidence — asserts the revocation-evidence
+    # path surfaces the shared evaluator's `anchor_note_only` diagnostic
+    # (I1: verify() must not discard `result.warnings` on this path).
+    evidence, policy = _revocation_log_evidence(record, hk, _unix_seconds("2026-07-10T00:00:00Z"))
+    result = verify.verify(
+        _to_bytes(envelope),
+        _trust_store(_key_manifest()),
+        revocation_view=[record],
+        revocation_evidence=evidence,
+        log_keys=[_revocation_log_key(hk)],
+        anchor_policy=policy,
+    )
+    assert result.revocation == "revoked"
+    assert result.ok is False
+    assert "anchor_note_only" in result.warnings
+
+
+def test_refund_window_revocation_unlogged_is_ignored_with_warning() -> None:
+    """Stage-2-capable verifier (log_keys/anchor_policy set), but NO log
+    evidence at all for this record -> the record was never proven logged,
+    so the deadline rule cannot honor it — ignored, not silently revoked."""
+    hk = pq.HybridSigningKeys(ed=keys.generate(), mldsa=pq.generate())
+    payload = _refund_window_payload()
+    envelope = issue.issue(payload, KP, KID)
+    record = revocation.build_record(
+        payload["receipt_id"], "revoked", "2026-07-10T00:00:00Z", KP, KID
+    )
+    result = verify.verify(
+        _to_bytes(envelope),
+        _trust_store(_key_manifest()),
+        revocation_view=[record],
+        revocation_evidence=None,
+        log_keys=[_revocation_log_key(hk)],
+        anchor_policy=anchor.AnchorPolicy(pinned_headers={}, crqc_horizon=None),
+    )
+    assert result.revocation == "invalid_revocation_ignored"
+    assert result.ok is True
+    assert "revocation_unlogged_deadline" in result.warnings
+
+
+def test_refund_window_revocation_anchored_late_is_ignored() -> None:
+    hk = pq.HybridSigningKeys(ed=keys.generate(), mldsa=pq.generate())
+    payload = _refund_window_payload()
+    envelope = issue.issue(payload, KP, KID)
+    record = revocation.build_record(
+        payload["receipt_id"], "revoked", "2026-07-10T00:00:00Z", KP, KID
+    )
+    # header_time AFTER the refund window deadline (2026-07-16T14:30:00Z).
+    evidence, policy = _revocation_log_evidence(record, hk, _unix_seconds("2026-08-01T00:00:00Z"))
+    result = verify.verify(
+        _to_bytes(envelope),
+        _trust_store(_key_manifest()),
+        revocation_view=[record],
+        revocation_evidence=evidence,
+        log_keys=[_revocation_log_key(hk)],
+        anchor_policy=policy,
+    )
+    assert result.revocation == "invalid_revocation_ignored"
+    assert result.ok is True
+    assert "revocation_unlogged_deadline" in result.warnings
+
+
+def test_policy_class_revocation_unchanged_without_log() -> None:
+    """`policy`/`compromised`/`none` classes are UNAFFECTED by the deadline
+    rule — logging remains optional corroboration for them, even under a
+    Stage-2-capable verifier with no log evidence supplied."""
+    hk = pq.HybridSigningKeys(ed=keys.generate(), mldsa=pq.generate())
+    payload = make_payload(license={"revocability": "policy"})
+    envelope = issue.issue(payload, KP, KID)
+    record = revocation.build_record(
+        payload["receipt_id"], "revoked", "2026-07-03T00:00:00Z", KP, KID
+    )
+    result = verify.verify(
+        _to_bytes(envelope),
+        _trust_store(_key_manifest()),
+        revocation_view=[record],
+        revocation_evidence=None,
+        log_keys=[_revocation_log_key(hk)],
+        anchor_policy=anchor.AnchorPolicy(pinned_headers={}, crqc_horizon=None),
+    )
+    assert result.revocation == "revoked"
+    assert result.ok is False
+    assert "revocation_unlogged_deadline" not in result.warnings
+
+
+def test_refund_window_revocation_without_stage2_config_keeps_v01_semantics() -> None:
+    """The true bare-v0.1 case: no log_keys/anchor_policy at all (verifier not
+    Stage-2 capable) -> the deadline rule never engages, so an otherwise
+    window-valid record is honored exactly as it was before G5."""
+    payload = _refund_window_payload()
+    envelope = issue.issue(payload, KP, KID)
+    record = revocation.build_record(
+        payload["receipt_id"], "revoked", "2026-07-10T00:00:00Z", KP, KID
+    )
+    result = verify.verify(
+        _to_bytes(envelope), _trust_store(_key_manifest()), revocation_view=[record]
+    )
+    assert result.revocation == "revoked"
+    assert result.ok is False
+
+
+# --- I1(c): revocation-evidence path dispatches through the shared
+# transparency evaluator exactly like the direct transparency path
+# (T4-dispatch tests) --------------------------------------------------------
+
+
+def test_refund_window_revocation_v2_profiled_evidence_honored_without_note_only_warning() -> None:
+    """v2-profiled revocation evidence (the shape `gen_vectors.py` group 33
+    now produces) verifies under the v2 seed — honored, and crucially does
+    NOT carry `anchor_note_only` (that warning is specific to the legacy
+    note-v1 commitment)."""
+    hk = pq.HybridSigningKeys(ed=keys.generate(), mldsa=pq.generate())
+    payload = _refund_window_payload()
+    envelope = issue.issue(payload, KP, KID)
+    record = revocation.build_record(
+        payload["receipt_id"], "revoked", "2026-07-10T00:00:00Z", KP, KID
+    )
+    evidence, policy = _revocation_log_evidence(
+        record, hk, _unix_seconds("2026-07-10T00:00:00Z"), anchor_profile="signed-note-v2"
+    )
+    result = verify.verify(
+        _to_bytes(envelope),
+        _trust_store(_key_manifest()),
+        revocation_view=[record],
+        revocation_evidence=evidence,
+        log_keys=[_revocation_log_key(hk)],
+        anchor_policy=policy,
+    )
+    assert result.revocation == "revoked"
+    assert result.ok is False
+    assert "anchor_note_only" not in result.warnings
+
+
+def test_refund_window_revocation_legacy_profiled_evidence_yields_anchor_note_only() -> None:
+    """A legacy-profiled bundle on the revocation-evidence path yields
+    `anchor_note_only` (the RED test from I1(a)) — still honored (eternal
+    verifiability), but flagged as the weaker profile, exactly like the
+    direct transparency path's own G4 behavior."""
+    hk = pq.HybridSigningKeys(ed=keys.generate(), mldsa=pq.generate())
+    payload = _refund_window_payload()
+    envelope = issue.issue(payload, KP, KID)
+    record = revocation.build_record(
+        payload["receipt_id"], "revoked", "2026-07-10T00:00:00Z", KP, KID
+    )
+    evidence, policy = _revocation_log_evidence(record, hk, _unix_seconds("2026-07-10T00:00:00Z"))
+    result = verify.verify(
+        _to_bytes(envelope),
+        _trust_store(_key_manifest()),
+        revocation_view=[record],
+        revocation_evidence=evidence,
+        log_keys=[_revocation_log_key(hk)],
+        anchor_policy=policy,
+    )
+    assert result.revocation == "revoked"
+    assert result.ok is False
+    assert "anchor_note_only" in result.warnings
+
+
+# --- M1: deadline equality boundary is pinned at `<=`, not `<` -------------
+
+
+def test_refund_window_revocation_anchored_exactly_at_deadline_is_timely() -> None:
+    """`anchored_before == deadline` EXACTLY is timely (honored). A
+    regression from `<=` to `<` in `_revocation_deadline_satisfied` must
+    turn this test red."""
+    hk = pq.HybridSigningKeys(ed=keys.generate(), mldsa=pq.generate())
+    payload = _refund_window_payload()
+    envelope = issue.issue(payload, KP, KID)
+    record = revocation.build_record(
+        payload["receipt_id"], "revoked", "2026-07-10T00:00:00Z", KP, KID
+    )
+    # Deadline is issued_at (2026-07-02T14:30:00Z) + 14 days == 2026-07-16T14:30:00Z.
+    evidence, policy = _revocation_log_evidence(
+        record,
+        hk,
+        _unix_seconds("2026-07-16T14:30:00Z"),
+        anchor_profile="signed-note-v2",
+    )
+    result = verify.verify(
+        _to_bytes(envelope),
+        _trust_store(_key_manifest()),
+        revocation_view=[record],
+        revocation_evidence=evidence,
+        log_keys=[_revocation_log_key(hk)],
+        anchor_policy=policy,
+    )
+    assert result.revocation == "revoked"
+    assert result.ok is False
+    assert "revocation_unlogged_deadline" not in result.warnings
+
+
+def test_refund_window_revocation_anchored_one_second_after_deadline_is_late() -> None:
+    """`deadline + 1s` is late (ignored+warning) — the boundary's other side,
+    pinning the equality is inclusive on the `<=` side only."""
+    hk = pq.HybridSigningKeys(ed=keys.generate(), mldsa=pq.generate())
+    payload = _refund_window_payload()
+    envelope = issue.issue(payload, KP, KID)
+    record = revocation.build_record(
+        payload["receipt_id"], "revoked", "2026-07-10T00:00:00Z", KP, KID
+    )
+    # Deadline is 2026-07-16T14:30:00Z; one second late.
+    evidence, policy = _revocation_log_evidence(
+        record,
+        hk,
+        _unix_seconds("2026-07-16T14:30:00Z") + 1,
+        anchor_profile="signed-note-v2",
+    )
+    result = verify.verify(
+        _to_bytes(envelope),
+        _trust_store(_key_manifest()),
+        revocation_view=[record],
+        revocation_evidence=evidence,
+        log_keys=[_revocation_log_key(hk)],
+        anchor_policy=policy,
+    )
+    assert result.revocation == "invalid_revocation_ignored"
+    assert result.ok is True
+    assert "revocation_unlogged_deadline" in result.warnings
 
 
 # --- step 7: buyer binding (design §3.2) ------------------------------------------

@@ -49,7 +49,18 @@ Vector-directory conventions (a "vector case" is any directory containing
     "crqc_horizon"}`, turned into an `anchor.AnchorPolicy`. All three are
     absent (and `verify()` sees `None`) for every leaf outside group 28, so
     existing leaves see zero behavior change; `expected.json` only gains the
-    `transparency`/`corroboration`/`manifest_freshness` members for group 28.
+    `transparency`/`corroboration`/`manifest_freshness` members for group 28
+    (and group 32).
+  - optional `revocation-evidence.json` (group 33 only, v0.2 §8/§15
+    amendment, G5/TM-47): fed to `verify()` as `revocation_evidence=`,
+    reusing group 33's own `log-keys.json`/`anchor-policy.json` (same shape
+    as group 28's). It is the untrusted transparency evidence bundle for the
+    SPECIFIC `refund_window` revocation record in `revocation.json` — absent
+    for every leaf outside group 33, so `verify()` sees `None` and existing
+    leaves see zero behavior change. Group 33 leaves do NOT gain
+    `transparency`/`corroboration`/`manifest_freshness` in `expected.json`
+    (those stay at their zero-default `not_checked`/`none`/`not_checked`,
+    unasserted): this is a DIFFERENT evidence channel from `transparency.json`.
 """
 
 from __future__ import annotations
@@ -155,6 +166,13 @@ def _transparency_evidence(vector_dir: Path) -> dict[str, Any] | None:
     return _load_json(path)  # type: ignore[no-any-return]
 
 
+def _revocation_evidence(vector_dir: Path) -> dict[str, Any] | None:
+    path = vector_dir / "revocation-evidence.json"
+    if not path.exists():
+        return None
+    return _load_json(path)  # type: ignore[no-any-return]
+
+
 @pytest.mark.parametrize("vector_dir", _VECTOR_DIRS, ids=_VECTOR_IDS)
 def test_vector_matches_spec_intended_result(vector_dir: Path) -> None:
     expected = _load_json(vector_dir / "expected.json")
@@ -171,6 +189,7 @@ def test_vector_matches_spec_intended_result(vector_dir: Path) -> None:
         transparency=_transparency_evidence(vector_dir),
         log_keys=_log_keys(vector_dir),
         anchor_policy=_anchor_policy(vector_dir),
+        revocation_evidence=_revocation_evidence(vector_dir),
     )
 
     assert result.signature == expected["signature"]
@@ -226,10 +245,11 @@ def test_vectors_directory_is_nonempty() -> None:
     # parity leaf (27, 2026-07-17) + 14 transparency/corroboration conformance
     # leaves (28, 2026-07-18) + 2 normative-ceiling leaves (29, 2026-07-22) +
     # 2 mixed-keyset leaves (30, 2026-07-22) + 5 manifest-currency leaves
-    # (31, 2026-07-22) + 3 anchor-profile-v2 leaves (32, 2026-07-22, G4):
+    # (31, 2026-07-22) + 3 anchor-profile-v2 leaves (32, 2026-07-22, G4) +
+    # 4 logged-revocation leaves (33, 2026-07-23, G5/TM-47):
     # 19 a/b, 20 a-c, 21 a-g, 22 a-c, 23 a/b, 24, 25 a/b, 26 a-h, 28 a-n,
-    # 29 a/c, 30 a/b, 31 a-e, 32 a-c.
-    assert len(_VECTOR_DIRS) >= 78
+    # 29 a/c, 30 a/b, 31 a-e, 32 a-c, 33 a-d.
+    assert len(_VECTOR_DIRS) >= 82
 
 
 _CANONICAL_DIRS = [p for p in _VECTOR_DIRS if (p / "canonical.json").exists()]
