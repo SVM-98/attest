@@ -1,8 +1,8 @@
-// The conformance merge gate (28 vector groups / 66 leaves): this suite discovers every leaf under
+// The conformance merge gate (29 vector groups / 66 leaves): this suite discovers every leaf under
 // `docs/spec/vectors/` and asserts the produced VerificationResult matches
 // its `expected.json`, using the exact same match rules as the Python
 // reference's `tests/test_vectors.py`. Passing this suite in full IS the
-// definition of attest v0.1 conformance for this implementation (see README).
+// definition of attest conformance for this implementation, v0.1 and v0.2 (see README).
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, it, expect } from 'vitest'
@@ -14,7 +14,7 @@ import * as V from './helpers/vectors.js'
 const leaves = V.findLeafDirs()
 const canonicalLeaves = leaves.filter((d) => existsSync(join(d, 'canonical.json')))
 
-describe('attest v0.1 conformance vectors', () => {
+describe('attest conformance vectors', () => {
   it('discovers the full vector suite (>= 66 leaves)', () => {
     expect(leaves.length).toBeGreaterThanOrEqual(66)
   })

@@ -87,11 +87,37 @@ won't adopt voluntarily, the lever is regulation and market pressure, not forger
 
 ## Status
 
-Spec v0.1 is complete, with two independent implementations — a Python reference
-implementation and a TypeScript verifier — that agree on all 27 conformance
-vectors (52 leaf cases spanning format/crypto and lifecycle/policy behavior), plus
-an end-to-end demo that deletes a store's entire infrastructure mid-lifecycle and
+Spec v0.1 is complete and v0.2 is specified and implemented on `main`, with two
+independent implementations — a Python reference implementation and a TypeScript
+verifier — that agree on all 66 conformance vector leaves across 29 groups: 43 of
+them the v0.1 corpus, the rest exercising v0.2's hybrid signature profile and
+transparency behaviour. (A v0.1-only verifier is required to reject v0.2
+envelopes, so it is measured against the 43-leaf subset.) There is also an
+end-to-end demo that deletes a store's entire infrastructure mid-lifecycle and
 proves the receipt still verifies.
+
+The published packages are still `0.1.2`: everything v0.2 lives on `main` and is
+not released yet.
+
+Three pieces of assurance work go beyond what a test suite can show. They are
+being finished on branches, and are linked here rather than left invisible:
+
+- **Formal verification.** A [Tamarin model of the wire protocol](https://github.com/SVM-98/attest/blob/feature/p1.3-formal-verification/formal/attest.spthy):
+  machine-checked theorems that acceptance implies an issuer signature, that key
+  rotation cannot be hijacked, and that revocation is sound and effective — plus
+  attack exhibits proved *reachable* rather than argued in prose, plus negative
+  controls that must falsify. Each theorem states its own scope in the theory
+  file; nothing is claimed more broadly there than the prover checked. In
+  progress on [`feature/p1.3-formal-verification`](https://github.com/SVM-98/attest/tree/feature/p1.3-formal-verification).
+- **[Threat model](https://github.com/SVM-98/attest/blob/pillar-1/docs/spec/attest-threat-model.md).**
+  60 attacks catalogued across the whole receipt lifecycle, each either mitigated
+  or recorded as out of scope with a reason, a traceability matrix, and the
+  protocol gaps the exercise found left tracked in the open instead of quietly
+  fixed. On [`pillar-1`](https://github.com/SVM-98/attest/tree/pillar-1).
+- **[Privacy considerations](https://github.com/SVM-98/attest/blob/pillar-1/docs/spec/attest-privacy.md).**
+  Every field classified by what it reveals to which observer, twenty testable
+  privacy claims, and a GDPR annex covering what a receipt deliberately does not
+  record. On [`pillar-1`](https://github.com/SVM-98/attest/tree/pillar-1).
 
 ## Quickstart
 
@@ -144,9 +170,10 @@ corpus every implementation is checked against.
 [docs/spec/attest-v0.2.md](docs/spec/attest-v0.2.md) is an additive delta
 specification defining the v0.2 hybrid Ed25519+ML-DSA-65 signature profile
 (post-quantum-resistant receipts, `attest_version: "0.2"`); v0.1 receipts
-remain valid and verifiable forever, and this profile is Stage 1 of a larger
-v0.2 — issuer key transparency/anchoring and transfer records are forthcoming
-in later stages.
+remain valid and verifiable forever. That profile was Stage 1; Stage 2 — issuer
+key transparency and timestamp anchoring, where a log corroborates a receipt's
+existence without ever being able to make an unsigned receipt look authentic —
+is specified in the same document. Transfer records are the remaining stage.
 
 [docs/spec/attest-threat-model.md](docs/spec/attest-threat-model.md) is the
 maintained threat model behind the two specifications above — a living
@@ -195,7 +222,7 @@ registration — real trademark enforcement would require actually registering t
 mark, which has not happened.
 
 **Contributing.** See [`CONTRIBUTING.md`](CONTRIBUTING.md). Implementation pull
-requests must pass all 52 conformance vector leaves and keep both the Python and
+requests must pass all 66 conformance vector leaves and keep both the Python and
 TypeScript suites green.
 
 **Contact.** Use GitHub Issues for technical bugs, GitHub Discussions for
