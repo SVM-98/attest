@@ -175,6 +175,17 @@ key transparency and timestamp anchoring, where a log corroborates a receipt's
 existence without ever being able to make an unsigned receipt look authentic —
 is specified in the same document. Transfer records are the remaining stage.
 
+[docs/spec/attest-threat-model.md](docs/spec/attest-threat-model.md) is the
+maintained threat model behind the two specifications above — a living
+normative companion that analyzes their mechanisms rather than imposing
+requirements of its own — and
+[docs/spec/attest-privacy.md](docs/spec/attest-privacy.md) is its
+privacy-considerations sibling.
+
+The core protocol properties are machine-checked in Tamarin: [formal/](formal/)
+holds the model, the property↔lemma↔spec map, and the honest scope of what is
+and is not proved, gated in CI by a statement-pinning checker.
+
 ## Roadmap / north star
 
 Non-normative, and deliberately undated — these are directions, not commitments:
