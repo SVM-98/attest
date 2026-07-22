@@ -1,4 +1,4 @@
-import { JsonObject, JsonValue, canonicalBytes } from './canon.js'
+import { JsonObject, JsonValue, canonicalBytes, dumps } from './canon.js'
 import { verifyStrict } from './ed25519.js'
 import { verifyStrict as verifyMldsaStrict } from './mldsa.js'
 import { b64uDecode } from './b64u.js'
@@ -161,7 +161,13 @@ export function checkArtifactContinuity(trusted: JsonObject, candidate: JsonObje
   if (trusted['series'] !== candidate['series']) return false
   const tv = trusted['manifest_version'], cv = candidate['manifest_version']
   if (typeof tv !== 'bigint' || tv < 1n || typeof cv !== 'bigint' || cv < 1n) return true
-  return cv >= tv && cv <= tv + 1n
+  // Strict N -> N+1 between two DISTINCT versioned manifests. A same-version
+  // re-delivery is continuous only if the two manifests are value-identical
+  // (canonical-form compare, as the chain tail compare in verify.ts does);
+  // two DIFFERENT manifests at the SAME version is the equivocation shape and
+  // must not be treated as continuous.
+  if (cv === tv) return dumps(trusted) === dumps(candidate)
+  return cv === tv + 1n
 }
 
 export function artifactChainContinuous(chain: JsonObject[]): boolean {

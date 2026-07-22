@@ -18,6 +18,8 @@ attest evolves by addition, not by replacement. Extensions enter as OPTIONAL reg
 
 One exception exists: a result-classification downgrade mandated by an algorithm lifecycle transition (§4) is NOT a breaking change and does not require a new `attest_version`. A lifecycle transition records newly established cryptanalytic reality about an algorithm; the protocol semantics are unchanged, and eternal verifiability (§3) is preserved because the artifact remains verifiable — the result simply reports what its signature is worth today.
 
+Amendments MAY additionally introduce rules that apply only to artifacts produced after the amendment's revision date, and MAY introduce verifier behavior that bounds resources or demands newly-available evidence in response to a newly-recognized hazard. Such security-strengthening behavior is not breaking in the §2 sense even where it changes a capable verifier's outcome on unchanged inputs: the artifact remains verifiable, and the changed outcome reflects the new hazard, not new protocol semantics. The resource-guard rejections above the §11.3 acceptance floors (v0.1 rev 3) and the deadline-evidence requirement for `refund_window` revocation under Stage-2-capable verification (v0.2 rev 5) are the two instances this revision sanctions.
+
 v0.1 §11.2 is the forward-compatibility substrate this pattern generalizes: an unrecognized top-level payload field is signed, carried through verification, and reported only as a warning — never as an error. That rule is the payload-field instance of a general principle that binds every extension point registered in §6 (signature suites, payload fields, revocation classes, log entry types, transfer types): a verifier that predates a given extension MUST continue to accept and correctly classify artifacts that do not use it, and MUST NOT be required to reject artifacts that do, unless a new `attest_version` explicitly changes that baseline.
 
 **Non-normative note:** v0.2 is the worked example. It adds a hybrid signature suite, a transparency/corroboration result vocabulary, and an anchoring mechanism, all reachable only under `attest_version: "0.2"`, while leaving every v0.1 receipt's verification behavior byte-for-byte unchanged (v0.2 §1).
@@ -78,8 +80,9 @@ v0.1 §5 is the authoritative payload-field registry: its per-object tables (§5
 | `none` | active | v0.1 | v0.1 §5.5, §6.1, §12.2 |
 | `refund_window` | active | v0.1 | v0.1 §5.5, §12.2 |
 | `policy` | active | v0.1 | v0.1 §5.5, §12.2 |
-| `compromised` | active | v0.1 | v0.1 §7.3, §12.1 |
 | `transferred` | reserved | — | Reserved for the future transfer profile (§6.5); assigns no verifier behavior until that profile is specified. |
+
+Key lifecycle statuses — `active`, `retired`, `compromised` (v0.1 §7.3) — are a SEPARATE vocabulary, governed by v0.1 §7.3, and are not `license.revocability` classes; `compromised` describes a KEY's state, never a license's revocability, and does not belong in this registry (2026-07-23 fix — an earlier revision of this table listed it here in error).
 
 ### 6.4 Log entry types
 
@@ -92,6 +95,11 @@ v0.1 §5 is the authoritative payload-field registry: its per-object tables (§5
 ### 6.5 Transfer types
 
 Empty. No transfer type is registered as of this document's introduction. This registry is populated by the future receipt-transfer profile named as out of scope for v0.1 (v0.1 §2) and as the remaining, unshipped stage of v0.2's roadmap.
+
+## Revision log
+
+- **2026-07-22 (rev 2)**: §6.4 `revocation-record` row assigned `active` state by v0.2 rev 5 (was `reserved`); §2 amendment rule restored — the security-strengthening exception (resource guards above §11.3's floors, the `refund_window` deadline-evidence requirement) was omitted from an earlier revision of this document and is now stated; §6.3 registry corrected — the `compromised` row is dropped (it names a key lifecycle STATUS, v0.1 §7.3, not a `license.revocability` class, v0.1 §5.5) and a clarifying sentence distinguishes the two vocabularies. — vectors: none
+- **2026-07-22 (rev 1)**: document introduced — vectors: none
 
 ## References
 

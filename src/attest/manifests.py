@@ -398,6 +398,14 @@ def check_artifact_continuity(trusted: dict[str, Any], candidate: dict[str, Any]
     currency/newest-seen question: would accepting `candidate` silently roll
     back the issuer's artifact state for this series.
 
+    Currency is STRICT N -> N+1 between two distinct versioned manifests. The
+    one exception is a same-version RE-DELIVERY of the value-identical
+    manifest (Python `==`), which is continuous by construction (no state
+    change). Two DIFFERENT manifests at the SAME `manifest_version` is the
+    equivocation shape — the issuer (or an attacker) signed two divergent
+    manifests under one version number — and MUST NOT be treated as
+    continuous; the caller routes that outcome to `unverified_rotation`.
+
     Fails closed (never raises) on issuer/series mismatch. On a legacy
     manifest (no valid `manifest_version`) on either side, currency is not
     evaluable and the result is True; the caller emits
@@ -418,7 +426,9 @@ def check_artifact_continuity(trusted: dict[str, Any], candidate: dict[str, Any]
         or candidate_version < 1
     ):
         return True
-    return candidate_version >= trusted_version and candidate_version <= trusted_version + 1
+    if candidate_version == trusted_version:
+        return trusted == candidate
+    return candidate_version == trusted_version + 1
 
 
 def verify_artifact_manifest(manifest: dict[str, Any], key_manifest: dict[str, Any]) -> bool:

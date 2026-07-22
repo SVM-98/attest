@@ -159,8 +159,10 @@ def _minimal_versioning() -> str:
         "| `none` | active | v0.1 | v0.1 §5.5 |\n"
         "| `refund_window` | active | v0.1 | v0.1 §5.5 |\n"
         "| `policy` | active | v0.1 | v0.1 §5.5 |\n"
-        "| `compromised` | active | v0.1 | v0.1 §5.5 |\n"
         "| `transferred` | reserved | — | Future transfer profile |\n"
+        "\n"
+        "## Revision log\n\n"
+        "- **2026-07-22 (rev 1)**: document introduced — vectors: none\n"
     )
 
 
@@ -608,15 +610,15 @@ def test_versioning_doc_missing_suite_name_is_flagged_by_collect_errors() -> Non
     assert any("ed25519" in e for e in errors)
 
 
-def test_versioning_doc_missing_compromised_revocation_row_is_flagged() -> None:
+def test_versioning_doc_missing_policy_revocation_row_is_flagged() -> None:
     docs = _base_docs()
     docs["versioning"] = _minimal_versioning().replace(
-        "| `compromised` | active | v0.1 | v0.1 §5.5 |\n", ""
+        "| `policy` | active | v0.1 | v0.1 §5.5 |\n", ""
     )
 
     errors = collect_errors(**docs)
 
-    assert any("compromised" in e for e in errors)
+    assert any("policy" in e for e in errors)
 
 
 def test_versioning_doc_missing_lifecycle_exception_is_flagged() -> None:
@@ -628,6 +630,18 @@ def test_versioning_doc_missing_lifecycle_exception_is_flagged() -> None:
     errors = collect_errors(**docs)
 
     assert any("One exception exists:" in e for e in errors)
+
+
+def test_versioning_doc_missing_revision_log_is_flagged_by_collect_errors() -> None:
+    docs = _base_docs()
+    docs["versioning"] = _minimal_versioning().replace(
+        "\n## Revision log\n\n- **2026-07-22 (rev 1)**: document introduced — vectors: none\n",
+        "",
+    )
+
+    errors = collect_errors(**docs)
+
+    assert any("attest-versioning.md" in e and "Revision log" in e for e in errors)
 
 
 def test_missing_revision_log_is_flagged_by_collect_errors() -> None:
