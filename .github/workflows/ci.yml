@@ -91,3 +91,81 @@ jobs:
           path: |
             sbom-python.cdx.json
             sbom-npm.cdx.json
+
+  # Formal-verification gate: proves formal/attest.spthy with the pinned
+  # toolchain and gates through tools/check_formal.py (statement digests,
+  # census, version pins — fail-closed).
+  #
+  # SHARD <-> CONTRACT COUPLING: the five `lemmas` lists below must be
+  # pairwise disjoint and their union must equal tools.check_formal.CONTRACT
+  # exactly. tests/tools/test_check_formal.py (the `_ci_formal_shards` tests)
+  # parses THIS file and enforces both properties, so a lemma added to
+  # CONTRACT without a shard assignment turns the pytest job red. That parser
+  # is deliberately shape-coupled: keep each list a single-line
+  # `lemmas: "name,name,..."` value under a `- shard:` entry.
+  #
+  # Shard split rationale (measured local prover costs, task-6 ledger):
+  # no_downgrade_revocation_allhybrid (~829s) and acceptance_issuer_signed
+  # (~602s) are scheduled long-runners and get their own shards; the
+  # revocation chain is the next-heaviest cluster and is split in TWO —
+  # one tamarin process proving all 14 revocation lemmas peaked at 8.2 GB
+  # locally (measured) and was twice OOM-killed on hosted runners at the same
+  # progression point ("runner has received a shutdown signal", 2026-07-22);
+  # `rest` is every remaining
+  # CONTRACT lemma. The checker gets a per-shard timeout 300 seconds below
+  # the runner timeout, so it terminates the prover and reports its own
+  # fail-closed error before the runner hard-kill; timeout-minutes remains the
+  # backstop. Never continue-on-error, never || true.
+  formal:
+    runs-on: ubuntu-latest
+    strategy:
+      # fail-fast off so a red run reports every failing shard, not only the
+      # first; each shard remains an independent hard failure.
+      fail-fast: false
+      matrix:
+        include:
+          - shard: heavy-revdowngrade
+            timeout: 120
+            checker_timeout: 6900
+            lemmas: "no_downgrade_revocation_allhybrid"
+          - shard: heavy-acceptance
+            timeout: 120
+            checker_timeout: 6900
+            lemmas: "acceptance_issuer_signed"
+          - shard: revocation-core
+            timeout: 90
+            checker_timeout: 5100
+            lemmas: "rev_record_authentic,revocation_auth_soundness,revoked_view_never_ok,attack_tofu_revocation_forgery"
+          - shard: revocation-classes
+            timeout: 90
+            checker_timeout: 5100
+            lemmas: "sanity_revocation_honored,sanity_none_ignored,sanity_issued_receipt_revoked,reach_refund_window_honored,reach_revocation_out_of_window,revocation_effectiveness,irrevocability_none,refund_window_bound,sanity_hybrid_revocation_admitted,rev_pq_sig_source"
+          - shard: rest
+            timeout: 90
+            checker_timeout: 5100
+            lemmas: "sanity_toolchain,sanity_v01_accept,sanity_rotate_then_accept,sanity_mixed_keyset,sanity_kid_bound_accept,sanity_retired_key_receipt_still_accepts,sanity_slot2_issue_and_compromise,sanity_attacker_distinct_mid,sanity_same_version_conflict,sanity_continuity_advance,sanity_accept_after_advance,sanity_multihop_advance_compromise,sanity_hybrid_accept,reach_rotation_nonactive_signer_flagged,reach_rotation_same_version_flagged,reach_rotation_gap_flagged,reach_compromised_receipt_submitted,verified_clean_head_honest,rotation_no_hijack,compromised_key_rejected,old_key_powerless,pq_receipt_sig_source,no_cross_version_confusion,attack_v01_post_crqc,attack_tofu_forgery,attack_mixed_keyset_hijack,sanity_artifact_manifest_accept,am_pq_sig_source,no_downgrade_artifact_manifest"
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # Both SHA256 values verified 2026-07-22 against the official release
+      # assets (recomputed locally from fresh downloads; they match the plan).
+      # Maude must be installed before Tamarin runs: tamarin-prover invokes
+      # the `maude` binary from PATH, and the checker version-pins both.
+      - name: Install Maude 3.5.1 (SHA-pinned)
+        run: |
+          curl -fsSL -o maude.zip https://github.com/maude-lang/Maude/releases/download/Maude3.5.1/Maude-3.5.1-linux-x86_64.zip
+          echo "72ed1ca87e3b3d0dfc6ee1436baf154bf04c45ff97d521bec040c5e8dfc8f92c  maude.zip" | sha256sum -c -
+          unzip -q maude.zip -d "$HOME/maude"
+          chmod +x "$HOME/maude/maude"
+          echo "$HOME/maude" >> "$GITHUB_PATH"
+      # The release tarball contains exactly one file: the `tamarin-prover`
+      # binary at the archive root (verified with `tar tzf`).
+      - name: Install Tamarin 1.12.0 (SHA-pinned)
+        run: |
+          curl -fsSL -o tamarin.tar.gz https://github.com/tamarin-prover/tamarin-prover/releases/download/1.12.0/tamarin-prover-1.12.0-linux64-ubuntu.tar.gz
+          echo "201be06f469e47cff554df6ca93db8366fc2c69d70c61fcbd1370a1074b469c6  tamarin.tar.gz" | sha256sum -c -
+          tar xzf tamarin.tar.gz -C "$HOME"
+          chmod +x "$HOME/tamarin-prover"
+          echo "$HOME" >> "$GITHUB_PATH"
+      - name: Prove and gate (shard ${{ matrix.shard }})
+        timeout-minutes: ${{ matrix.timeout }}
+        run: python3 tools/check_formal.py formal/attest.spthy --only "${{ matrix.lemmas }}" --timeout ${{ matrix.checker_timeout }}
