@@ -234,10 +234,21 @@ def make_fake_prover(
     version_line: str = PINNED_VERSION_LINE,
     exit_code: int = 0,
     sleep: float = 0.0,
+    args_log: Path | None = None,
 ) -> str:
-    """Write an executable fake tamarin-prover script and return its path."""
+    """Write an executable fake tamarin-prover script and return its path.
+
+    With ``args_log``, every non-``--version`` invocation appends its full
+    argv (one line, space-joined) so tests can assert on the exact command
+    the checker constructs.
+    """
     summary_file = tmp_path / "fake-summary.txt"
     summary_file.write_text(summary, encoding="utf-8")
+    record = (
+        f"with open({str(args_log)!r}, 'a') as fh:\n    fh.write(' '.join(sys.argv) + '\\n')\n"
+        if args_log is not None
+        else ""
+    )
     script = tmp_path / "fake-tamarin-prover"
     script.write_text(
         "#!/usr/bin/env python3\n"
@@ -245,6 +256,7 @@ def make_fake_prover(
         "if '--version' in sys.argv:\n"
         f"    print({version_line!r})\n"
         "    sys.exit(0)\n"
+        f"{record}"
         f"time.sleep({sleep!r})\n"
         f"print(pathlib.Path({str(summary_file)!r}).read_text(), end='')\n"
         f"sys.exit({exit_code!r})\n",
@@ -320,6 +332,23 @@ def test_main_green_via_fake_prover_subprocess(tmp_path: Path) -> None:
     prover = make_fake_prover(tmp_path, summary=green_summary())
     rc = cf.main(["--prover", prover, "--maude", make_fake_maude(tmp_path), str(REAL_THEORY)])
     assert rc == 0
+
+
+def test_prover_invocation_pins_derivcheck_timeout(tmp_path: Path) -> None:
+    """The prove command must carry the pinned --derivcheck-timeout.
+
+    Tamarin's default derivation-check timeout (5s) expires on this theory,
+    which turns into 'WARNING: 1 wellformedness check failed!' in the summary
+    and a fail-closed gate error — every T3-T6 measurement ran with an
+    explicit timeout. The checker must pin it, not inherit the default.
+    """
+    args_log = tmp_path / "prover-args.log"
+    prover = make_fake_prover(tmp_path, summary=green_summary(), args_log=args_log)
+    rc = cf.main(["--prover", prover, "--maude", make_fake_maude(tmp_path), str(REAL_THEORY)])
+    assert rc == 0
+    recorded = args_log.read_text(encoding="utf-8")
+    assert f"--derivcheck-timeout={cf.DERIVCHECK_TIMEOUT_S}" in recorded
+    assert cf.DERIVCHECK_TIMEOUT_S >= 20  # the empirically WF-clean floor
 
 
 def test_main_digest_mismatch_fails_even_when_verified(tmp_path: Path) -> None:
