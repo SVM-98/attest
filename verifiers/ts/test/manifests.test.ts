@@ -10,6 +10,7 @@ import {
   checkContinuity,
   chainContinuous,
   verifyArtifactManifest,
+  checkArtifactContinuity,
   MAX_ARTIFACT_ENTRIES,
 } from '../src/manifests.js'
 
@@ -472,6 +473,135 @@ describe('manifests', () => {
         seed1,
       )
       expect(verifyArtifactManifest(parse(overCeiling), parse(v1))).toBe(false)
+    })
+
+    it('rejects a signed artifact manifest with manifest_version zero', () => {
+      const zero = signManifest(
+        {
+          issuer: ISSUER,
+          series: `${ISSUER}/works/EXG-001`,
+          version: 1,
+          manifest_version: 0,
+          released_at: '2025-03-01T00:00:00Z',
+          artifacts: [],
+        },
+        kid1,
+        seed1,
+      )
+      expect(verifyArtifactManifest(parse(zero), parse(v1))).toBe(false)
+    })
+  })
+
+  // G2/G3 manifest currency (attest-versioning.md rev 4; v0.1 §7.2/§7.3
+  // amendment) — mirrors tests/test_manifests.py's check_artifact_continuity
+  // cases one-for-one.
+  describe('checkArtifactContinuity', () => {
+    const SERIES = `${ISSUER}/works/EXG-001`
+    const artifactEntry = () => ({
+      role: 'installer',
+      platform: 'windows-x86_64',
+      filename: 'example-game-1.0-setup.exe',
+      size_bytes: 734003200,
+      sha256: '0'.repeat(64),
+    })
+    const am1 = signManifest(
+      {
+        issuer: ISSUER,
+        series: SERIES,
+        version: 1,
+        manifest_version: 1,
+        released_at: '2025-03-01T00:00:00Z',
+        artifacts: [artifactEntry()],
+      },
+      kid1,
+      seed1,
+    )
+    const am2 = signManifest(
+      {
+        issuer: ISSUER,
+        series: SERIES,
+        version: 2,
+        manifest_version: 2,
+        released_at: '2025-04-01T00:00:00Z',
+        artifacts: [artifactEntry()],
+      },
+      kid1,
+      seed1,
+    )
+    const am3 = signManifest(
+      {
+        issuer: ISSUER,
+        series: SERIES,
+        version: 3,
+        manifest_version: 3,
+        released_at: '2025-05-01T00:00:00Z',
+        artifacts: [artifactEntry()],
+      },
+      kid1,
+      seed1,
+    )
+    const amLegacy = signManifest(
+      {
+        issuer: ISSUER,
+        series: SERIES,
+        version: 1,
+        released_at: '2025-03-01T00:00:00Z',
+        artifacts: [artifactEntry()],
+      },
+      kid1,
+      seed1,
+    )
+
+    it('true for manifest_version N -> N+1', () => {
+      expect(checkArtifactContinuity(parse(am1), parse(am2))).toBe(true)
+    })
+
+    it('false on regression (rollback)', () => {
+      expect(checkArtifactContinuity(parse(am2), parse(am1))).toBe(false)
+    })
+
+    it('false on a version gap', () => {
+      expect(checkArtifactContinuity(parse(am1), parse(am3))).toBe(false)
+    })
+
+    it('false on issuer mismatch', () => {
+      const evil = signManifest(
+        {
+          issuer: 'evil.example.com',
+          series: SERIES,
+          version: 2,
+          manifest_version: 2,
+          released_at: '2025-04-01T00:00:00Z',
+          artifacts: [artifactEntry()],
+        },
+        kid1,
+        seed1,
+      )
+      expect(checkArtifactContinuity(parse(am1), parse(evil))).toBe(false)
+    })
+
+    it('false on series mismatch', () => {
+      const other = signManifest(
+        {
+          issuer: ISSUER,
+          series: `${ISSUER}/works/OTHER-002`,
+          version: 2,
+          manifest_version: 2,
+          released_at: '2025-04-01T00:00:00Z',
+          artifacts: [artifactEntry()],
+        },
+        kid1,
+        seed1,
+      )
+      expect(checkArtifactContinuity(parse(am1), parse(other))).toBe(false)
+    })
+
+    it('true when trusted is legacy (no manifest_version)', () => {
+      expect(checkArtifactContinuity(parse(amLegacy), parse(am2))).toBe(true)
+    })
+
+    it('true when candidate is legacy (no manifest_version)', () => {
+      expect(checkArtifactContinuity(parse(am1), parse(amLegacy))).toBe(true)
     })
   })
 })

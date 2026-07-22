@@ -48,6 +48,11 @@ export function trustStore(dir: string) {
     manifests: d.manifests as Record<string, JsonObject>,
     provenance: d.provenance as Record<string, string>,
     chains: (d.chains ?? {}) as Record<string, JsonObject[]>,
+    // G2/G3 (attest-versioning.md rev 4, group 31 only) — keyed by issuer
+    // and then work.artifact_series; every other leaf keeps these at the
+    // empty-object default, same convention as chains.
+    artifact_manifests: (d.artifact_manifests ?? {}) as Record<string, Record<string, JsonObject>>,
+    artifact_manifest_chains: (d.artifact_manifest_chains ?? {}) as Record<string, Record<string, JsonObject[]>>,
   }
 }
 export function revocationView(dir: string): unknown[] | null {

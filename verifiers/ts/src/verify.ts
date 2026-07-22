@@ -3,6 +3,7 @@ import { bytesToHex } from '@noble/curves/utils.js'
 import { JsonObject, JsonValue, canonicalBytes, dumps, CanonError, loadsStrict } from './canon.js'
 import {
   TrustStore, findKey, withinValidity, chainContinuous, MAX_MANIFEST_KEYS, hasActiveEdOnlySibling,
+  artifactChainContinuous, verifyArtifactManifest,
 } from './manifests.js'
 import { verifyStrict, Ed25519LengthError } from './ed25519.js'
 import { verifyStrict as verifyMldsaStrict, ML_DSA_65_ALG } from './mldsa.js'
@@ -473,6 +474,39 @@ export function verify(
       const used = trustStore.manifests[issuerId]
       const tailMatchesUsed = used != null && dumps(chain[chain.length - 1]!) === dumps(used)
       if (!chainContinuous(chain) || !tailMatchesUsed) trust = 'unverified_rotation'
+    }
+  }
+
+  // --- G2/G3 manifest currency (attest-versioning.md rev 4; v0.1 §7.2/§7.3
+  // amendment): resolve currency state per (issuer, series), authenticate the
+  // pinned manifest and every chain member before touching any currency
+  // metadata, then warn legacy manifests or evaluate continuity.
+  const workBlock = obj(payload['work'])
+  const artifactSeries = workBlock ? workBlock['artifact_series'] : undefined
+  if (typeof issuerId === 'string' && typeof artifactSeries === 'string') {
+    const candidateArtifactManifest = trustStore.artifact_manifests?.[issuerId]?.[artifactSeries]
+    if (candidateArtifactManifest != null) {
+      const amChain = trustStore.artifact_manifest_chains?.[issuerId]?.[artifactSeries]
+      const members = [candidateArtifactManifest, ...(amChain ?? [])]
+      const authenticated = issuerManifestForTransparency != null && members.every(
+        member => verifyArtifactManifest(member, issuerManifestForTransparency!),
+      )
+      if (candidateArtifactManifest['issuer'] !== issuerId) {
+        warnings.push(WARN.ARTIFACT_MANIFEST_ISSUER_MISMATCH)
+      } else if (!authenticated) {
+        warnings.push(WARN.ARTIFACT_MANIFEST_UNAUTHENTICATED)
+      } else {
+        if (members.some(member => !('manifest_version' in member))) {
+          // Any legacy member makes currency non-evaluable: warn and SKIP
+          // both continuity and the tail compare — a legacy manifest must
+          // never trigger the currency downgrade (v0.1 §7.3, warn-only;
+          // round-2 review residual). Mirrors verify.py.
+          warnings.push(WARN.ARTIFACT_MANIFEST_UNVERSIONED)
+        } else if (amChain && amChain.length > 0) {
+          const tailMatchesPinned = dumps(amChain[amChain.length - 1]!) === dumps(candidateArtifactManifest)
+          if (!artifactChainContinuous(amChain) || !tailMatchesPinned) trust = 'unverified_rotation'
+        }
+      }
     }
   }
 

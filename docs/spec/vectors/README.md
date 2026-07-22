@@ -1,6 +1,6 @@
 # attest conformance vectors
 
-This directory holds the attest conformance suite: fixed, language-neutral test cases against which any implementation can be checked. Groups `01`–`25` and `29-limits` (45 leaves) are **v0.1** conformance, against [`docs/spec/attest-v0.1.md`](../attest-v0.1.md) — `29-limits` was added by the G1 normative-ceilings amendment (attest-versioning.md §5, 2026-07-22), which binds v0.1 as well as v0.2. `26-hybrid`, `27-valid-to-absent`, `28-transparency` and `30-mixed-keyset` cover **v0.2**, against [`docs/spec/attest-v0.2.md`](../attest-v0.2.md). A v0.1-only verifier must reject v0.2 envelopes and is therefore measured against the v0.1 subset (45 leaves), not all 70. Each vector is a leaf directory (identified by containing `expected.json`) holding the raw inputs to feed the verification algorithm and the exact `VerificationResult` a conformant verifier must produce.
+This directory holds the attest conformance suite: fixed, language-neutral test cases against which any implementation can be checked. Groups `01`–`25`, `29-limits`, and `31-manifest-currency` (48 leaves) are **v0.1** conformance, against [`docs/spec/attest-v0.1.md`](../attest-v0.1.md) — `29-limits` was added by the G1 normative-ceilings amendment (attest-versioning.md §5, 2026-07-22), and `31-manifest-currency` by the G2/G3 manifest-currency amendment (attest-versioning.md rev 4, 2026-07-22, v0.1 §7.2/§7.3), both of which bind v0.1 as well as v0.2. `26-hybrid`, `27-valid-to-absent`, `28-transparency` and `30-mixed-keyset` cover **v0.2**, against [`docs/spec/attest-v0.2.md`](../attest-v0.2.md). A v0.1-only verifier must reject v0.2 envelopes and is therefore measured against the v0.1 subset (48 leaves), not all 73. Each vector is a leaf directory (identified by containing `expected.json`) holding the raw inputs to feed the verification algorithm and the exact `VerificationResult` a conformant verifier must produce.
 
 **Normative conformance requirement**: an implementation is attest-conformant iff it produces every vector's expected result. There is no partial conformance — any single mismatch is a conformance failure.
 
@@ -10,7 +10,7 @@ Each leaf directory contains:
 
 - `payload.json` — the receipt payload, for readability (not itself fed to `verify()`; it is embedded inside `envelope.json`).
 - `envelope.json` — the full envelope (`payload` + `signatures` + optional `delivery`), or `envelope.raw.json` (vector 06 only) for a case whose raw bytes intentionally cannot round-trip through a parsed object.
-- `manifests.json` — the trust material: `{"manifests": {...}, "provenance": {...}, "chains": {...}}`, fed straight into the verifier's trust store.
+- `manifests.json` — the trust material: `{"manifests": {...}, "provenance": {...}, "chains": {...}, "artifact_manifests": {...}, "artifact_manifest_chains": {...}}`, fed straight into the verifier's trust store. The last two (group 31 only) are nested by issuer, then `work.artifact_series`.
 - `expected.json` — the spec-intended `VerificationResult`: `signature`, `schema`, `trust`, `revocation`, `binding`, `ok`, plus `errors`/`errors_contains` and `warnings`/`warnings_contains`.
 - optional `disclosure.json` — a buyer-binding disclosure, salt path (`identifier`, `identifier_type`, `salt_b64u`) or challenge path (`nonce_b64u`, `sig_b64u`), for vectors that check §6 step 7.
 - optional `revocation.json` — a single issuer-signed revocation record, fed to the verifier as its revocation view, for vectors that check §6 step 6.
@@ -133,6 +133,18 @@ Checked against [`docs/spec/attest-v0.2.md`](../attest-v0.2.md) §2.3/§13 — a
 | --- | --- | --- |
 | 30a | `mixed-keyset/a-active-ed-sibling-warn` | The resolved issuer manifest declares the hybrid suite AND still holds an Ed25519-only key in state `active` — the receipt verifies clean otherwise, but carries the `mixed_keyset_active_ed_only_sibling` warning. The warning is the entire verifier-side contract: no result field caps a "hybrid strength" classification, since none exists. |
 | 30b | `mixed-keyset/b-migrated-clean` | Same manifest shape, but the Ed25519-only sibling is `retired` (the completed migration ceremony) — no mixed-keyset condition, no warning. |
+
+### 31: manifest currency (G2/G3, attest-versioning.md rev 4; v0.1 §7.2/§7.3 amendment)
+
+Checked against [`docs/spec/attest-v0.1.md`](../attest-v0.1.md) §7.2/§7.3 — artifact manifests gain `manifest_version` (REQUIRED on manifests produced after this revision; absent on a legacy manifest, which stays valid with a warning, eternal verifiability per attest-versioning.md §3); every artifact manifest is authenticated before currency comparison; and a verifier holding persistent trust state MUST NOT accept, for the same (issuer, `artifact_series`) pair, an artifact manifest with `manifest_version` lower than the newest already accepted. Not gated by `attest_version`, so it binds v0.2 implementations too. All five leaves share one receipt and one issuer key manifest; only the artifact-manifest trust material (`manifests.json`'s `artifact_manifests`/`artifact_manifest_chains`, nested by issuer then `work.artifact_series`) differs per leaf.
+
+| Leaf | Name | Checks |
+| --- | --- | --- |
+| 31a | `manifest-currency/a-rollback-rejected` | The trust store's own artifact-manifest chain history already holds `manifest_version: 2`, but the manifest currently PINNED for the series is the OLDER `manifest_version: 1` (a rollback attempt, or a stale re-import) — mirrors vector 14b's key-manifest discontinuity shape: `trust: "unverified_rotation"`, the receipt's own signature otherwise verifies clean. |
+| 31b | `manifest-currency/b-monotone-ok` | Same chain, but the pinned manifest IS the chain tail (`manifest_version: 2`) — no currency violation, `trust` stays at its provenance-derived value. |
+| 31c | `manifest-currency/c-legacy-unversioned-warn` | The pinned artifact manifest predates this amendment (no `manifest_version` at all) — warned (`artifact_manifest_unversioned`), never rejected: `trust` stays at its provenance-derived value, `ok: true`. |
+| 31d | `manifest-currency/d-unauthenticated-ignored` | A signed v1 is followed by an unsigned v2 candidate. The artifact-manifest machinery is skipped: `artifact_manifest_unauthenticated` is the only warning, no currency conclusion is made, and the provenance-derived trust remains unchanged. |
+| 31e | `manifest-currency/e-legacy-transition-warn-only` | A legacy trusted manifest is followed by the first versioned candidate. Currency is not evaluable across the transition: the candidate is accepted, only `artifact_manifest_unversioned` is emitted for the legacy side, and trust is not `unverified_rotation`. |
 
 ## Regeneration
 

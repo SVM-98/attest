@@ -94,6 +94,16 @@ class CliUsageError(Exception):
     """A usage/IO problem this CLI can explain better than the raw exception."""
 
 
+def _manifest_version_arg(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer >= 1") from exc
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be an integer >= 1")
+    return parsed
+
+
 # --- small I/O helpers -------------------------------------------------------
 
 
@@ -264,12 +274,27 @@ def _load_trust_dir(trust_dir: Path) -> verify.TrustStore:
         raise CliUsageError(f"--trust-dir {trust_dir} is not a directory")
 
     by_issuer: dict[str, list[dict[str, Any]]] = {}
+    # G2/G3 (attest-versioning.md rev 4): artifact manifests dropped into the
+    # same --trust-dir are grouped by their own `(issuer, series)` pair — which the
+    # spec requires to equal a receipt's `work.artifact_series` (v0.1 §7.2) —
+    # so `TrustStore.artifact_manifests`/`artifact_manifest_chains` end up
+    # keyed exactly the way `verify()` looks them up. Distinguished from key
+    # manifests by the absence of `keys[]` (a key manifest always carries it;
+    # an artifact manifest never does).
+    by_issuer_series: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for path in sorted(trust_dir.glob("*.json")):
         manifest = _read_json(path)
-        issuer = manifest.get("issuer") if isinstance(manifest, dict) else None
+        if not isinstance(manifest, dict):
+            continue
+        issuer = manifest.get("issuer")
         if not isinstance(issuer, str):
             continue
-        by_issuer.setdefault(issuer, []).append(manifest)
+        if "keys" in manifest:
+            by_issuer.setdefault(issuer, []).append(manifest)
+            continue
+        series = manifest.get("series")
+        if isinstance(series, str):
+            by_issuer_series.setdefault((issuer, series), []).append(manifest)
 
     manifests_map: dict[str, dict[str, Any]] = {}
     provenance: dict[str, str] = {}
@@ -280,7 +305,20 @@ def _load_trust_dir(trust_dir: Path) -> verify.TrustStore:
         provenance[issuer] = _PROVENANCE_BUNDLE
         chains[issuer] = ordered
 
-    return verify.TrustStore(manifests=manifests_map, provenance=provenance, chains=chains)
+    artifact_manifests_map: dict[str, dict[str, dict[str, Any]]] = {}
+    artifact_manifest_chains: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    for (issuer, series), am_versions in by_issuer_series.items():
+        am_ordered = sorted(am_versions, key=lambda m: m.get("manifest_version", 0))
+        artifact_manifests_map.setdefault(issuer, {})[series] = am_ordered[-1]
+        artifact_manifest_chains.setdefault(issuer, {})[series] = am_ordered
+
+    return verify.TrustStore(
+        manifests=manifests_map,
+        provenance=provenance,
+        chains=chains,
+        artifact_manifests=artifact_manifests_map,
+        artifact_manifest_chains=artifact_manifest_chains,
+    )
 
 
 def _safe_name(value: str) -> str:
@@ -739,6 +777,7 @@ def _cmd_manifest_artifacts(args: argparse.Namespace) -> int:
         artifacts,
         signing_kp,
         args.signing_kid,
+        manifest_version=args.manifest_version,
     )
     if not manifests.verify_artifact_manifest(manifest, key_manifest):
         raise CliUsageError(
@@ -752,6 +791,7 @@ def _cmd_manifest_artifacts(args: argparse.Namespace) -> int:
             "issuer": args.issuer,
             "series": args.series,
             "version": args.version,
+            "manifest_version": args.manifest_version,
         }
     )
     return EXIT_OK
@@ -1638,6 +1678,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--issuer", required=True)
     p.add_argument("--series", required=True)
     p.add_argument("--version", required=True, type=int)
+    p.add_argument(
+        "--manifest-version",
+        required=True,
+        type=_manifest_version_arg,
+        help="G2/G3 currency counter (attest-versioning.md rev 4) — distinct from --version "
+        "(the series' own release number); REQUIRED on every manifest built going forward",
+    )
     p.add_argument("--released-at", required=True)
     p.add_argument("--artifacts", required=True, type=Path, help="JSON file: array of artifacts")
     p.add_argument("--signing-kid", required=True)

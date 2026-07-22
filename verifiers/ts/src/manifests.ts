@@ -17,6 +17,13 @@ export interface TrustStore {
   manifests: Record<string, JsonObject>
   provenance: Record<string, string>
   chains?: Record<string, JsonObject[]>
+  // G2/G3 manifest currency (attest-versioning.md rev 4; v0.1 §7.2/§7.3
+  // amendment) — the artifact-manifest analog of manifests/chains above,
+  // scoped as issuer -> work.artifact_series -> manifest/history. Both
+  // optional and backward-compatible (mirrors chains?): absent means zero
+  // behavior change.
+  artifact_manifests?: Record<string, Record<string, JsonObject>>
+  artifact_manifest_chains?: Record<string, Record<string, JsonObject[]>>
 }
 
 function asObject(v: JsonValue | undefined): JsonObject | null {
@@ -135,6 +142,36 @@ export function chainContinuous(chain: JsonObject[]): boolean {
   return true
 }
 
+// G3 currency rule (attest-versioning.md rev 4; v0.1 §7.2/§7.3 amendment):
+// true iff `candidate` is currency-conformant for `trusted` on the same
+// issuer/series. Currency is evaluable only when both manifest_version values
+// are bigint >= 1: a regression or an advancing gap is discontinuous. Legacy
+// manifests are warn-only and return true. Mirrors manifests.py.
+//
+// Does NOT verify self-consistency or signer-trust of either manifest
+// (unlike checkContinuity, which can call verifyKeyManifest on both sides
+// with no external input) — verifyArtifactManifest needs a resolving key
+// manifest this function's (trusted, candidate) contract has no room for, so
+// that stays the caller's job. Callers MUST authenticate both sides with
+// verifyArtifactManifest before calling this metadata-only predicate. Fails
+// closed on issuer/series mismatch; a legacy or invalid version is not
+// currency-evaluable and returns true.
+export function checkArtifactContinuity(trusted: JsonObject, candidate: JsonObject): boolean {
+  if (trusted['issuer'] !== candidate['issuer']) return false
+  if (trusted['series'] !== candidate['series']) return false
+  const tv = trusted['manifest_version'], cv = candidate['manifest_version']
+  if (typeof tv !== 'bigint' || tv < 1n || typeof cv !== 'bigint' || cv < 1n) return true
+  return cv >= tv && cv <= tv + 1n
+}
+
+export function artifactChainContinuous(chain: JsonObject[]): boolean {
+  if (chain.length < 2) return true
+  for (let i = 0; i < chain.length - 1; i++) {
+    if (!checkArtifactContinuity(chain[i]!, chain[i + 1]!)) return false
+  }
+  return true
+}
+
 // AND rule (v0.2, mirrors verifyKeyManifest/manifests.py's
 // verify_artifact_manifest): if the signer's keyManifest entry is hybrid
 // (carries pub_ml_dsa_65), manifest_signature MUST also carry a valid
@@ -144,6 +181,10 @@ export function chainContinuous(chain: JsonObject[]): boolean {
 // byte-for-byte (Stage 2 Task 6/8 sibling-patch parity).
 export function verifyArtifactManifest(manifest: JsonObject, keyManifest: JsonObject): boolean {
   try {
+    const manifestVersion = manifest['manifest_version']
+    if ('manifest_version' in manifest && (typeof manifestVersion !== 'bigint' || manifestVersion < 1n)) {
+      return false
+    }
     // G1 ceiling: fail closed if artifacts[] exceeds MAX_ARTIFACT_ENTRIES,
     // mirroring verifyKeyManifest's MAX_MANIFEST_KEYS check.
     const artifactsForCeiling = manifest['artifacts']

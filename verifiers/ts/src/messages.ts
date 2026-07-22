@@ -95,6 +95,11 @@ export const WARN = {
   // G6 mixed-keyset prohibition (v0.2 §2.3/§13 amendment) — the wire warning
   // string, exact and cross-language (Python parity: verify.py).
   MIXED_KEYSET_ACTIVE_ED_ONLY_SIBLING: 'mixed_keyset_active_ed_only_sibling',
+  // G2/G3 manifest currency (attest-versioning.md rev 4; v0.1 §7.2/§7.3
+  // amendment) — the wire warning string, exact and cross-language.
+  ARTIFACT_MANIFEST_UNVERSIONED: 'artifact_manifest_unversioned',
+  ARTIFACT_MANIFEST_UNAUTHENTICATED: 'artifact_manifest_unauthenticated',
+  ARTIFACT_MANIFEST_ISSUER_MISMATCH: 'artifact_manifest_issuer_mismatch',
 } as const
 
 export const unsupportedAttestVersion = (v: unknown) => `unsupported attest_version: ${pyRepr(v)}`

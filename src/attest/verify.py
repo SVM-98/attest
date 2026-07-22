@@ -94,6 +94,14 @@ _WARN_ROTATION_CHAIN_REQUIRED = "corroboration_requires_rotation_chain"
 # string, exact and cross-language (TS parity: messages.ts).
 _WARN_MIXED_KEYSET_ACTIVE_ED_ONLY_SIBLING = "mixed_keyset_active_ed_only_sibling"
 
+# G2/G3 manifest currency (attest-versioning.md rev 4; v0.1 §7.2/§7.3
+# amendment) — the wire warning string for a legacy (no `manifest_version`)
+# artifact manifest resolved for the receipt's `work.artifact_series`, exact
+# and cross-language (TS parity: messages.ts).
+_WARN_ARTIFACT_MANIFEST_UNVERSIONED = "artifact_manifest_unversioned"
+_WARN_ARTIFACT_MANIFEST_UNAUTHENTICATED = "artifact_manifest_unauthenticated"
+_WARN_ARTIFACT_MANIFEST_ISSUER_MISMATCH = "artifact_manifest_issuer_mismatch"
+
 # This outer cap must COVER everything the downstream evaluators' own inner
 # caps accept, or evaluator-valid evidence gets falsely rejected here.
 # Worst-case legitimate bundle, derived from those inner caps: checkpoint +
@@ -129,6 +137,15 @@ class TrustStore:
     manifests: dict[str, dict[str, Any]]  # issuer_id -> key manifest
     provenance: dict[str, str]  # issuer_id -> "tls" | "bundle"
     chains: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    # G2/G3 (attest-versioning.md rev 4; v0.1 §7.2/§7.3 amendment) — the
+    # artifact-manifest analog of `manifests`/`chains` above, scoped by the
+    # receipt issuer and `work.artifact_series`: issuer_id -> series ->
+    # manifest/history. This prevents one issuer's series name from affecting
+    # another issuer's currency state.
+    artifact_manifests: dict[str, dict[str, dict[str, Any]]] = field(default_factory=dict)
+    artifact_manifest_chains: dict[str, dict[str, list[dict[str, Any]]]] = field(
+        default_factory=dict
+    )
 
 
 @dataclass(frozen=True)
@@ -255,6 +272,17 @@ def _chain_continuous(chain: list[dict[str, Any]]) -> bool:
     if len(chain) < 2:
         return True
     return all(manifests.check_continuity(chain[i], chain[i + 1]) for i in range(len(chain) - 1))
+
+
+def _artifact_chain_continuous(chain: list[dict[str, Any]]) -> bool:
+    """True iff every consecutive pair in `chain` passes
+    `manifests.check_artifact_continuity` — the artifact-manifest analog of
+    `_chain_continuous` (G2/G3, attest-versioning.md rev 4)."""
+    if len(chain) < 2:
+        return True
+    return all(
+        manifests.check_artifact_continuity(chain[i], chain[i + 1]) for i in range(len(chain) - 1)
+    )
 
 
 def _rotation_chain_verified(
@@ -888,6 +916,46 @@ def verify(
             # nothing about it — treat it as a discontinuous rotation (2026-07-13
             # review, finding 8).
             trust = _TRUST_UNVERIFIED_ROTATION
+
+    # --- G2/G3 manifest currency (attest-versioning.md rev 4; v0.1 §7.2/§7.3
+    # amendment): resolve currency state per (issuer, series), authenticate
+    # the pinned manifest and every chain member before touching any currency
+    # metadata, then warn legacy manifests or evaluate continuity.
+    work_block = payload.get("work")
+    artifact_series = work_block.get("artifact_series") if isinstance(work_block, dict) else None
+    if isinstance(issuer_id, str) and isinstance(artifact_series, str):
+        issuer_artifact_manifests = trust_store.artifact_manifests.get(issuer_id, {})
+        candidate_artifact_manifest = issuer_artifact_manifests.get(artifact_series)
+        if isinstance(candidate_artifact_manifest, dict):
+            am_chain = trust_store.artifact_manifest_chains.get(issuer_id, {}).get(artifact_series)
+            members = [candidate_artifact_manifest]
+            if am_chain:
+                members.extend(am_chain)
+            authenticated = (
+                isinstance(issuer_manifest, dict)
+                and all(
+                    manifests.verify_artifact_manifest(member, issuer_manifest)
+                    for member in members
+                    if isinstance(member, dict)
+                )
+                and not any(not isinstance(member, dict) for member in members)
+            )
+            if candidate_artifact_manifest.get("issuer") != issuer_id:
+                warnings.append(_WARN_ARTIFACT_MANIFEST_ISSUER_MISMATCH)
+            elif not authenticated:
+                warnings.append(_WARN_ARTIFACT_MANIFEST_UNAUTHENTICATED)
+            else:
+                if any("manifest_version" not in member for member in members):
+                    # Any legacy member makes currency non-evaluable: warn and
+                    # SKIP both continuity and the tail compare — a legacy
+                    # manifest must never trigger the currency downgrade
+                    # (v0.1 §7.3, warn-only; round-2 review residual).
+                    warnings.append(_WARN_ARTIFACT_MANIFEST_UNVERSIONED)
+                elif am_chain and (
+                    not _artifact_chain_continuous(am_chain)
+                    or am_chain[-1] != candidate_artifact_manifest
+                ):
+                    trust = _TRUST_UNVERIFIED_ROTATION
 
     # --- G1 normative ceiling, hoisted (attest-versioning.md §5 amendment;
     # v0.1 §11.3): the issuer manifest's `keys[]` array MUST NOT exceed

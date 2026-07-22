@@ -254,6 +254,8 @@ def run_demo(workspace: Path) -> dict[str, Any]:
             ARTIFACT_SERIES,
             "--version",
             "1",
+            "--manifest-version",
+            "1",
             "--released-at",
             KEY_VALID_FROM,
             "--artifacts",
