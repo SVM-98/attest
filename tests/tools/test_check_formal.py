@@ -789,19 +789,24 @@ def assert_ci_formal_job_executes_matrix(workflow: Path | None = None) -> None:
     THREAT MODEL (declared boundary, settled in branch-review round 5): this
     is a static guard against ACCIDENTAL drift — a renamed job, an edited or
     hard-coded run step, a decoupled matrix, an inadvertently ``if:``-gated
-    job, a commented-out command line. It does NOT — and no in-repo static
-    test can — prove that CI will *execute* anything against an adversary
-    with write access to the repository: such an adversary can remove this
-    very test in the same commit. Execution enforcement against tampering
-    belongs to repository configuration (branch protection marking the
-    ``formal`` shards as required status checks), not to repo content.
+    job, a commented-out command line, a soft-failing step. It does NOT — and
+    no in-repo static test can — prove that CI will *execute* anything
+    against an adversary with write access to the repository: such an
+    adversary can remove this very test in the same commit. Execution
+    enforcement against tampering belongs to repository configuration AND
+    process: branch protection marking the ``formal`` shards as required
+    status checks, plus mandatory review of workflow changes — required
+    checks alone do not help if a writer keeps the check names and no-ops
+    their commands.
 
     Within that boundary the check is SEMANTIC (rounds 2-4 defeated three
     line-based scanners): the workflow is parsed with a real YAML parser and
-    only ``jobs.formal.steps[].run`` values count, with shell-comment lines
-    stripped from each script. The job and its checker steps must carry no
-    ``if:`` gate; at least one step must invoke the checker; every invoking
-    step must carry both matrix placeholders.
+    only ``jobs.formal.steps[].run`` values count, with shell comments (full
+    lines and trailing ``#`` fragments) stripped from each script. The job
+    and its checker steps must carry no ``if:`` gate and no
+    ``continue-on-error``; the checker scripts must contain no ``||``
+    fallback; at least one step must invoke the checker; every invoking step
+    must carry both matrix placeholders.
     """
     workflow = workflow or CI_WORKFLOW
     doc = yaml.safe_load(workflow.read_text(encoding="utf-8"))
@@ -814,11 +819,20 @@ def assert_ci_formal_job_executes_matrix(workflow: Path | None = None) -> None:
         "formal job carries an if: gate — accidental skip conditions are not "
         "allowed on the proof job"
     )
+    assert "continue-on-error" not in formal, (
+        "formal job carries continue-on-error — failed proofs must never produce a green gate"
+    )
     live_runs: list[tuple[dict[str, object], str]] = []
     for step in steps:
         if isinstance(step, dict) and isinstance(step.get("run"), str):
+            # Strip full-line comments AND trailing ` #` fragments: a command
+            # surviving only inside a comment must never satisfy the guard.
+            # Crude for pathological quoting, but no legitimate checker
+            # invocation here contains '#'; fail direction stays loud.
             script = "\n".join(
-                line for line in step["run"].splitlines() if not line.lstrip().startswith("#")
+                line.split(" #", 1)[0]
+                for line in step["run"].splitlines()
+                if not line.lstrip().startswith("#")
             )
             live_runs.append((step, script))
     checker_runs = [
@@ -829,6 +843,14 @@ def assert_ci_formal_job_executes_matrix(workflow: Path | None = None) -> None:
         assert "if" not in step, (
             "formal job's checker step carries an if: gate — accidental skip "
             "conditions are not allowed on the proof step"
+        )
+        assert "continue-on-error" not in step, (
+            "formal job's checker step carries continue-on-error — failed "
+            "proofs must never produce a green gate"
+        )
+        assert "||" not in script, (
+            "formal job's checker script contains a '||' fallback — a failing "
+            "checker must fail the step: " + script
         )
         assert (
             '--only "${{ matrix.lemmas }}"' in script
@@ -1057,6 +1079,65 @@ def test_ci_formal_job_rejects_command_only_in_shell_comment(tmp_path: Path) -> 
     workflow.write_text(poisoned, encoding="utf-8")
 
     with pytest.raises(AssertionError, match=r"check_formal\.py"):
+        assert_ci_formal_job_executes_matrix(workflow)
+
+
+def test_ci_formal_job_rejects_command_in_trailing_shell_comment(tmp_path: Path) -> None:
+    """Round-6 review probe (I7): the expected command surviving only as a
+    TRAILING shell comment after a live echo must fail — trailing ``#``
+    fragments are stripped too, not just full comment lines. The probe needs
+    a ``run: |`` BLOCK scalar: in a plain scalar ``#`` already starts a YAML
+    comment and never reaches the run value."""
+    source = CI_WORKFLOW.read_text(encoding="utf-8")
+    expected = (
+        "run: python3 tools/check_formal.py formal/attest.spthy "
+        '--only "${{ matrix.lemmas }}" --timeout ${{ matrix.checker_timeout }}'
+    )
+    assert expected in source
+    poisoned = source.replace(
+        expected,
+        'run: |\n          echo "disabled" # ' + expected.removeprefix("run: "),
+        1,
+    )
+    workflow = tmp_path / "ci.yml"
+    workflow.write_text(poisoned, encoding="utf-8")
+
+    with pytest.raises(AssertionError, match=r"check_formal\.py"):
+        assert_ci_formal_job_executes_matrix(workflow)
+
+
+def test_ci_formal_job_rejects_continue_on_error(tmp_path: Path) -> None:
+    """Round-6 review probe (I8): ``continue-on-error: true`` on the formal
+    job would let failed proofs produce a green gate — must fail loudly."""
+    source = CI_WORKFLOW.read_text(encoding="utf-8")
+    assert "\n  formal:\n" in source
+    poisoned = source.replace(
+        "\n  formal:\n",
+        "\n  formal:\n    continue-on-error: true\n",
+        1,
+    )
+    workflow = tmp_path / "ci.yml"
+    workflow.write_text(poisoned, encoding="utf-8")
+
+    with pytest.raises(AssertionError, match=r"continue-on-error"):
+        assert_ci_formal_job_executes_matrix(workflow)
+
+
+def test_ci_formal_job_rejects_or_true_fallback(tmp_path: Path) -> None:
+    """Round-6 review probe (I8): a ``|| true`` suffix on the checker command
+    would swallow its exit code — no ``||`` fallback is allowed in the
+    checker script."""
+    source = CI_WORKFLOW.read_text(encoding="utf-8")
+    expected = (
+        "run: python3 tools/check_formal.py formal/attest.spthy "
+        '--only "${{ matrix.lemmas }}" --timeout ${{ matrix.checker_timeout }}'
+    )
+    assert expected in source
+    poisoned = source.replace(expected, expected + " || true", 1)
+    workflow = tmp_path / "ci.yml"
+    workflow.write_text(poisoned, encoding="utf-8")
+
+    with pytest.raises(AssertionError, match=r"\|\|"):
         assert_ci_formal_job_executes_matrix(workflow)
 
 
