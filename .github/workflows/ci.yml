@@ -107,7 +107,11 @@ jobs:
   # Shard split rationale (measured local prover costs, task-6 ledger):
   # no_downgrade_revocation_allhybrid (~829s) and acceptance_issuer_signed
   # (~602s) are scheduled long-runners and get their own shards; the
-  # revocation chain is the next-heaviest cluster; `rest` is every remaining
+  # revocation chain is the next-heaviest cluster and is split in TWO —
+  # one tamarin process proving all 14 revocation lemmas peaked at 5.7 GB
+  # locally and was twice OOM-killed on hosted runners at the same
+  # progression point ("runner has received a shutdown signal", 2026-07-22);
+  # `rest` is every remaining
   # CONTRACT lemma. The checker gets a per-shard timeout 300 seconds below
   # the runner timeout, so it terminates the prover and reports its own
   # fail-closed error before the runner hard-kill; timeout-minutes remains the
@@ -128,10 +132,14 @@ jobs:
             timeout: 120
             checker_timeout: 6900
             lemmas: "acceptance_issuer_signed"
-          - shard: revocation
+          - shard: revocation-core
             timeout: 90
             checker_timeout: 5100
-            lemmas: "sanity_revocation_honored,sanity_none_ignored,sanity_issued_receipt_revoked,reach_refund_window_honored,reach_revocation_out_of_window,rev_record_authentic,revocation_auth_soundness,revocation_effectiveness,irrevocability_none,refund_window_bound,revoked_view_never_ok,attack_tofu_revocation_forgery,sanity_hybrid_revocation_admitted,rev_pq_sig_source"
+            lemmas: "rev_record_authentic,revocation_auth_soundness,revoked_view_never_ok,attack_tofu_revocation_forgery"
+          - shard: revocation-classes
+            timeout: 90
+            checker_timeout: 5100
+            lemmas: "sanity_revocation_honored,sanity_none_ignored,sanity_issued_receipt_revoked,reach_refund_window_honored,reach_revocation_out_of_window,revocation_effectiveness,irrevocability_none,refund_window_bound,sanity_hybrid_revocation_admitted,rev_pq_sig_source"
           - shard: rest
             timeout: 90
             checker_timeout: 5100
