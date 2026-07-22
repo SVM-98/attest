@@ -784,32 +784,58 @@ def ci_formal_job_block(workflow: Path | None = None) -> str:
 
 
 def assert_ci_formal_job_executes_matrix(workflow: Path | None = None) -> None:
-    """Assert the formal job runs the checker for its actual matrix entry.
+    """Assert the formal job is configured to run the checker on its matrix.
 
-    SEMANTIC check (rounds 2-4 of the branch review defeated three successive
-    line-based scanners with comment-, env-, and nested-``run:``-hiding): the
-    workflow is parsed with a real YAML parser and only ``jobs.formal.steps[]
-    .run`` values count. At least one step must invoke the checker, and every
-    step that invokes it must carry both matrix placeholders.
+    THREAT MODEL (declared boundary, settled in branch-review round 5): this
+    is a static guard against ACCIDENTAL drift — a renamed job, an edited or
+    hard-coded run step, a decoupled matrix, an inadvertently ``if:``-gated
+    job, a commented-out command line. It does NOT — and no in-repo static
+    test can — prove that CI will *execute* anything against an adversary
+    with write access to the repository: such an adversary can remove this
+    very test in the same commit. Execution enforcement against tampering
+    belongs to repository configuration (branch protection marking the
+    ``formal`` shards as required status checks), not to repo content.
+
+    Within that boundary the check is SEMANTIC (rounds 2-4 defeated three
+    line-based scanners): the workflow is parsed with a real YAML parser and
+    only ``jobs.formal.steps[].run`` values count, with shell-comment lines
+    stripped from each script. The job and its checker steps must carry no
+    ``if:`` gate; at least one step must invoke the checker; every invoking
+    step must carry both matrix placeholders.
     """
     workflow = workflow or CI_WORKFLOW
     doc = yaml.safe_load(workflow.read_text(encoding="utf-8"))
     try:
-        steps = doc["jobs"]["formal"]["steps"]
+        formal = doc["jobs"]["formal"]
+        steps = formal["steps"]
     except (KeyError, TypeError) as exc:
         raise AssertionError(f"formal job with steps absent from {workflow}: {exc!r}") from None
-    runs = [
-        step["run"] for step in steps if isinstance(step, dict) and isinstance(step.get("run"), str)
+    assert "if" not in formal, (
+        "formal job carries an if: gate — accidental skip conditions are not "
+        "allowed on the proof job"
+    )
+    live_runs: list[tuple[dict[str, object], str]] = []
+    for step in steps:
+        if isinstance(step, dict) and isinstance(step.get("run"), str):
+            script = "\n".join(
+                line for line in step["run"].splitlines() if not line.lstrip().startswith("#")
+            )
+            live_runs.append((step, script))
+    checker_runs = [
+        (step, script) for step, script in live_runs if "tools/check_formal.py" in script
     ]
-    checker_runs = [command for command in runs if "tools/check_formal.py" in command]
-    assert checker_runs, "formal job has no run step invoking tools/check_formal.py"
-    for command in checker_runs:
+    assert checker_runs, "formal job has no live run step invoking tools/check_formal.py"
+    for step, script in checker_runs:
+        assert "if" not in step, (
+            "formal job's checker step carries an if: gate — accidental skip "
+            "conditions are not allowed on the proof step"
+        )
         assert (
-            '--only "${{ matrix.lemmas }}"' in command
-            and "--timeout ${{ matrix.checker_timeout }}" in command
+            '--only "${{ matrix.lemmas }}"' in script
+            and "--timeout ${{ matrix.checker_timeout }}" in script
         ), (
             "formal job's run step does not execute the matrix entries "
-            '(--only "${{ matrix.lemmas }}" / --timeout ${{ matrix.checker_timeout }}): ' + command
+            '(--only "${{ matrix.lemmas }}" / --timeout ${{ matrix.checker_timeout }}): ' + script
         )
 
 
@@ -983,6 +1009,48 @@ def test_ci_formal_job_rejects_disabled_step_with_command_in_env(tmp_path: Path)
         "env:\n          UNUSED_NOTE: >-\n            "
         + expected
         + '\n        run: echo "formal checker disabled"',
+        1,
+    )
+    workflow = tmp_path / "ci.yml"
+    workflow.write_text(poisoned, encoding="utf-8")
+
+    with pytest.raises(AssertionError, match=r"check_formal\.py"):
+        assert_ci_formal_job_executes_matrix(workflow)
+
+
+def test_ci_formal_job_rejects_if_gated_job(tmp_path: Path) -> None:
+    """Round-5 review probe: an ``if:`` gate on the formal job (e.g. only on
+    workflow_dispatch, which push/PR triggers never fire) silently skips every
+    proof. Accidental gating must fail loudly."""
+    source = CI_WORKFLOW.read_text(encoding="utf-8")
+    assert "\n  formal:\n" in source
+    poisoned = source.replace(
+        "\n  formal:\n",
+        "\n  formal:\n    if: github.event_name == 'workflow_dispatch'\n",
+        1,
+    )
+    workflow = tmp_path / "ci.yml"
+    workflow.write_text(poisoned, encoding="utf-8")
+
+    with pytest.raises(AssertionError, match=r"if: gate"):
+        assert_ci_formal_job_executes_matrix(workflow)
+
+
+def test_ci_formal_job_rejects_command_only_in_shell_comment(tmp_path: Path) -> None:
+    """Round-5 review probe: a ``run: |`` whose only mention of the expected
+    command is a SHELL comment line, followed by a bare echo, must fail —
+    comment lines are stripped from the script before the assertions."""
+    source = CI_WORKFLOW.read_text(encoding="utf-8")
+    expected = (
+        "run: python3 tools/check_formal.py formal/attest.spthy "
+        '--only "${{ matrix.lemmas }}" --timeout ${{ matrix.checker_timeout }}'
+    )
+    assert expected in source
+    poisoned = source.replace(
+        expected,
+        "run: |\n          # "
+        + expected.removeprefix("run: ")
+        + '\n          echo "formal checker disabled"',
         1,
     )
     workflow = tmp_path / "ci.yml"
