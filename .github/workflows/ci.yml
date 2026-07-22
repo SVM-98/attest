@@ -117,6 +117,10 @@ jobs:
   # fail-closed error before the runner hard-kill; timeout-minutes remains the
   # backstop. Never continue-on-error, never || true.
   formal:
+    # Stable check-run name: the auto-generated matrix name embeds timeouts and
+    # the full lemma list and is truncated by GitHub at 100 chars — useless as
+    # a required-status-check context. Branch protection pins these names.
+    name: formal (${{ matrix.shard }})
     runs-on: ubuntu-latest
     strategy:
       # fail-fast off so a red run reports every failing shard, not only the
