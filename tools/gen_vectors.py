@@ -421,6 +421,8 @@ def _hex_proof(proof: list[bytes]) -> list[str]:
 def _trust_material(
     *issuer_manifest_provenance: tuple[str, dict[str, Any], str],
     chains: dict[str, list[dict[str, Any]]] | None = None,
+    artifact_manifests: dict[str, dict[str, dict[str, Any]]] | None = None,
+    artifact_manifest_chains: dict[str, dict[str, list[dict[str, Any]]]] | None = None,
 ) -> dict[str, Any]:
     """Assemble a `manifests.json` payload from `(issuer_id, manifest, provenance)` triples.
 
@@ -430,11 +432,22 @@ def _trust_material(
     ...]}`, oldest first, ending with the same manifest passed under
     `manifests` for that issuer. Only vectors 14/14b populate it; every other
     vector keeps the Task-10 default of an empty `chains` object.
+
+    `artifact_manifests`/`artifact_manifest_chains` (G2/G3, attest-versioning.md
+    rev 4) are the artifact-manifest analog, keyed by issuer and then
+    `work.artifact_series` — the same shape
+    `verify.TrustStore.artifact_manifests`/`.artifact_manifest_chains` expect.
+    Only vector group 31 populates them;
+    every other vector keeps the empty-object default.
     """
     return {
         "manifests": {issuer: manifest for issuer, manifest, _ in issuer_manifest_provenance},
         "provenance": {issuer: prov for issuer, _, prov in issuer_manifest_provenance},
         "chains": chains if chains is not None else {},
+        "artifact_manifests": artifact_manifests if artifact_manifests is not None else {},
+        "artifact_manifest_chains": (
+            artifact_manifest_chains if artifact_manifest_chains is not None else {}
+        ),
     }
 
 
@@ -2967,6 +2980,194 @@ def gen_30_mixed_keyset() -> None:
     )
 
 
+# --- vector 31: manifest currency (G2/G3, attest-versioning.md rev 4) ------
+
+# `_base_payload_kwargs`'s own default `artifact_series` — reused verbatim so
+# the receipt's `work.artifact_series` matches the artifact manifests' own
+# `series` field below (v0.1 §7.2: "series ... Matches work.artifact_series").
+_CURRENCY_SERIES = f"{ISSUER_ID}/works/EXG-001"
+_CURRENCY_RELEASED_AT_1 = "2025-02-01T00:00:00Z"
+_CURRENCY_RELEASED_AT_2 = "2025-03-01T00:00:00Z"
+
+
+def _currency_artifact_manifest(
+    version: int, manifest_version: int | None, released_at: str
+) -> dict[str, Any]:
+    artifact_entry = {
+        "role": "installer",
+        "platform": "windows-x86_64",
+        "filename": "example-game-1.0-setup.exe",
+        "size_bytes": 734003200,
+        "sha256": ARTIFACT_SHA256,
+    }
+    return manifests.build_artifact_manifest(
+        ISSUER_ID,
+        _CURRENCY_SERIES,
+        version,
+        released_at,
+        [artifact_entry],
+        ISSUER_KP,
+        ISSUER_KID,
+        manifest_version=manifest_version,
+    )
+
+
+def gen_31_manifest_currency() -> None:
+    """G2 (artifact manifest `manifest_version`) + G3 (newest-seen rule),
+    attest-versioning.md rev 4 / v0.1 §7.2-§7.3 amendment. All five leaves
+    share one receipt (the artifact-manifest currency check is independent
+    of the receipt's own signature/schema verdict — only `trust`/`warnings`
+    move) and one issuer key manifest; only the artifact-manifest trust
+    material under `manifests.json` differs per leaf."""
+    key_manifest = _manifest_material(ISSUER_ID, ISSUER_KID, ISSUER_KP)
+    am1 = _currency_artifact_manifest(1, 1, _CURRENCY_RELEASED_AT_1)
+    am2 = _currency_artifact_manifest(2, 2, _CURRENCY_RELEASED_AT_2)
+    assert manifests.check_artifact_continuity(am1, am2) is True
+    assert manifests.check_artifact_continuity(am2, am1) is False
+
+    payload = issue.build_payload(**_base_payload_kwargs())
+    _assert_schema_valid(payload)
+    envelope = issue.issue(payload, ISSUER_KP, ISSUER_KID)
+
+    # (a) rollback-rejected: the trust store's own artifact-manifest chain
+    # history already holds am2, but the manifest currently PINNED for the
+    # series is the OLDER am1 (a rollback attempt, or a stale re-import) —
+    # mirrors vector 14b's key-manifest discontinuity shape, applied to
+    # artifact manifests.
+    trust_a = _trust_material(
+        (ISSUER_ID, key_manifest, "tls"),
+        artifact_manifests={ISSUER_ID: {_CURRENCY_SERIES: am1}},
+        artifact_manifest_chains={ISSUER_ID: {_CURRENCY_SERIES: [am1, am2]}},
+    )
+    expected_a = {
+        "signature": "valid",
+        "schema": "valid",
+        "revocation": "unknown",
+        "binding": "not_checked",
+        "trust": "unverified_rotation",
+        "ok": True,
+        "errors": [],
+        "warnings": [],
+    }
+    write_vector(
+        "31-manifest-currency/a-rollback-rejected",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust_a,
+        expected=expected_a,
+    )
+
+    # (b) monotone-ok: the pinned manifest IS the chain tail (am2) -> normal,
+    # provenance-derived trust; no currency violation.
+    trust_b = _trust_material(
+        (ISSUER_ID, key_manifest, "tls"),
+        artifact_manifests={ISSUER_ID: {_CURRENCY_SERIES: am2}},
+        artifact_manifest_chains={ISSUER_ID: {_CURRENCY_SERIES: [am1, am2]}},
+    )
+    expected_b = {
+        "signature": "valid",
+        "schema": "valid",
+        "revocation": "unknown",
+        "binding": "not_checked",
+        "trust": "verified",
+        "ok": True,
+        "errors": [],
+        "warnings": [],
+    }
+    write_vector(
+        "31-manifest-currency/b-monotone-ok",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust_b,
+        expected=expected_b,
+    )
+
+    # (c) legacy-unversioned-warn: the pinned manifest predates this
+    # amendment (no `manifest_version`) -> warned, never rejected (eternal
+    # verifiability, attest-versioning.md §3).
+    am_legacy = _currency_artifact_manifest(1, None, _CURRENCY_RELEASED_AT_1)
+    assert "manifest_version" not in am_legacy
+    trust_c = _trust_material(
+        (ISSUER_ID, key_manifest, "tls"),
+        artifact_manifests={ISSUER_ID: {_CURRENCY_SERIES: am_legacy}},
+    )
+    expected_c = {
+        "signature": "valid",
+        "schema": "valid",
+        "revocation": "unknown",
+        "binding": "not_checked",
+        "trust": "verified",
+        "ok": True,
+        "errors": [],
+        "warnings": ["artifact_manifest_unversioned"],
+    }
+    write_vector(
+        "31-manifest-currency/c-legacy-unversioned-warn",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust_c,
+        expected=expected_c,
+    )
+
+    # (d) unauthenticated-ignored: a previously valid v1 followed by an
+    # unsigned v2 must not influence currency or trust at all.
+    am2_unsigned = dict(am2)
+    del am2_unsigned["manifest_signature"]
+    trust_d = _trust_material(
+        (ISSUER_ID, key_manifest, "tls"),
+        artifact_manifests={ISSUER_ID: {_CURRENCY_SERIES: am2_unsigned}},
+        artifact_manifest_chains={ISSUER_ID: {_CURRENCY_SERIES: [am1, am2_unsigned]}},
+    )
+    expected_d = {
+        "signature": "valid",
+        "schema": "valid",
+        "revocation": "unknown",
+        "binding": "not_checked",
+        "trust": "verified",
+        "ok": True,
+        "errors": [],
+        "warnings": ["artifact_manifest_unauthenticated"],
+    }
+    write_vector(
+        "31-manifest-currency/d-unauthenticated-ignored",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust_d,
+        expected=expected_d,
+    )
+
+    # (e) legacy-transition-warn-only: the first versioned manifest after a
+    # legacy one is accepted; the legacy member's absence is the only signal.
+    am_first_versioned = _currency_artifact_manifest(2, 1, _CURRENCY_RELEASED_AT_2)
+    trust_e = _trust_material(
+        (ISSUER_ID, key_manifest, "tls"),
+        artifact_manifests={ISSUER_ID: {_CURRENCY_SERIES: am_first_versioned}},
+        artifact_manifest_chains={ISSUER_ID: {_CURRENCY_SERIES: [am_legacy, am_first_versioned]}},
+    )
+    expected_e = {
+        "signature": "valid",
+        "schema": "valid",
+        "revocation": "unknown",
+        "binding": "not_checked",
+        "trust": "verified",
+        "ok": True,
+        "errors": [],
+        "warnings": ["artifact_manifest_unversioned"],
+    }
+    write_vector(
+        "31-manifest-currency/e-legacy-transition-warn-only",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust_e,
+        expected=expected_e,
+    )
+
+
 def main() -> None:
     _clear_leaf_dirs(VECTORS_DIR)
     VECTORS_DIR.mkdir(parents=True, exist_ok=True)
@@ -3001,6 +3202,7 @@ def main() -> None:
     gen_28_transparency()
     gen_29_limits()
     gen_30_mixed_keyset()
+    gen_31_manifest_currency()
     leaf_count = sum(1 for _ in VECTORS_DIR.rglob("expected.json"))
     print(f"generated {leaf_count} vector cases under {VECTORS_DIR}")
 

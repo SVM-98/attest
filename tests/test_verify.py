@@ -33,6 +33,7 @@ from attest import (
 from tests.helpers import make_payload
 
 ISSUER = "store.example.com"
+SERIES = "store.example.com/works/EXG-001"  # matches make_payload()'s default work.artifact_series
 EVIL_ISSUER = "evil.example.com"
 KID = f"{ISSUER}/keys/test#ed25519-1"
 EVIL_KID = f"{EVIL_ISSUER}/keys/test#ed25519-1"
@@ -744,6 +745,158 @@ def test_no_chain_recorded_is_backward_compatible() -> None:
     envelope = issue.issue(make_payload(), KP, KID)
     result = verify.verify(_to_bytes(envelope), trust_store)
     assert result.trust == "verified"
+
+
+# --- trust: artifact manifest currency (G2/G3, attest-versioning.md rev 4) -------
+
+
+def _artifact_manifest(version: int, manifest_version: int | None) -> dict[str, Any]:
+    return manifests.build_artifact_manifest(
+        ISSUER,
+        SERIES,
+        version,
+        "2026-03-01T00:00:00Z",
+        [],
+        KP,
+        KID,
+        manifest_version=manifest_version,
+    )
+
+
+def test_artifact_manifest_no_trust_store_entry_is_zero_behavior_change() -> None:
+    """A TrustStore with no `artifact_manifests` entry for the receipt's series
+    (Task-8-shaped construction, no new kwargs at all) must keep working exactly
+    as before this task."""
+    trust_store = verify.TrustStore(manifests={ISSUER: _key_manifest()}, provenance={ISSUER: "tls"})
+    envelope = issue.issue(make_payload(), KP, KID)
+    result = verify.verify(_to_bytes(envelope), trust_store)
+    assert result.trust == "verified"
+    assert result.warnings == ()
+
+
+def test_artifact_manifest_monotone_chain_keeps_normal_trust() -> None:
+    am1 = _artifact_manifest(1, 1)
+    am2 = _artifact_manifest(2, 2)
+    trust_store = verify.TrustStore(
+        manifests={ISSUER: _key_manifest()},
+        provenance={ISSUER: "tls"},
+        artifact_manifests={ISSUER: {SERIES: am2}},
+        artifact_manifest_chains={ISSUER: {SERIES: [am1, am2]}},
+    )
+    envelope = issue.issue(make_payload(), KP, KID)
+    result = verify.verify(_to_bytes(envelope), trust_store)
+    assert result.trust == "verified"
+    assert result.ok is True
+    assert "artifact_manifest_unversioned" not in result.warnings
+
+
+def test_artifact_manifest_rollback_yields_unverified_rotation() -> None:
+    """The trust store's own artifact-manifest chain history ends at `am2`, but
+    the "currently pinned" manifest handed to `verify()` is the OLDER `am1` — a
+    rollback attempt (or a stale re-import) the verifier already has evidence
+    against. Mirrors `test_rotation_discontinuous_chain_yields_unverified_rotation`
+    for key manifests."""
+    am1 = _artifact_manifest(1, 1)
+    am2 = _artifact_manifest(2, 2)
+    trust_store = verify.TrustStore(
+        manifests={ISSUER: _key_manifest()},
+        provenance={ISSUER: "tls"},
+        artifact_manifests={ISSUER: {SERIES: am1}},
+        artifact_manifest_chains={ISSUER: {SERIES: [am1, am2]}},
+    )
+    envelope = issue.issue(make_payload(), KP, KID)
+    result = verify.verify(_to_bytes(envelope), trust_store)
+    assert result.signature == "valid"
+    assert result.trust == "unverified_rotation"
+
+
+def test_artifact_manifest_missing_manifest_version_warns_legacy() -> None:
+    legacy = _artifact_manifest(1, None)
+    trust_store = verify.TrustStore(
+        manifests={ISSUER: _key_manifest()},
+        provenance={ISSUER: "tls"},
+        artifact_manifests={ISSUER: {SERIES: legacy}},
+    )
+    envelope = issue.issue(make_payload(), KP, KID)
+    result = verify.verify(_to_bytes(envelope), trust_store)
+    assert "artifact_manifest_unversioned" in result.warnings
+    assert result.trust == "verified"
+    assert result.ok is True
+
+
+def test_unauthenticated_artifact_manifest_is_ignored_before_currency() -> None:
+    am1 = _artifact_manifest(1, 1)
+    am2 = _artifact_manifest(2, 2)
+    del am2["manifest_signature"]
+    trust_store = verify.TrustStore(
+        manifests={ISSUER: _key_manifest()},
+        provenance={ISSUER: "tls"},
+        artifact_manifests={ISSUER: {SERIES: am2}},
+        artifact_manifest_chains={ISSUER: {SERIES: [am1, am2]}},
+    )
+    result = verify.verify(_to_bytes(issue.issue(make_payload(), KP, KID)), trust_store)
+    assert result.trust == "verified"
+    assert result.warnings == ("artifact_manifest_unauthenticated",)
+
+
+def test_legacy_chain_transitions_are_warn_only() -> None:
+    versioned = _artifact_manifest(2, 1)
+    legacy = _artifact_manifest(1, None)
+    trust_store = verify.TrustStore(
+        manifests={ISSUER: _key_manifest()},
+        provenance={ISSUER: "tls"},
+        artifact_manifests={ISSUER: {SERIES: versioned}},
+        artifact_manifest_chains={ISSUER: {SERIES: [legacy, versioned]}},
+    )
+    result = verify.verify(_to_bytes(issue.issue(make_payload(), KP, KID)), trust_store)
+    assert result.trust == "verified"
+    assert result.warnings == ("artifact_manifest_unversioned",)
+
+
+def test_legacy_pinned_after_versioned_history_is_warn_only() -> None:
+    # Round-2 residual (review): a LEGACY pinned candidate after versioned
+    # history used to hit the chain-tail-mismatch branch and get the
+    # forbidden currency downgrade. Currency (continuity AND tail compare)
+    # must be skipped entirely when any authenticated member is legacy.
+    versioned = _artifact_manifest(1, 1)
+    legacy = _artifact_manifest(2, None)
+    trust_store = verify.TrustStore(
+        manifests={ISSUER: _key_manifest()},
+        provenance={ISSUER: "tls"},
+        artifact_manifests={ISSUER: {SERIES: legacy}},
+        artifact_manifest_chains={ISSUER: {SERIES: [versioned]}},
+    )
+    result = verify.verify(_to_bytes(issue.issue(make_payload(), KP, KID)), trust_store)
+    assert result.trust == "verified"
+    assert result.warnings == ("artifact_manifest_unversioned",)
+
+
+def test_artifact_currency_is_scoped_to_receipt_issuer_and_series() -> None:
+    am1 = _artifact_manifest(1, 1)
+    am2 = _artifact_manifest(2, 2)
+    other_issuer = "other.example.com"
+    trust_store = verify.TrustStore(
+        manifests={ISSUER: _key_manifest()},
+        provenance={ISSUER: "tls"},
+        artifact_manifests={ISSUER: {SERIES: am2}, other_issuer: {SERIES: am1}},
+        artifact_manifest_chains={ISSUER: {SERIES: [am1, am2]}, other_issuer: {SERIES: [am1, am2]}},
+    )
+    result = verify.verify(_to_bytes(issue.issue(make_payload(), KP, KID)), trust_store)
+    assert result.trust == "verified"
+    assert result.warnings == ()
+
+
+def test_artifact_manifest_issuer_mismatch_is_ignored_with_distinct_warning() -> None:
+    mismatched = _artifact_manifest(1, 1)
+    mismatched["issuer"] = "other.example.com"
+    trust_store = verify.TrustStore(
+        manifests={ISSUER: _key_manifest()},
+        provenance={ISSUER: "tls"},
+        artifact_manifests={ISSUER: {SERIES: mismatched}},
+    )
+    result = verify.verify(_to_bytes(issue.issue(make_payload(), KP, KID)), trust_store)
+    assert result.trust == "verified"
+    assert result.warnings == ("artifact_manifest_issuer_mismatch",)
 
 
 # --- G1 normative ceilings (attest-versioning.md §5 amendment) --------------

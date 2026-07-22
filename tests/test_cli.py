@@ -778,6 +778,8 @@ def test_manifest_artifacts_builds_signed_artifact_manifest(tmp_path: Path) -> N
             f"{ISSUER}/works/EXG-001",
             "--version",
             "1",
+            "--manifest-version",
+            "1",
             "--released-at",
             VALID_FROM,
             "--artifacts",
@@ -796,7 +798,39 @@ def test_manifest_artifacts_builds_signed_artifact_manifest(tmp_path: Path) -> N
 
     key_manifest = json.loads(key_manifest_path.read_text(encoding="utf-8"))
     artifact_manifest = json.loads(out.read_text(encoding="utf-8"))
+    assert artifact_manifest["manifest_version"] == 1
     assert manifests.verify_artifact_manifest(artifact_manifest, key_manifest)
+
+
+def test_manifest_artifacts_rejects_nonpositive_manifest_version(capsys: CapSys) -> None:
+    parser = cli.build_parser()
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args(
+            [
+                "manifest", "artifacts", "--in", "key-manifest.json", "--issuer", ISSUER,
+                "--series", f"{ISSUER}/works/EXG-001", "--version", "1",
+                "--manifest-version", "0", "--released-at", VALID_FROM,
+                "--artifacts", "artifacts.json", "--signing-kid", KID,
+                "--signing-seed", "issuer.seed", "--out", "artifact-manifest.json",
+            ]
+        )
+    assert exc.value.code == 2
+    assert "must be an integer >= 1" in capsys.readouterr().err
+
+
+def test_load_trust_dir_scopes_artifact_chains_by_issuer_and_series(tmp_path: Path) -> None:
+    series = "shared/works/EXG-001"
+    for issuer in (ISSUER, "other.example.com"):
+        (tmp_path / f"{issuer}.artifact.json").write_text(
+            json.dumps({"issuer": issuer, "series": series, "version": 1}), encoding="utf-8"
+        )
+    trust_store = cli._load_trust_dir(tmp_path)
+    assert set(trust_store.artifact_manifests) == {ISSUER, "other.example.com"}
+    assert trust_store.artifact_manifests[ISSUER][series]["issuer"] == ISSUER
+    assert (
+        trust_store.artifact_manifests["other.example.com"][series]["issuer"]
+        == "other.example.com"
+    )
 
 
 def test_manifest_artifacts_hybrid_roundtrips(tmp_path: Path) -> None:
@@ -817,6 +851,8 @@ def test_manifest_artifacts_hybrid_roundtrips(tmp_path: Path) -> None:
             "--series",
             f"{ISSUER}/works/EXG-001",
             "--version",
+            "1",
+            "--manifest-version",
             "1",
             "--released-at",
             VALID_FROM,
@@ -857,6 +893,8 @@ def test_manifest_artifacts_hybrid_without_mldsa_key_errors(tmp_path: Path, caps
             f"{ISSUER}/works/EXG-001",
             "--version",
             "1",
+            "--manifest-version",
+            "1",
             "--released-at",
             VALID_FROM,
             "--artifacts",
@@ -892,6 +930,8 @@ def test_manifest_artifacts_ed_only_with_mldsa_key_errors(tmp_path: Path, capsys
             "--series",
             f"{ISSUER}/works/EXG-001",
             "--version",
+            "1",
+            "--manifest-version",
             "1",
             "--released-at",
             VALID_FROM,
@@ -930,6 +970,8 @@ def test_manifest_artifacts_wrong_mldsa_key_errors(tmp_path: Path, capsys: CapSy
             "--series",
             f"{ISSUER}/works/EXG-001",
             "--version",
+            "1",
+            "--manifest-version",
             "1",
             "--released-at",
             VALID_FROM,
@@ -2410,11 +2452,7 @@ def test_log_anchor_refuses_evidence_exceeding_verifier_ceiling(
     log_dir = _log_init(tmp_path)
     header = f"{LOG_ORIGIN}\n0\n" + base64.b64encode(bytes(32)).decode("ascii") + "\n"
     checkpoint = (
-        header
-        + "\n"
-        + "— "
-        + "n" * (tlog._MAX_NOTE_TEXT_LEN - len(header) - 10)
-        + " AA==\n"
+        header + "\n" + "— " + "n" * (tlog._MAX_NOTE_TEXT_LEN - len(header) - 10) + " AA==\n"
     )
     assert tlog.parse_checkpoint(checkpoint).origin == LOG_ORIGIN
 

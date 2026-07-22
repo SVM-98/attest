@@ -337,13 +337,27 @@ def build_artifact_manifest(
     artifacts: list[dict[str, Any]],
     signing_kp: keys.SigningKeyPair | pq.HybridSigningKeys,
     signing_kid: str,
+    *,
+    manifest_version: int | None = None,
 ) -> dict[str, Any]:
     """Build and sign an artifact manifest. `signing_kp` mirrors
     `build_key_manifest`: an `pq.HybridSigningKeys` produces a
     `manifest_signature` with both the Ed25519 `sig` leg and the
     `sig_ml_dsa_65` leg (see `sign_signature_block`); a plain
     `keys.SigningKeyPair` keeps the v0.1 Ed25519-only shape unchanged.
-    """
+
+    `manifest_version` (G2/G3, attest-versioning.md rev 4; v0.1 §7.2/§7.3
+    amendment) is the newest-seen/rollback-protection counter — distinct
+    from `version` (the series' own release number, unrelated to currency).
+    It is REQUIRED on every manifest built by a conforming issuer going
+    forward (the CLI's `manifest-artifacts` command always supplies it), but
+    OPTIONAL here and OMITTED from the signed body when `None` (the
+    default): eternal verifiability (attest-versioning.md §3) means every
+    caller of this function that predates this amendment keeps producing
+    the exact byte-for-byte shape it always did. A manifest with no
+    `manifest_version` is a legacy manifest — `check_artifact_continuity`
+    fails closed on it (no currency basis to compare), and `verify()` warns
+    `artifact_manifest_unversioned` rather than rejecting it."""
     manifest: dict[str, Any] = {
         "issuer": issuer,
         "series": series,
@@ -351,10 +365,60 @@ def build_artifact_manifest(
         "released_at": released_at,
         "artifacts": artifacts,
     }
+    if manifest_version is not None:
+        if (
+            not isinstance(manifest_version, int)
+            or isinstance(manifest_version, bool)
+            or manifest_version < 1
+        ):
+            raise ValueError("manifest_version must be an integer >= 1")
+        manifest["manifest_version"] = manifest_version
     manifest["manifest_signature"] = sign_signature_block(
         _signable(manifest), signing_kp, signing_kid
     )
     return manifest
+
+
+def check_artifact_continuity(trusted: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    """G3 currency rule (attest-versioning.md rev 4; v0.1 §7.2/§7.3 amendment):
+    True iff `candidate` is a currency-conformant successor to `trusted` for
+    the same issuer/series. Currency is evaluable only when both manifests
+    carry valid (non-bool integer >= 1) `manifest_version` values: a candidate
+    regression, or an advancing candidate other than N+1, is discontinuous.
+    Legacy manifests are warn-only and return True. Same contract shape as
+    `check_continuity` above, but for artifact manifests.
+
+    This function does NOT verify self-consistency or signer-trust of either
+    manifest (unlike `check_continuity`, which can call `verify_key_manifest`
+    on both sides with no external input) — `verify_artifact_manifest` needs
+    a resolving key manifest this function's `(trusted, candidate)` contract
+    has no room for, so that remains the caller's job. Callers MUST
+    authenticate both sides with `verify_artifact_manifest` before calling
+    this metadata-only predicate. This function ONLY answers the
+    currency/newest-seen question: would accepting `candidate` silently roll
+    back the issuer's artifact state for this series.
+
+    Fails closed (never raises) on issuer/series mismatch. On a legacy
+    manifest (no valid `manifest_version`) on either side, currency is not
+    evaluable and the result is True; the caller emits
+    `artifact_manifest_unversioned` instead.
+    """
+    if trusted.get("issuer") != candidate.get("issuer"):
+        return False
+    if trusted.get("series") != candidate.get("series"):
+        return False
+    trusted_version = trusted.get("manifest_version")
+    candidate_version = candidate.get("manifest_version")
+    if (
+        not isinstance(trusted_version, int)
+        or isinstance(trusted_version, bool)
+        or trusted_version < 1
+        or not isinstance(candidate_version, int)
+        or isinstance(candidate_version, bool)
+        or candidate_version < 1
+    ):
+        return True
+    return candidate_version >= trusted_version and candidate_version <= trusted_version + 1
 
 
 def verify_artifact_manifest(manifest: dict[str, Any], key_manifest: dict[str, Any]) -> bool:
@@ -380,6 +444,13 @@ def verify_artifact_manifest(manifest: dict[str, Any], key_manifest: dict[str, A
     amendment) on the sibling array this function is the self-consistency
     gate for, mirroring `verify_key_manifest`'s `MAX_MANIFEST_KEYS` check.
     """
+    manifest_version = manifest.get("manifest_version")
+    if "manifest_version" in manifest and (
+        not isinstance(manifest_version, int)
+        or isinstance(manifest_version, bool)
+        or manifest_version < 1
+    ):
+        return False
     artifacts_for_ceiling = manifest.get("artifacts")
     if (
         isinstance(artifacts_for_ceiling, list)

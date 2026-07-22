@@ -17,7 +17,11 @@ Vector-directory conventions (a "vector case" is any directory containing
     duplicated JSON member can never round-trip through `json.load`, which
     silently keeps only the last value for a repeated key).
   - `manifests.json`: `{"manifests": {...}, "provenance": {...}, "chains":
-    {...}}`, built directly into a `verify.TrustStore`.
+    {...}, "artifact_manifests": {...}, "artifact_manifest_chains": {...}}`,
+    built directly into a `verify.TrustStore`. The last two (G2/G3, group 31
+    only, attest-versioning.md rev 4) are keyed by `work.artifact_series`
+    instead of issuer — every other leaf keeps them at the empty-object
+    default, same convention as `chains`.
   - `expected.json`: `signature`, `schema`, `trust` (asserted exactly);
     `revocation`/`binding` (asserted exactly when present); `ok` (asserted
     exactly when present); `errors`/`warnings` (asserted as exact lists when
@@ -85,6 +89,8 @@ def _trust_store(vector_dir: Path) -> verify.TrustStore:
         manifests=data["manifests"],
         provenance=data["provenance"],
         chains=data.get("chains", {}),
+        artifact_manifests=data.get("artifact_manifests", {}),
+        artifact_manifest_chains=data.get("artifact_manifest_chains", {}),
     )
 
 
@@ -218,9 +224,12 @@ def test_vectors_directory_is_nonempty() -> None:
     # 23 Fase 1/2 leaves (01-18) + 20 regression-corpus leaves (19-25, 2026-07-13)
     # + 8 hybrid conformance leaves (26, 2026-07-17) + 1 absent-valid_to
     # parity leaf (27, 2026-07-17) + 14 transparency/corroboration conformance
-    # leaves (28, 2026-07-18):
-    # 19 a/b, 20 a-c, 21 a-g, 22 a-c, 23 a/b, 24, 25 a/b, 26 a-h, 28 a-n.
-    assert len(_VECTOR_DIRS) >= 66
+    # leaves (28, 2026-07-18) + 2 normative-ceiling leaves (29, 2026-07-22) +
+    # 2 mixed-keyset leaves (30, 2026-07-22) + 5 manifest-currency leaves
+    # (31, 2026-07-22):
+    # 19 a/b, 20 a-c, 21 a-g, 22 a-c, 23 a/b, 24, 25 a/b, 26 a-h, 28 a-n,
+    # 29 a/c, 30 a/b, 31 a-e.
+    assert len(_VECTOR_DIRS) >= 75
 
 
 _CANONICAL_DIRS = [p for p in _VECTOR_DIRS if (p / "canonical.json").exists()]
