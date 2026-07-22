@@ -470,6 +470,15 @@ CONTRACT: dict[str, dict[str, str]] = {
 TAMARIN_VERSION = "1.12.0"
 MAUDE_VERSION = "3.5.1"
 
+# Tamarin's default derivation-check timeout (5s) expires on this theory: the
+# summary then carries "WARNING: 1 wellformedness check failed!" and the gate
+# fails closed (measured 2026-07-22: default → WF warning; 20s → all checks
+# pass). Every T3-T6 measurement ran with an explicit timeout, so the gate
+# pins one too. 60s = 3x the empirically clean 20s, headroom for slower CI
+# runners; derivation checks are deterministic, a larger timeout only adds
+# margin, never weakens the check.
+DERIVCHECK_TIMEOUT_S = 60
+
 _TAMARIN_VERSION_RE = re.compile(r"tamarin-prover\s+(\d+(?:\.\d+)+)")
 _BARE_VERSION_RE = re.compile(r"v?(\d+(?:\.\d+)+)")
 
@@ -557,7 +566,7 @@ def _run_prover(prover: str, theory: str, only: list[str] | None, timeout: float
     binary, non-zero exit, or timeout all return None (fail closed in main).
     """
     prove_args = [f"--prove={n}" for n in only] if only else ["--prove"]
-    cmd = [prover, *prove_args, theory]
+    cmd = [prover, *prove_args, f"--derivcheck-timeout={DERIVCHECK_TIMEOUT_S}", theory]
     try:
         proc = subprocess.run(  # noqa: S603 -- fixed argv list, no shell
             cmd, capture_output=True, text=True, timeout=timeout, check=False

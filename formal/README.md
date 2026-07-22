@@ -39,7 +39,9 @@ below. For a local one-shot reproduction of the full corpus:
 python tools/check_formal.py formal/attest.spthy
 ```
 
-This invokes `tamarin-prover --prove formal/attest.spthy`, parses the
+This invokes `tamarin-prover --prove --derivcheck-timeout=60 formal/attest.spthy`
+(the default 5s derivation-check timeout expires on this theory and would turn
+into a wellformedness warning, which the gate treats as failure), parses the
 `summary of summaries` block, and asserts for every pinned lemma: present,
 result `verified`, trait (`all-traces`/`exists-trace`) matching, and statement
 digest matching the contract. The theory's complete declared-lemma set must
@@ -227,7 +229,7 @@ python tools/check_formal.py formal/attest.spthy
 For the raw prover run without the gate's pinning:
 
 ```sh
-tamarin-prover --prove formal/attest.spthy
+tamarin-prover --prove --derivcheck-timeout=60 formal/attest.spthy
 ```
 
 Expect a long run: two lemmas are scheduled long-runners (the CI shard split
