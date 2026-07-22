@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "attest-receipts"
 version = "0.2.0"
-description = "attest v0.1 reference implementation — cryptographically-signed, offline-verifiable purchase receipts"
+description = "attest reference implementation (v0.1 and v0.2) — cryptographically-signed, offline-verifiable purchase receipts"
 readme = "README.md"
 license = { file = "LICENSE" }
 authors = [{ name = "Samuele Martinalli" }]
@@ -25,7 +25,7 @@ dependencies = ["pynacl>=1.5", "jsonschema>=4.21", "pqcrypto==0.4.0"]
 [project.urls]
 Homepage = "https://svm-98.github.io/attest/"
 Repository = "https://github.com/SVM-98/attest"
-Documentation = "https://github.com/SVM-98/attest/blob/main/docs/spec/attest-v0.1.md"
+Documentation = "https://github.com/SVM-98/attest/blob/main/docs/spec/attest-v0.2.md"
 Issues = "https://github.com/SVM-98/attest/issues"
 
 [project.optional-dependencies]

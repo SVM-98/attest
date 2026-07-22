@@ -23,7 +23,20 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in this package). v0.1 receipts remain valid and verifiable forever; a
   v0.1-only build MUST reject a v0.2 envelope outright. New public spec:
   [`docs/spec/attest-v0.2.md`](../../docs/spec/attest-v0.2.md). New
-  conformance leaf group `26-hybrid` (8 leaves), for 51 vectors total.
+  conformance leaf group `26-hybrid` (8 leaves).
+
+- v0.2 Stage 2 verification — transparency and anchoring evidence, verify-only
+  as everything in this package is. `verify()` gains a sixth `options` argument
+  (`transparency`, `logKeys`, `anchorPolicy`); omit it and behaviour is
+  unchanged, offline and log-free. Inclusion evidence is checked against a
+  hybrid-signed checkpoint and reported as `transparency` / `corroboration`,
+  which never upgrade the `trust` verdict — corroboration is not authenticity.
+  Log keys come from the caller's pinned trust store, never from the bundle.
+  Anchors: OpenTimestamps (required for post-horizon standing) and RFC 3161
+  (classical convenience, no weight past a configured CRQC horizon). New
+  modules `src/transparency.ts`, `src/tlog.ts`, `src/anchor.ts`. New conformance
+  leaf groups `27-valid-to-absent` and `28-transparency`, bringing the corpus
+  this package runs to 66 leaves across 29 groups.
 
 ## [0.1.2] — 2026-07-13
 

@@ -53,10 +53,36 @@ checkable offline requires no consensus mechanism, no token, and no chain — a
 verifier just checks a signature against a key the issuer published. Consensus
 exists to solve double-spend and ordering among mutually distrusting parties
 maintaining a shared ledger; a buyer proving they hold a receipt to a verifier
-they choose is a different, simpler problem. The one place a chain could ever
-show up in this project is an optional future transparency-anchoring layer
-(Merkle-root anchoring for registry-node data) — and it stays strictly optional,
-never a requirement for a receipt to verify.
+they choose is a different, simpler problem.
+
+There is now a transparency layer, and it is worth being precise about what it
+is, because "append-only log" and "blockchain" get used interchangeably and they
+are not the same thing. v0.2 Stage 2 adds an optional Merkle-tree transparency
+log (the C2SP tlog-tiles format, served as static files) plus timestamp
+anchoring. No consensus, no token, no miners, no shared ledger between
+distrusting parties — the same family of construction used for TLS certificate
+transparency.
+
+It **corroborates**, it never authenticates. What a verifier checks is a
+log-signed checkpoint plus an inclusion proof, which shows the artifact is in
+that log's Merkle tree; an anchor can further bound when the checkpoint existed.
+It can never make an unsigned or untrusted receipt look genuine — the trust
+result stays domain control, and inclusion evidence is reported separately so the
+two are never confused.
+
+And it is worth being equally precise about the limit, because it is the honest
+answer to "so who audits the log?": **without witness cosignatures there is no
+anti-equivocation**. An unwitnessed operator can serve one view to you and a
+different one to someone else and stay internally consistent in both; a verifier
+catches that only if it already holds two conflicting validly-signed checkpoints.
+The verdict that closes this gap, `corroboration: "witnessed"`, requires a
+witness federation that does not exist yet — the format is specified, the
+deployment is not. The spec states this in its own scope section rather than
+burying it.
+
+None of which is load-bearing for the core promise: a receipt verifies offline
+from its bytes and the issuer's key material, with no log reachable, exactly as
+before.
 
 ## What happens if the issuer dies?
 
