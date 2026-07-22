@@ -345,9 +345,10 @@ def test_prover_invocation_pins_derivcheck_timeout(tmp_path: Path) -> None:
     """The prove command must carry the pinned --derivcheck-timeout.
 
     Tamarin's default derivation-check timeout (5s) expires on this theory,
-    which turns into 'WARNING: 1 wellformedness check failed!' in the summary
-    and a fail-closed gate error — every T3-T6 measurement ran with an
-    explicit timeout. The checker must pin it, not inherit the default.
+    which emits a wellformedness warning. --quit-on-warning turns any such
+    warning into a non-zero prover exit, so the gate fails closed. Every
+    T3-T6 measurement ran with an explicit timeout. The checker must pin it,
+    not inherit the default.
     """
     args_log = tmp_path / "prover-args.log"
     prover = make_fake_prover(tmp_path, summary=green_summary(), args_log=args_log)
@@ -355,6 +356,7 @@ def test_prover_invocation_pins_derivcheck_timeout(tmp_path: Path) -> None:
     assert rc == 0
     recorded = args_log.read_text(encoding="utf-8")
     assert f"--derivcheck-timeout={cf.DERIVCHECK_TIMEOUT_S}" in recorded
+    assert "--quit-on-warning" in recorded
     assert cf.DERIVCHECK_TIMEOUT_S >= 20  # the empirically WF-clean floor
 
 
@@ -769,6 +771,27 @@ _TOP_LEVEL_JOB_RE = re.compile(r"^  [A-Za-z0-9_-]+:\s*$", re.MULTILINE)
 _INCLUDE_RE = re.compile(r"^(?P<indent>\s+)include:\s*$", re.MULTILINE)
 
 
+def ci_formal_job_block(workflow: Path | None = None) -> str:
+    """Return the real formal CI job block, or fail if it is absent."""
+    workflow = workflow or CI_WORKFLOW
+    text = workflow.read_text(encoding="utf-8")
+    formal = _FORMAL_JOB_RE.search(text)
+    if formal is None:
+        raise AssertionError(f"formal job block absent from {workflow}")
+    next_job = _TOP_LEVEL_JOB_RE.search(text, formal.end())
+    return text[formal.start() : next_job.start() if next_job else len(text)]
+
+
+def assert_ci_formal_job_executes_matrix(workflow: Path | None = None) -> None:
+    """Assert the formal job runs the checker for its actual matrix entry."""
+    formal_block = ci_formal_job_block(workflow)
+    expected_run = (
+        "run: python3 tools/check_formal.py formal/attest.spthy "
+        '--only "${{ matrix.lemmas }}" --timeout ${{ matrix.checker_timeout }}'
+    )
+    assert expected_run in formal_block
+
+
 def _matrix_list_item_count(formal_block: str) -> int:
     """Count YAML list items under the matrix ``include:`` — any spelling.
 
@@ -798,13 +821,7 @@ def _matrix_list_item_count(formal_block: str) -> int:
 
 def ci_formal_shards(workflow: Path | None = None) -> dict[str, list[str]]:
     """Extract the formal job's four shard -> lemma-list mappings from ci.yml."""
-    workflow = workflow or CI_WORKFLOW
-    text = workflow.read_text(encoding="utf-8")
-    formal = _FORMAL_JOB_RE.search(text)
-    if formal is None:
-        raise AssertionError(f"formal job block absent from {workflow}")
-    next_job = _TOP_LEVEL_JOB_RE.search(text, formal.end())
-    formal_block = text[formal.start() : next_job.start() if next_job else len(text)]
+    formal_block = ci_formal_job_block(workflow)
     entries = [
         (match.group("shard"), match.group("lemmas").split(","))
         for match in _SHARD_RE.finditer(formal_block)
@@ -838,6 +855,30 @@ def test_ci_formal_matrix_declares_exactly_the_four_shards() -> None:
         "revocation",
         "rest",
     }
+
+
+def test_ci_formal_job_executes_matrix_shard_checker() -> None:
+    assert_ci_formal_job_executes_matrix()
+
+
+def test_ci_formal_job_rejects_hard_coded_shard_execution(tmp_path: Path) -> None:
+    source = CI_WORKFLOW.read_text(encoding="utf-8")
+    expected = (
+        "run: python3 tools/check_formal.py formal/attest.spthy "
+        '--only "${{ matrix.lemmas }}" --timeout ${{ matrix.checker_timeout }}'
+    )
+    assert expected in source
+    poisoned = source.replace(
+        expected,
+        "run: python3 tools/check_formal.py formal/attest.spthy "
+        "--only sanity_toolchain --timeout ${{ matrix.checker_timeout }}",
+        1,
+    )
+    workflow = tmp_path / "ci.yml"
+    workflow.write_text(poisoned, encoding="utf-8")
+
+    with pytest.raises(AssertionError, match=r"matrix\.lemmas"):
+        assert_ci_formal_job_executes_matrix(workflow)
 
 
 def test_ci_formal_shard_lists_are_pairwise_disjoint() -> None:

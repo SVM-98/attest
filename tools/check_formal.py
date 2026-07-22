@@ -563,10 +563,17 @@ def _run_prover(prover: str, theory: str, only: list[str] | None, timeout: float
 
     Without a shard, proves the whole theory (``--prove``); with a shard,
     proves only the named lemmas (``--prove=<name>`` per lemma). A missing
-    binary, non-zero exit, or timeout all return None (fail closed in main).
+    binary, non-zero exit (including --quit-on-warning), or timeout all return
+    None (fail closed in main).
     """
     prove_args = [f"--prove={n}" for n in only] if only else ["--prove"]
-    cmd = [prover, *prove_args, f"--derivcheck-timeout={DERIVCHECK_TIMEOUT_S}", theory]
+    cmd = [
+        prover,
+        *prove_args,
+        f"--derivcheck-timeout={DERIVCHECK_TIMEOUT_S}",
+        "--quit-on-warning",
+        theory,
+    ]
     try:
         proc = subprocess.run(  # noqa: S603 -- fixed argv list, no shell
             cmd, capture_output=True, text=True, timeout=timeout, check=False

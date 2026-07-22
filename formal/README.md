@@ -39,9 +39,10 @@ below. For a local one-shot reproduction of the full corpus:
 python tools/check_formal.py formal/attest.spthy
 ```
 
-This invokes `tamarin-prover --prove --derivcheck-timeout=60 formal/attest.spthy`
+This invokes `tamarin-prover --prove --derivcheck-timeout=60 --quit-on-warning formal/attest.spthy`
 (the default 5s derivation-check timeout expires on this theory and would turn
-into a wellformedness warning, which the gate treats as failure), parses the
+into a wellformedness warning; `--quit-on-warning` aborts the prover on any
+warning, so the gate's non-zero-exit handling fails closed), parses the
 `summary of summaries` block, and asserts for every pinned lemma: present,
 result `verified`, trait (`all-traces`/`exists-trace`) matching, and statement
 digest matching the contract. The theory's complete declared-lemma set must
@@ -63,9 +64,10 @@ python tools/check_formal.py --only no_downgrade_revocation_allhybrid formal/att
 (`--prove=<name>` per lemma) and asserts `verified` only for them, but the
 statement-digest check ALWAYS runs over the FULL contract against the theory
 source — statements stay pinned globally even when results are verified
-shard-by-shard. A shard relaxes only which contract lemmas must be present: if
-its parsed summary reports any contract lemma as `falsified` or `analysis
-incomplete`, that run still fails. An unknown name or an empty scope such as
+shard-by-shard. A shard relaxes only which contract lemmas must be present:
+in-scope lemmas must be `verified`; out-of-scope `analysis incomplete` entries
+are the expected shard shape and pass, while any out-of-scope `falsified`
+contract lemma fails. An unknown name or an empty scope such as
 `--only ','` or `--only ''` is a usage error (exit 2). `--timeout <seconds>`
 bounds the prover subprocess.
 
@@ -97,10 +99,15 @@ section — the scoping is part of the claim, not a footnote):
   reveal branch is real, not theoretical: `attack_v01_post_crqc` exhibits a
   verified/clean acceptance with no issuance after `EdBroken`.
 - **P2 — rotation continuity**: no unflagged authority hijack.
-- **P3 — revocation soundness and effectiveness**: only authentic revocations
-  are honored, and honored means honored.
+- **P3 — revocation soundness and effectiveness**: under verified-provenance,
+  clean heads, only authentic revocations are honored, and honored means
+  honored.
 - **P4 — hybrid downgrade resistance**: breaking Ed25519 alone does not forge
-  what the hybrid profile protects.
+  what the hybrid profile protects. The v0.1 continuity advance rule checks
+  the Ed leg only, so a hybrid signer's manifest continuity under a broken-Ed
+  adversary is NOT covered by the model; normative AND-verification for hybrid
+  manifests is spec-side (v0.2 §2.3), and model coverage of that path is
+  future work.
 
 Security theorems (all-traces):
 
@@ -110,7 +117,7 @@ Security theorems (all-traces):
 | `no_cross_version_confusion` | P1, P4 | any v0.2-dispatch acceptance traces to a version-exact `"0.2"` issuance; a v0.1-signed payload is never accepted via the hybrid rule. Covers the receipt-downgrade case causally, under weaker hypotheses than a dedicated reveal-conditioned theorem would need (see the in-theory comment) | v0.2 §1, §2.2 |
 | `rotation_no_hijack` | P2 | any change of the verifier's authority set was signed by a key `active` in the previously-trusted manifest, or is flagged `UnverifiedRotation` | v0.1 §7.3, §11.1; TM-28 |
 | `old_key_powerless` | P2 | revealing a key that is not `active` in the currently-trusted manifest never enables an unflagged authority change | v0.1 §7.3 |
-| `compromised_key_rejected` | P3 | no `Ok` via key `k` after the verifier trusts a manifest marking `k` compromised | v0.1 §7.3, §11 step 3 |
+| `compromised_key_rejected` | P3 | no `Ok` via key `k` after the verifier trusts a manifest marking `k` compromised. **v0.1 only:** the theorem quantifies over `AcceptInfo`, which only the v0.1 accept path emits; the v0.2 path is deliberately outside it (tractability, frozen proofs), and its acceptance authenticity is carried by `no_cross_version_confusion`. | v0.1 §7.3, §11 step 3 |
 | `rev_record_authentic` `[reuse]` | P3 | an admitted revocation record under verified/clean trust was honestly issued, or an issuer key was revealed first (the TOFU boundary of this claim is exhibited by `attack_tofu_revocation_forgery`) | v0.1 §12.1 |
 | `revocation_auth_soundness` | P3 | under verified/clean trust, `RevocationHonored` ⇒ an `active` key, class and window witnesses, and prior admission of that exact record; moreover it was previously issued by the issuer **or** an issuer key was previously revealed | v0.1 §12.1–12.2 |
 | `revocation_effectiveness` | P3 | **The name overstates the result.** Starting from `RevocationIgnored`, it proves ignore-reason integrity: `class_none` has an independent `RevClass(..., 'none')` witness, or `out_of_window` has an independent matching `OutWindowMark` and no matching `InWindowActive`. It does not force honoring: an admitted record then neither honored nor ignored satisfies it vacuously. | v0.1 §12.2 |
@@ -229,7 +236,7 @@ python tools/check_formal.py formal/attest.spthy
 For the raw prover run without the gate's pinning:
 
 ```sh
-tamarin-prover --prove --derivcheck-timeout=60 formal/attest.spthy
+tamarin-prover --prove --derivcheck-timeout=60 --quit-on-warning formal/attest.spthy
 ```
 
 Expect a long run: two lemmas are scheduled long-runners (the CI shard split
