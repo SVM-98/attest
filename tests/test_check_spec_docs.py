@@ -651,15 +651,105 @@ def test_revision_log_requires_a_grammar_valid_entry() -> None:
 def test_revision_log_malformed_entry_is_flagged_with_its_line() -> None:
     docs = _base_docs()
     docs["spec_v01"] = _minimal_spec_v01() + (
-        "\n## Revision log\n\n"
-        "- **2026-07-22 (rev 1)**: initial revision; vectors: none\n"
+        "\n## Revision log\n\n- **2026-07-22 (rev 1)**: initial revision; vectors: none\n"
     )
 
     errors = collect_errors(**docs)
 
-    assert any(
-        "attest-v0.1.md" in e and "line" in e and "revision-log entry" in e for e in errors
+    assert any("attest-v0.1.md" in e and "line" in e and "revision-log entry" in e for e in errors)
+
+
+# --- receipt_id §5.1 prose <-> schema.receipt_id.pattern drift guard ---------
+
+
+def _spec_v01_with_receipt_id_row(prose_pattern: str) -> str:
+    """A minimal §5.1 receipt_id table row, injected into a v0.1 fixture doc."""
+    base = _minimal_spec_v01()
+    row = f"\n\n| `receipt_id` | string, ULID (`{prose_pattern}`) | REQUIRED | ULID. |\n"
+    return base + row
+
+
+def test_receipt_id_prose_pattern_diverging_from_schema_is_an_error() -> None:
+    docs = _base_docs()
+    docs["spec_v01"] = (
+        _spec_v01_with_receipt_id_row("^[0-9A-HJKMNP-TV-Z]{26}$")
+        + "\n## Revision log\n\n- **2026-07-22 (rev 1)**: initial revision — vectors: none\n"
     )
+    docs["schema"] = _minimal_schema()
+    docs["schema"]["properties"]["receipt_id"] = {
+        "type": "string",
+        "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+    }
+
+    errors = collect_errors(**docs)
+
+    assert any("receipt_id" in e and "diverges from" in e and "attest-v0.1.md" in e for e in errors)
+
+
+def test_receipt_id_prose_pattern_matching_schema_is_clean() -> None:
+    docs = _base_docs()
+    pattern = "^[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    docs["spec_v01"] = (
+        _spec_v01_with_receipt_id_row(pattern)
+        + "\n## Revision log\n\n- **2026-07-22 (rev 1)**: initial revision — vectors: none\n"
+    )
+    docs["schema"] = _minimal_schema()
+    docs["schema"]["properties"]["receipt_id"] = {"type": "string", "pattern": pattern}
+
+    errors = collect_errors(**docs)
+
+    assert not any("receipt_id" in e and "diverges from" in e for e in errors)
+
+
+def test_receipt_id_row_absent_from_fixture_does_not_error() -> None:
+    """Fixture docs where NEITHER side models `receipt_id` at all (the
+    common case for every other test in this file, via `_base_docs()`/
+    `_minimal_schema()`) are not a drift signal and must not be flagged —
+    the check only skips when both sides are simultaneously absent; a
+    one-sided absence (M2, 2026-07-22 fix wave 2) is fail-closed instead,
+    see `test_receipt_id_schema_pattern_absent_while_prose_present_is_an_error`
+    and `test_receipt_id_prose_row_absent_while_schema_pattern_present_is_an_error`."""
+    docs = _base_docs()
+
+    errors = collect_errors(**docs)
+
+    assert not any("receipt_id" in e for e in errors)
+
+
+def test_receipt_id_schema_pattern_absent_while_prose_present_is_an_error() -> None:
+    """M2 (2026-07-22 fix wave 2): §5.1 carries a receipt_id ULID prose
+    pattern, but the schema has no `properties.receipt_id.pattern` at all —
+    previously this fell through the old code's early `if schema_pattern is
+    None: return []`, fail-open. Must now be an explicit, fail-closed error."""
+    docs = _base_docs()
+    docs["spec_v01"] = (
+        _spec_v01_with_receipt_id_row("^[0-7][0-9A-HJKMNP-TV-Z]{25}$")
+        + "\n## Revision log\n\n- **2026-07-22 (rev 1)**: initial revision — vectors: none\n"
+    )
+    docs["schema"] = _minimal_schema()  # no receipt_id property at all
+
+    errors = collect_errors(**docs)
+
+    assert any(
+        "receipt_id" in e and "attest-v0.1.md" in e and "schema" in e.lower() for e in errors
+    )
+
+
+def test_receipt_id_prose_row_absent_while_schema_pattern_present_is_an_error() -> None:
+    """M2 companion: the schema defines `receipt_id.pattern`, but §5.1 carries
+    no receipt_id prose row at all — previously this fell through the old
+    code's early `if match is None: return []`, fail-open. Must now be an
+    explicit, fail-closed error."""
+    docs = _base_docs()  # spec_v01 has no §5.1 receipt_id row
+    docs["schema"] = _minimal_schema()
+    docs["schema"]["properties"]["receipt_id"] = {
+        "type": "string",
+        "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+    }
+
+    errors = collect_errors(**docs)
+
+    assert any("receipt_id" in e and "attest-v0.1.md" in e and "prose" in e.lower() for e in errors)
 
 
 def _write(directory: Path, name: str, content: str) -> Path:

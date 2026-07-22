@@ -1,6 +1,6 @@
 # attest conformance vectors
 
-This directory holds the attest conformance suite: fixed, language-neutral test cases against which any implementation can be checked. Groups `01`–`25` (43 leaves) are **v0.1** conformance, against [`docs/spec/attest-v0.1.md`](../attest-v0.1.md); `26-hybrid`, `27-valid-to-absent` and `28-transparency` cover **v0.2**, against [`docs/spec/attest-v0.2.md`](../attest-v0.2.md). A v0.1-only verifier must reject v0.2 envelopes and is therefore measured against the v0.1 subset, not all 66 leaves. Each vector is a leaf directory (identified by containing `expected.json`) holding the raw inputs to feed the verification algorithm and the exact `VerificationResult` a conformant verifier must produce.
+This directory holds the attest conformance suite: fixed, language-neutral test cases against which any implementation can be checked. Groups `01`–`25` and `29-limits` (45 leaves) are **v0.1** conformance, against [`docs/spec/attest-v0.1.md`](../attest-v0.1.md) — `29-limits` was added by the G1 normative-ceilings amendment (attest-versioning.md §5, 2026-07-22), which binds v0.1 as well as v0.2. `26-hybrid`, `27-valid-to-absent`, `28-transparency` and `30-mixed-keyset` cover **v0.2**, against [`docs/spec/attest-v0.2.md`](../attest-v0.2.md). A v0.1-only verifier must reject v0.2 envelopes and is therefore measured against the v0.1 subset (45 leaves), not all 70. Each vector is a leaf directory (identified by containing `expected.json`) holding the raw inputs to feed the verification algorithm and the exact `VerificationResult` a conformant verifier must produce.
 
 **Normative conformance requirement**: an implementation is attest-conformant iff it produces every vector's expected result. There is no partial conformance — any single mismatch is a conformance failure.
 
@@ -59,9 +59,9 @@ Each leaf directory contains:
 | 20b | `sig-canonicity/b-small-order-pubkey` | Signer pubkey (`A`) is a small-order point — rejected (zip215:false / libsodium-equivalent ruleset). |
 | 20c | `sig-canonicity/c-small-order-r` | Signature's `R` component is a small-order point, `S` otherwise genuine — rejected. |
 | 21a | `canon-strict/a-bom` | A UTF-8 byte-order mark prepended to the raw envelope bytes — rejected at strict parsing. |
-| 21b | `canon-strict/b-depth-255` | Whole-text nesting depth exactly 255 — accepted (unknown-field tolerance, vector 10). |
-| 21c | `canon-strict/c-depth-256` | Whole-text nesting depth exactly 256, the boundary — still accepted. |
-| 21d | `canon-strict/d-depth-257` | Whole-text nesting depth 257, one past the boundary — rejected at strict parsing (maximum nesting depth exceeded). |
+| 21b | `canon-strict/b-depth-255` | Whole-text nesting depth exactly 255 — accepted (unknown-field tolerance, vector 10) against canon.py's structural cap (`canon.MAX_DEPTH`, 256), one short of the boundary. |
+| 21c | `canon-strict/c-depth-256` | Whole-text nesting depth exactly 256, canon.py's own structural boundary — still accepted; the boundary is strict `>`. |
+| 21d | `canon-strict/d-depth-257` | Whole-text nesting depth 257, one past canon.py's boundary — rejected at strict parsing (maximum nesting depth exceeded). |
 | 21e | `canon-strict/e-lone-surrogate` | A lone UTF-16 surrogate injected via `\uXXXX` escape — rejected at strict parsing (a payload carrying one can never be signed in the first place). |
 | 21f | `canon-strict/f-supplementary-raw` | A supplementary-plane character (outside the BMP) encoded as raw UTF-8 bytes — verifies clean; carries `canonical.json` for the payload's exact canonical bytes. |
 | 21g | `canon-strict/g-supplementary-escaped` | The same payload and signature as 21f, but the envelope bytes use `𝄞`-style surrogate-pair escaping instead of raw UTF-8 — verifies clean with the identical result, proving canonicalization is transport-escaping-independent; carries the same `canonical.json`. |
@@ -115,6 +115,24 @@ The cross-core corpus for `verify()`'s Stage 2 `transparency`/`corroboration`/`m
 | 28l | `l-payload-only-precommit` | The evidence entry's `core_sha256` is hashed over the payload ALONE (no domain separation, no signature commitment) — exactly the "pre-sign, log now, sign later" attack `receipt_core_hash`'s domain separation defeats. Same observable outcome as 28g (`transparency_entry_mismatch`), different attacker narrative: this is specifically the hash an attacker could compute before the receipt was ever signed. |
 | 28m | `m-hybrid-revocation-and-rule` | **Adapted** from the original "post-horizon ed-only revocation" framing: `verify.py`'s revocation classification has no `crqc_horizon`-shaped parameter at all (revocation and the transparency/anchor horizon cap are separate subsystems), so that framing cannot be expressed through any `verify()` input. Pins the mechanism that would have to exist for it to hold instead: an Ed25519-only-signed revocation record against a HYBRID (`pub_ml_dsa_65`-carrying) issuer key is unconditionally rejected/ignored (the Task 6/8 sibling-hybrid AND rule, fail-closed) — `revocation: "unknown"`, the record ignored with a warning, `ok: true`. |
 | 28n | `n-unknown-entry-type` | An evidence `entry` whose `type` the log's closed schema doesn't recognize — the claim is unresolvable before any checkpoint/proof is even consulted (`transparency_claim_unresolvable`); the receipt itself verifies untouched (`ok: true`). |
+
+### 29: normative ceilings (G1, attest-versioning.md §5 amendment)
+
+Checked against v0.1 §11.3/§15 and v0.2 §6.2/§16 (the same amendment binds both — a v0.1-only verifier must enforce these ceilings too). Both leaves are a genuinely, cleanly signed envelope, rejected purely for crossing one of the newly-introduced acceptance-floor ceilings — never for a schema-shape or signature problem otherwise. Three ceilings are genuinely new under this amendment (a verifier MUST accept within them, MAY reject beyond, v0.1 §11.3): raw envelope size, issuer key manifest `keys[]` length, and artifact manifest `artifacts[]` length. Only the first two sit on `verify()`'s own wire surface, so only those two carry dedicated `29-limits` vector leaves; the artifact-manifest ceiling is exercised directly against `verify_artifact_manifest`/`verifyArtifactManifest` instead (v0.1 §11.3/§15) and carries no vector leaf of its own. The amendment's other ceilings (nesting depth, revocation-view record count, and v0.2's Stage 2 evidence bounds, §16.1) norm pre-existing, already-enforced behavior and are likewise not exercised by dedicated `29-limits` leaves — the nesting-depth boundary is exercised instead by `21-canon-strict` leaves `b`/`c`/`d`, unaffected by this amendment (see above).
+
+| Leaf | Name | Checks |
+| --- | --- | --- |
+| 29a | `limits/a-envelope-oversize` | The raw, undecoded envelope exceeds `MAX_ENVELOPE_BYTES` (1,048,576) — rejected at the parse boundary, before any parsing work: `schema: "invalid"`. |
+| 29c | `limits/c-manifest-array-overflow` | The issuer's key manifest `keys[]` array exceeds `MAX_MANIFEST_KEYS` (256) — rejected right after the manifest is resolved from the trust store, before any specific key lookup: `schema: "invalid"`. |
+
+### 30: mixed-keyset prohibition (G6, v0.2 §2.3/§13 amendment)
+
+Checked against [`docs/spec/attest-v0.2.md`](../attest-v0.2.md) §2.3/§13 — an issuer that declares the hybrid profile MUST NOT hold an Ed25519-only key in state `active`; the migration ceremony is a single manifest step (the same `manifest_version` bump that introduces the hybrid key retires every Ed25519-only key). Motivated by `attack_mixed_keyset_hijack` (the formal threat-model exhibit).
+
+| Leaf | Name | Checks |
+| --- | --- | --- |
+| 30a | `mixed-keyset/a-active-ed-sibling-warn` | The resolved issuer manifest declares the hybrid suite AND still holds an Ed25519-only key in state `active` — the receipt verifies clean otherwise, but carries the `mixed_keyset_active_ed_only_sibling` warning. The warning is the entire verifier-side contract: no result field caps a "hybrid strength" classification, since none exists. |
+| 30b | `mixed-keyset/b-migrated-clean` | Same manifest shape, but the Ed25519-only sibling is `retired` (the completed migration ceremony) — no mixed-keyset condition, no warning. |
 
 ## Regeneration
 

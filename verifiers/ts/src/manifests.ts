@@ -23,6 +23,13 @@ function asObject(v: JsonValue | undefined): JsonObject | null {
   return v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as JsonObject) : null
 }
 
+// G1 normative ceilings (attest-versioning.md §5 amendment; v0.1 §11/§15,
+// v0.2 §6/§16) — conformance-surface structural bounds a conforming
+// verifier MUST enforce on the untrusted keys[]/artifacts[] arrays before
+// doing any signature work over them. Byte-identical to manifests.py.
+export const MAX_MANIFEST_KEYS = 256
+export const MAX_ARTIFACT_ENTRIES = 4096
+
 export function findKey(manifest: JsonObject, kid: string): JsonObject | null {
   const keys = manifest['keys']
   if (!Array.isArray(keys)) return null
@@ -64,6 +71,10 @@ export function verifySignatureBlock(payload: Uint8Array, sigBlock: JsonObject, 
 
 export function verifyKeyManifest(manifest: JsonObject): boolean {
   try {
+    // Fail closed (never throw) if keys[] exceeds MAX_MANIFEST_KEYS — the
+    // G1 ceiling: an oversized array is not evaluated at all.
+    const entriesForCeiling = manifest['keys']
+    if (Array.isArray(entriesForCeiling) && entriesForCeiling.length > MAX_MANIFEST_KEYS) return false
     const sigBlock = asObject(manifest['manifest_signature'])
     if (!sigBlock) return false
     const kid = sigBlock['kid']
@@ -133,6 +144,12 @@ export function chainContinuous(chain: JsonObject[]): boolean {
 // byte-for-byte (Stage 2 Task 6/8 sibling-patch parity).
 export function verifyArtifactManifest(manifest: JsonObject, keyManifest: JsonObject): boolean {
   try {
+    // G1 ceiling: fail closed if artifacts[] exceeds MAX_ARTIFACT_ENTRIES,
+    // mirroring verifyKeyManifest's MAX_MANIFEST_KEYS check.
+    const artifactsForCeiling = manifest['artifacts']
+    if (Array.isArray(artifactsForCeiling) && artifactsForCeiling.length > MAX_ARTIFACT_ENTRIES) {
+      return false
+    }
     if (!verifyKeyManifest(keyManifest)) return false
     const sigBlock = asObject(manifest['manifest_signature'])
     if (!sigBlock || typeof sigBlock['kid'] !== 'string') return false
@@ -142,4 +159,24 @@ export function verifyArtifactManifest(manifest: JsonObject, keyManifest: JsonOb
     if (!withinReleaseWindow(manifest['released_at'], entry)) return false
     return verifySignatureBlock(signableManifestBytes(manifest), sigBlock, entry)
   } catch { return false }
+}
+
+// G6 mixed-keyset detection (v0.2 §2.3/§13 amendment): True iff `manifest`
+// declares the hybrid profile (at least one keys[] entry carries
+// pub_ml_dsa_65) AND ALSO holds at least one Ed25519-only key (no
+// pub_ml_dsa_65) whose status is "active". See manifests.py's
+// has_active_ed_only_sibling for the full rationale (attack_mixed_keyset_
+// hijack) — never throws, malformed keys[] entries are ignored.
+export function hasActiveEdOnlySibling(manifest: JsonObject): boolean {
+  const entries = manifest['keys']
+  if (!Array.isArray(entries)) return false
+  const hasHybridKey = entries.some((e) => {
+    const o = asObject(e)
+    return o !== null && 'pub_ml_dsa_65' in o
+  })
+  if (!hasHybridKey) return false
+  return entries.some((e) => {
+    const o = asObject(e)
+    return o !== null && !('pub_ml_dsa_65' in o) && o['status'] === 'active'
+  })
 }

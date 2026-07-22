@@ -92,6 +92,9 @@ export const ERR = {
 export const WARN = {
   DRM_BOUND: 'license.drm is drm-bound (design vector 18)',
   REVOCABILITY_NONE_IGNORED: "revocation record ignored: license.revocability is 'none' (irrevocable)",
+  // G6 mixed-keyset prohibition (v0.2 §2.3/§13 amendment) — the wire warning
+  // string, exact and cross-language (Python parity: verify.py).
+  MIXED_KEYSET_ACTIVE_ED_ONLY_SIBLING: 'mixed_keyset_active_ed_only_sibling',
 } as const
 
 export const unsupportedAttestVersion = (v: unknown) => `unsupported attest_version: ${pyRepr(v)}`
@@ -122,6 +125,15 @@ export const revocationViewOversize = (n: number, max: number) =>
   `revocation view exceeds ${max} records (${n} supplied), not evaluated`
 export const revocationViewOversizeRevocable = (n: number, max: number) =>
   `revocation view exceeds ${max} records (${n} supplied), cannot certify a revocable receipt`
+
+// G1 normative ceilings (attest-versioning.md §5 amendment) — byte-identical
+// to validate.py / manifests.py.
+export const envelopeExceedsBytes = (max: number) => `envelope exceeds ${max} bytes`
+// nestingDepthExceeds() was deleted in the 2026-07-22 fix wave along with
+// schema.ts's validateJsonDepth/jsonTreeDepth: the ceiling is now enforced
+// entirely by canon.ts's own parse-time cap, which reports "maximum nesting
+// depth exceeded" (invalidJson()), never this message.
+export const manifestExceedsKeys = (max: number) => `issuer manifest exceeds ${max} keys`
 
 // --------------------------------------------------------------------------
 // Stage 2 (tlog/anchor/transparency): AnchorVerdict.warnings and

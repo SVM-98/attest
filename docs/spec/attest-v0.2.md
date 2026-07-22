@@ -65,6 +65,8 @@ Mix-and-match across signers is structurally prevented: both legs of a hybrid si
 
 This is **AND-verified, fail-closed in both directions**: a hybrid signer's manifest signature that is missing its `sig_ml_dsa_65` leg MUST be treated as invalid (a downgrade attempt — stripping the PQ leg to fall back to a break-one-primitive forgery), and an Ed25519-only signer's manifest signature that carries a stray `sig_ml_dsa_65` MUST likewise be treated as invalid (a manifest cannot claim hybrid protection for a key that never had a PQ public key). **Rationale:** without this rule, a future CRQC could forge a manifest *rotation* using only the broken classical primitive and thereby bypass the hybrid protection on every receipt the rotation vouches for — the manifest chain is exactly as strong as its weakest verified leg, so the manifest signature's strength MUST match the strength implied by the keys it lists.
 
+**Mixed-keyset prohibition (normative, 2026-07-22 amendment).** An issuer that declares the hybrid profile MUST NOT hold an Ed25519-only key in state `active`. §13 states the migration ceremony and the verifier-side warning this obligation is paired with; conformance vector group [`30-mixed-keyset`](vectors/30-mixed-keyset/) exercises both the violating case and the cleanly-migrated case.
+
 ### 2.4 Sizes and measured cost
 
 **Measured 2026-07-17** (ML-DSA-65 / FIPS 204, NIST category 3), base64url-unpadded on the wire:
@@ -176,7 +178,7 @@ Against this manifest, both signature legs of the envelope above verify (§3 ste
 
 ## 6. Conformance
 
-The conformance leaf group [`docs/spec/vectors/26-hybrid/`](vectors/26-hybrid/) adds 8 leaves (a–h) to the existing 43 v0.1/cross-implementation leaves, for 51 total. Each leaf is checked against all three conformance runners (Python reference, TypeScript verifier, and the web verifier where applicable) from the same shared golden files, exactly as the v0.1 corpus is (v0.1 §15).
+The conformance leaf group [`docs/spec/vectors/26-hybrid/`](vectors/26-hybrid/) adds 8 leaves (a–h) to the existing 45 v0.1/cross-implementation leaves (43 plus [`29-limits`](vectors/29-limits/)'s 2 leaves, v0.1 §15), for 53 total. Each leaf is checked against all three conformance runners (Python reference, TypeScript verifier, and the web verifier where applicable) from the same shared golden files, exactly as the v0.1 corpus is (v0.1 §15).
 
 | Leaf | Checks |
 | --- | --- |
@@ -192,6 +194,10 @@ The conformance leaf group [`docs/spec/vectors/26-hybrid/`](vectors/26-hybrid/) 
 ### 6.1 Vector determinism and cross-implementation parity
 
 **Non-normative note:** the 26-hybrid vectors are generated deterministically by [`tools/gen_vectors.py`](../../tools/gen_vectors.py), the same generator and the same determinism gate as the v0.1 corpus (v0.1 §15 / [`docs/spec/vectors/README.md`](vectors/README.md) "Regeneration"). ML-DSA-65 keys and signatures are produced with the dev-only oracle `dilithium-py` (`ML_DSA_65.key_derive(seed)` from a committed fixed seed, `sign(sk, m, deterministic=True)` per the FIPS 204 deterministic variant) — reproducible byte-for-byte, never used at verification runtime in either production package. At runtime, `pqcrypto` (Python, PQClean-derived) and `@noble/post-quantum` (TypeScript) independently verify the same vectors, so cross-implementation parity is exercised by the corpus itself rather than by a separate parity harness.
+
+### 6.2 Normative ceilings apply to v0.2 too (2026-07-22 amendment)
+
+v0.1 §11.3's structural ceilings (raw envelope size, parsed-tree nesting depth, issuer key manifest `keys[]` length, artifact manifest `artifacts[]` length) are wire/envelope-level requirements, not v0.1-payload-shape-specific ones — they bind every `attest_version` this specification family defines, including v0.2's hybrid envelopes and hybrid key manifests. No v0.2-specific ceiling value differs from v0.1's; this section exists only to state the binding explicitly, since a reader of the additive v0.2 delta might otherwise assume §11.3 stayed v0.1-scoped.
 
 ## 7. Stage 2 architecture and substrate
 
@@ -379,6 +385,14 @@ v0.2 Stage 1, as originally shipped, left revocation records' own authentication
 
 Conformance vector 28m pins the mechanism this closes: an Ed25519-only-signed revocation record against a HYBRID issuer key is unconditionally rejected and ignored (`revocation: "unknown"`, `ok: true`) — the record simply never counts, regardless of any transparency/anchor evidence presented alongside it (§10 confirms transparency evidence cannot rescue OR condemn a revocation verdict either way).
 
+### 13.1 Mixed-keyset prohibition and migration ceremony (normative, 2026-07-22 amendment)
+
+**An issuer that declares the hybrid profile MUST NOT hold an Ed25519-only key in state `active`** (§2.3). Leaving one active after adopting hybrid signing silently downgrades the issuer's claimed hybrid protection back to classical-only: an attacker who has broken only Ed25519 can still forge under the still-active Ed25519-only sibling, with no visible signal that hybrid protection never actually applied to receipts a buyer might reasonably assume it covered. This is `attack_mixed_keyset_hijack` in the formal threat-model exhibits — the motivating attack for this rule.
+
+**Migration is a single manifest step.** The same `manifest_version` increment that introduces the hybrid key MUST retire (or otherwise move out of `active`) every Ed25519-only key the issuer holds — there is no intermediate, spec-sanctioned state where a hybrid key and an active Ed25519-only key coexist as a deliberate migration phase.
+
+**Verifier behavior.** A conforming verifier that resolves an issuer manifest exhibiting the mixed-keyset condition (at least one hybrid key-entry AND at least one Ed25519-only key-entry in state `active`) for a v0.2 receipt it is verifying MUST emit the warning `mixed_keyset_active_ed_only_sibling`. This warning is the entire verifier-side contract: no result-vocabulary field (§10.1, v0.1 §11.1) caps a "hybrid strength" classification, because none exists — the layered result reports `signature`/`schema`/`trust`/`revocation`/`binding` exactly as it would for any other v0.2 receipt, with this warning as the caller's signal to investigate the issuer's key hygiene. A manifest whose Ed25519-only keys are all `retired` or `compromised` — the completed migration ceremony above — carries no such warning.
+
 ## 14. Bundle transparency evidence: the `proofs/` member
 
 An offline `.attest` bundle (v0.1 §14.1) MAY carry transparency/corroboration evidence for its receipts, one JSON evidence bundle (§10.2's shape) per receipt, as a `proofs/` member.
@@ -399,7 +413,19 @@ This section states Stage 2's bound, honestly and normatively — not as a cavea
 
 ## 16. Conformance: group 28 (transparency/corroboration)
 
-The conformance leaf group [`docs/spec/vectors/28-transparency/`](vectors/28-transparency/) adds 14 leaves (28a–28n) to the 52 pre-Stage-2 leaves (the 43 v0.1 leaves, the 8 `26-hybrid` leaves, and the single `27-valid-to-absent` leaf), for **66 total** — the conformance floor this document and its implementations MUST meet. Every group-28 leaf's `expected.json` additionally carries `transparency`, `corroboration`, and `manifest_freshness` — the only group where these three fields appear; every other leaf's absence of them means the verifier saw no transparency evidence at all (zero-behavior-change default, §10). Each leaf runs against every conformance runner (Python reference, TypeScript verifier) from the same shared golden files, per the discipline of v0.1 §15 and [`docs/spec/vectors/README.md`](vectors/README.md).
+The conformance leaf group [`docs/spec/vectors/28-transparency/`](vectors/28-transparency/) adds 14 leaves (28a–28n) to the 54 pre-Stage-2 leaves (the 45 v0.1 leaves, v0.1 §15 — 43 plus [`29-limits`](vectors/29-limits/)'s 2 leaves — the 8 `26-hybrid` leaves, and the single `27-valid-to-absent` leaf), for 68. Together with [`30-mixed-keyset`](vectors/30-mixed-keyset/)'s 2 leaves (§13.1), the full corpus this document and its implementations MUST meet is **70 total**. Every group-28 leaf's `expected.json` additionally carries `transparency`, `corroboration`, and `manifest_freshness` — the only group where these three fields appear; every other leaf's absence of them means the verifier saw no transparency evidence at all (zero-behavior-change default, §10). Each leaf runs against every conformance runner (Python reference, TypeScript verifier) from the same shared golden files, per the discipline of v0.1 §15 and [`docs/spec/vectors/README.md`](vectors/README.md).
+
+### 16.1 Structural ceilings normed (2026-07-22 amendment)
+
+The Stage 2 evidence-parsing modules already enforced fixed structural bounds on untrusted transparency/anchor evidence before this amendment; this section formalizes those pre-existing, unchanged bounds as conformance-surface requirements (attest-versioning.md §5) rather than introducing new limits:
+
+| Ceiling | Value | Module |
+| --- | --- | --- |
+| Inclusion/consistency proof length | 64 hashes | `transparency.py` (`_MAX_PROOF_LEN`) |
+| Checkpoint note text length | 500,000 chars | `tlog.py` (`_MAX_NOTE_TEXT_LEN`) |
+| Checkpoint signature-line count | 64 | `tlog.py` (`_MAX_NOTE_SIGNATURES`) |
+
+None of these values changed and no vector distinguishes pre/post behavior for this specific norming — the reference implementation and TypeScript verifier already enforced them byte-for-byte identically before this revision.
 
 | Leaf | Checks |
 | --- | --- |
@@ -418,12 +444,14 @@ The conformance leaf group [`docs/spec/vectors/28-transparency/`](vectors/28-tra
 | `28m` | **Documented adaptation** from "post-horizon Ed-only revocation": `verify()`'s revocation classification has no `crqc_horizon`-shaped input at all — the horizon cap and revocation classification are separate subsystems, so a literal "post-horizon revocation" cannot be expressed through any `verify()` call. Adapted to the mechanism that would have to exist for that framing to hold: an Ed25519-only-signed revocation record against a HYBRID issuer key is unconditionally rejected/ignored (§13's AND rule, fail-closed) — `revocation: "unknown"`, `ok: true`. |
 | `28n` | An evidence `entry` whose `type` the log's closed schema (§8) doesn't recognize → the claim is unresolvable before any checkpoint/proof is even consulted (`transparency_claim_unresolvable`); the receipt itself verifies untouched. |
 
-### 16.1 Vector determinism
+### 16.2 Vector determinism
 
 **Non-normative note:** group-28 vectors are generated deterministically by [`tools/gen_vectors.py`](../../tools/gen_vectors.py)'s `gen_28_transparency`, the same generator and determinism gate as every other group. Checkpoint/log fixtures use fixed keys and seeds; the `ots`/`rfc3161` anchor fixtures are frozen and committed (a committed OTS proof plus a pinned test Bitcoin header; synthetic opaque bytes for the `rfc3161` token) — no network access occurs in any conformance test, ever.
 
 ## Revision log
 
+- **2026-07-22 (rev 3)**: §2.3 + §13.1 added — mixed-keyset prohibition: an issuer declaring the hybrid profile MUST NOT hold an active Ed25519-only key; migration is a single manifest-version step; a conforming verifier emits `mixed_keyset_active_ed_only_sibling` when the condition is present. — vectors: 30-mixed-keyset
+- **2026-07-22 (rev 2)**: §6.2 added — v0.1 §11.3's normative structural ceilings bind v0.2 too; §16.1 added — Stage 2's pre-existing evidence-parsing bounds (`_MAX_PROOF_LEN`, `_MAX_NOTE_TEXT_LEN`, `_MAX_NOTE_SIGNATURES`) formalized as conformance-surface requirements, unchanged in value; §6/§16 leaf counts updated for `29-limits`. — vectors: 29-limits
 - **2026-07-22 (rev 1)**: revision log introduced by attest-versioning.md §5; no normative change. — vectors: none
 
 ## References

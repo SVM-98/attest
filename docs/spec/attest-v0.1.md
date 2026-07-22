@@ -73,7 +73,7 @@ A receipt is transmitted as a JSON envelope with exactly three top-level members
 | Field | Type | Required | Semantics |
 | --- | --- | --- | --- |
 | `attest_version` | string, const `"0.1"` | REQUIRED | Fixes the payload shape and the crypto suite (§8–§10) for this receipt. |
-| `receipt_id` | string, ULID (`^[0-9A-HJKMNP-TV-Z]{26}$`) | REQUIRED | ULID: sortable and coordination-free; its randomness provides practical collision-resistance. |
+| `receipt_id` | string, ULID (`^[0-7][0-9A-HJKMNP-TV-Z]{25}$`) | REQUIRED | ULID: sortable and coordination-free; its randomness provides practical collision-resistance. The leading character is bounded to `[0-7]` — a 26-char Crockford base32 ULID otherwise overflows the 128-bit value space (the same constraint [`attest-receipt.schema.json`](schema/attest-receipt.schema.json)'s `receipt_id` pattern already enforced; this row previously omitted it, a prose-only drift fixed 2026-07-22, no behavior change). |
 | `issued_at` | string, `YYYY-MM-DDTHH:MM:SSZ` (UTC) | REQUIRED | Issuance timestamp; anchors key-validity checks (§11 step 3) and `refund_window` revocation (§12). |
 | `supersedes` | string (ULID) or `null` | Schema-optional; the reference issuer always emits it (defaulting to `null`) | Informational lineage pointer to a prior `receipt_id` this one replaces. A superseding re-issue does **not** invalidate the superseded receipt absent buyer consent; a verifier MUST treat it as lineage metadata only, never as an implicit revocation. |
 | `issuer` | object | REQUIRED | See §5.2. |
@@ -349,6 +349,24 @@ A conforming verifier MUST emit a warning for each of the following conditions w
 
 Offline verifiers with no `revocation_view` report `revocation: "unknown"` honestly rather than failing closed on the whole receipt — a receipt's evidentiary value degrades gracefully, the way a paper receipt's does.
 
+### 11.3 Structural ceilings (normative, 2026-07-22 amendment)
+
+A conforming verifier MUST bound the resource a hostile envelope, key manifest, or artifact manifest can force it to spend before any cryptographic or schema work runs, per the amendment procedure (attest-versioning.md §5). Two distinct classes of ceiling are named below, and they are worded differently on purpose:
+
+- **Newly-introduced ceilings** (raw envelope size; issuer key manifest `keys[]` length; artifact manifest `artifacts[]` length) did not exist as a conformance requirement before this amendment. For these, a conforming verifier MUST accept inputs within the ceiling and MAY reject inputs beyond it as a resource-exhaustion guard. The reference implementations reject inputs beyond the ceiling; the conformance leaves in vector group [`29-limits`](vectors/29-limits/) pin that reference-profile behavior, not a universal MUST-reject.
+- **Pre-existing, already-enforced bounds** (parsed-tree nesting depth; the revocation-view record count, §12.4) were already unconditionally enforced before this amendment. This section only formalizes them as conformance-surface requirements; it changes no behavior, and they keep their unconditional MUST-reject wording.
+
+| Ceiling | Value | Checked | Rejects with | Class |
+| --- | --- | --- | --- | --- |
+| Raw envelope size | 1,048,576 bytes (2²⁰) | Step 0, on the undecoded bytes, before any parsing | `schema: "invalid"` | New — acceptance floor |
+| Parsed envelope tree nesting depth | 256 | During strict parsing (§10, `canon.loads_strict`) — this is `canon.py`'s own pre-existing parser structural safety cap, not a second, smaller conformance ceiling layered on top of it | `schema: "not_checked"` — a parse failure, reported the same way any other malformed input is (no parsed object is ever produced) | Pre-existing — unconditional |
+| Issuer key manifest `keys[]` length | 256 entries | Step 2, once the manifest is resolved from the trust store, before any key lookup | `schema: "invalid"` | New — acceptance floor |
+| Artifact manifest `artifacts[]` length | 4,096 entries | Wherever an artifact manifest's own self-consistency is checked (§7.2) | Manifest treated as self-inconsistent | New — acceptance floor |
+
+The nesting-depth ceiling is `canon.py`'s own long-standing parser structural safety cap (256), which has never rejected a receipt nesting a handful of levels deep, exercised at its exact boundary by [`docs/spec/vectors/21-canon-strict`](vectors/21-canon-strict/) leaves `b`/`c`/`d`: this amendment states that pre-existing bound normatively and introduces nothing smaller on top of it, so leaves `b-depth-255` and `c-depth-256` keep their original accepted expectations, per attest-versioning.md §2's additive-pattern rule. Vector group [`29-limits`](vectors/29-limits/) exercises the two newly-introduced ceilings that sit on `verify()`'s own wire surface (envelope size, key-manifest array length); the artifact-manifest ceiling is exercised directly against `verify_artifact_manifest`/`verifyArtifactManifest`, outside `verify()`'s own wire surface, so it carries no dedicated vector leaf — see §15.
+
+A byte-length, key-manifest-array, or artifact-manifest-array ceiling failure is reported as `schema: "invalid"` (not the `"not_checked"` value most other step-0 failures use, §11.1): these are conformance-surface structural requirements on the envelope's/manifest's own shape, not parse-format failures in the RFC 8785 sense. The nesting-depth ceiling is the one exception to this: because it is enforced by the parser itself, an over-ceiling receipt never produces a parsed object at all, so it is reported the same way any other malformed input is, `schema: "not_checked"` — unchanged, pre-existing behavior.
+
 ## 12. Revocation records
 
 A revocation record is a minimal, issuer-signed side-document:
@@ -385,6 +403,12 @@ What an authenticated, matching record (`status == "revoked"`) then *means* depe
 
 `T`, used in `not_revoked_as_of:<T>` (§11.1), MUST be computed as the maximum `revoked_at` across **all authenticated records** the verifier consulted in the supplied revocation view — regardless of which `receipt_id` they target. It describes how current the verifier's authenticated revocation feed is, not this one receipt's own history. Restricting the computation to authenticated records is a required security property: an unauthenticated record with a forged far-future `revoked_at` MUST NOT be able to inflate the reported freshness of the verifier's data. With zero authenticated records available, `T` has no trustworthy value and the result MUST be the bare literal `unknown`.
 
+### 12.4 Revocation-view record ceiling (normed, 2026-07-22 amendment)
+
+A conforming verifier MUST bound the number of records it will evaluate from an untrusted `revocation_view`: 10,000 records (the reference implementations' pre-existing `verify._MAX_REVOCATION_RECORDS` default, a 2026-07-13 hardening that predates this amendment; unchanged in value here). This is a pre-existing, already-enforced bound in the §11.3 sense — this amendment only states it normatively, it does not introduce a new ceiling or change behavior.
+
+An oversized view (more than 10,000 records) is not evaluated — never truncated (a truncated subset could misreport a genuine revocation as absent), never raised as an exception. It fails closed for revocable receipts (`license.revocability` of `refund_window` or `policy`): an untrusted view too large to evaluate cannot rule out a revocation, so it MUST NOT certify the receipt, and the failure is recorded as an error (`ok` becomes `false`). For `license.revocability: "none"` (irrevocable), a revocation record can never affect `ok` regardless of the view's size, so an oversized view is a non-fatal warning instead. In both cases `revocation` is reported as `unknown`. This bound exists independent of §11.3's structural ceilings — it is a per-call record-count cap on trusted-input-shaped-as-untrusted data (§6's `revocation_view` parameter), not a wire-format or manifest-shape structural bound.
+
 ## 13. Delivery member and single-receipt sharing
 
 A bare `.attest.json` envelope — payload, signatures, and an optional `delivery` block (§4.2) — is self-contained: when `delivery.salt` and/or `delivery.issuer_manifest` are populated, the envelope carries everything a verifier needs without any account page or bundle machinery, which is what makes an ordinary order-confirmation email a valid integration point.
@@ -411,7 +435,7 @@ MUST contain `salts.json` (`receipt_id → salt`) and, if used, `keys/` (per-rec
 
 ## 15. Test vectors and conformance
 
-The conformance vectors under [`docs/spec/vectors/`](vectors/) are the attest conformance suite. Since v0.2 it is no longer a v0.1-only corpus: groups `01`–`25` (43 leaves, the corpus as of the `v0.1.2` release) define **v0.1** conformance, while `26-hybrid`, `27-valid-to-absent` and `28-transparency` exercise v0.2 behaviour. A v0.1-only verifier is REQUIRED to reject v0.2 envelopes, so it cannot reproduce the v0.2 expectations and is measured against the 43-leaf v0.1 subset; an implementation claiming v0.2 must reproduce all 66. **An implementation is attest-conformant if and only if it produces the expected `VerificationResult` — every component listed in a vector's `expected.json`, matched exactly — for every vector present under `docs/spec/vectors/`.**
+The conformance vectors under [`docs/spec/vectors/`](vectors/) are the attest conformance suite. Since v0.2 it is no longer a v0.1-only corpus: groups `01`–`25` and `29-limits` (45 leaves) define **v0.1** conformance, while `26-hybrid`, `27-valid-to-absent`, `28-transparency` and `30-mixed-keyset` exercise v0.2 behaviour. `29-limits` (§11.3's structural ceilings) binds v0.1 as well as v0.2 — the two newly-introduced acceptance-floor ceilings it exercises (raw envelope size, issuer key manifest `keys[]` length) added by the amendment that introduced it (2026-07-22, attest-versioning.md §5); the pre-existing `21-canon-strict` leaves `b-depth-255`/`c-depth-256` are unaffected by it and keep their original `ok: true` expectations, since the nesting-depth ceiling §11.3 documents is `canon.py`'s own pre-existing 256 parser cap, not a new, smaller one. A v0.1-only verifier is REQUIRED to reject v0.2 envelopes, so it cannot reproduce the v0.2-only expectations and is measured against the 45-leaf v0.1 subset; an implementation claiming v0.2 must reproduce all 70. **An implementation is attest-conformant if and only if it produces the expected `VerificationResult` — every component listed in a vector's `expected.json`, matched exactly — for every vector present under `docs/spec/vectors/`.**
 
 | Vector | Directory | Exercises |
 | --- | --- | --- |
@@ -462,6 +486,8 @@ This appendix outlines, but v0.1 does not build, a registry layer: independent n
 
 ## Revision log
 
+- **2026-07-22 (rev 3)**: §11.3 added — normative structural ceilings: two newly-introduced acceptance floors (raw envelope size, issuer manifest `keys[]` length; artifact manifest `artifacts[]` length carries no dedicated vector) that a verifier MUST accept within and MAY reject beyond, and the pre-existing parsed-tree nesting-depth cap (256, `canon.py`'s own parser bound — not a new, smaller ceiling) and revocation-view record cap (10,000, §12.4) formalized with their unconditional wording unchanged; §15 leaf counts updated for the new `29-limits` vector group (envelope size, key-manifest length). — vectors: 29-limits
+- **2026-07-22 (rev 2)**: §5.1 `receipt_id` prose regex corrected to `^[0-7][0-9A-HJKMNP-TV-Z]{25}$`, matching the schema's pre-existing pattern (editorial drift fix, no behavior change). — vectors: none
 - **2026-07-22 (rev 1)**: revision log introduced by attest-versioning.md §5; no normative change. — vectors: none
 
 ## References

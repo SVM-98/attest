@@ -1564,9 +1564,15 @@ def gen_21_canon_strict() -> None:
         expected=dict(parse_reject_base),
     )
 
-    # (b)(c)(d) depth boundary triple: whole-text nesting 255 / 256 / 257.
-    # The deep structure lives in an unknown top-level payload field "x"
-    # (vector 10 pins unknown-field tolerance: schema stays valid + warning).
+    # (b)(c)(d) depth boundary triple: whole-text nesting 255 / 256 / 257,
+    # against canon.py's own parse-time structural safety cap (256,
+    # `canon.MAX_DEPTH` — exists only to keep the parser itself safe from
+    # stack exhaustion; also the single normative nesting-depth ceiling,
+    # `validate.MAX_JSON_DEPTH` aliases it, 2026-07-22 fix wave — see
+    # `validate.py`'s `MAX_JSON_DEPTH` docstring). The deep structure lives
+    # in an unknown top-level payload field "x" (vector 10 pins
+    # unknown-field tolerance: schema stays valid + warning), so 255/256 are
+    # genuinely, cleanly signed and accepted; only 257 trips the cap.
     for depth_target, subname in ((255, "b-depth-255"), (256, "c-depth-256"), (257, "d-depth-257")):
         deep_payload = issue.build_payload(**_base_payload_kwargs())
         # envelope text depth at "x" = {envelope {payload [x nesting...]}} = 2 + levels
@@ -2757,6 +2763,210 @@ def gen_28_transparency() -> None:
     )
 
 
+# --- vector 29 (G1 normative ceilings, attest-versioning.md §5 amendment) ---
+#
+# Three leaves, each a genuinely-signed envelope rejected purely because it
+# crosses one of the new structural ceilings (validate.py/manifests.py) —
+# never because of a schema-shape or signature problem otherwise.
+
+_LIMITS_FILLER_SEED_PREFIX = "attest-vector-29c-filler"
+
+
+def gen_29_limits() -> None:
+    # No _gen_29b_nesting_depth() (2026-07-22 fix wave): the nesting-depth
+    # ceiling is not a distinct, newly-introduced conformance-surface bound
+    # (it aliases canon.py's own pre-existing 256 parse-time cap, see
+    # validate.py's MAX_JSON_DEPTH docstring) — its boundary is already
+    # exercised by the 21-canon-strict b/c/d triple, so a dedicated leaf
+    # here would be redundant with that group.
+    _gen_29a_envelope_oversize()
+    _gen_29c_manifest_array_overflow()
+
+
+def _gen_29a_envelope_oversize() -> None:
+    """`validate.MAX_ENVELOPE_BYTES` bounds the raw envelope before any
+    parsing work — a genuinely signed receipt whose serialized size exceeds
+    it is rejected with `schema: "invalid"` at the parse boundary, never
+    reaching signature verification. The overage is comfortably over the
+    ceiling (no exact-boundary claim): the two conformance runners
+    re-serialize `envelope.json` differently (Python's replay test
+    re-dumps with `json.dumps` default separators; the TS replay test reads
+    the generator's indented file bytes directly) — always BIGGER than the
+    Python form, never smaller, so "over" stays "over" in both runners
+    regardless of which serialization is measured.
+    """
+    padding = validate.MAX_ENVELOPE_BYTES + 4096
+    payload = issue.build_payload(**_base_payload_kwargs(title="x" * padding))
+    _assert_schema_valid(payload)
+    envelope = issue.issue(payload, ISSUER_KP, ISSUER_KID)
+    envelope_len = len(json.dumps(envelope).encode("utf-8"))
+    assert envelope_len > validate.MAX_ENVELOPE_BYTES, envelope_len
+    trust = _issuer_only_trust()
+    expected = {
+        "signature": "invalid",
+        "schema": "invalid",
+        "revocation": "unknown",
+        "binding": "not_checked",
+        # The byte-ceiling check runs BEFORE any parsing, so trust is never
+        # resolved from the (never-read) payload.issuer.id — it stays at its
+        # TOFU default, same as every other precondition failure in step 0.
+        "trust": "unauthenticated_tofu",
+        "ok": False,
+        "errors_contains": [f"envelope exceeds {validate.MAX_ENVELOPE_BYTES} bytes"],
+        "warnings": [],
+    }
+    write_vector(
+        "29-limits/a-envelope-oversize",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected,
+    )
+
+
+def _gen_29c_manifest_array_overflow() -> None:
+    """`manifests.MAX_MANIFEST_KEYS` bounds the issuer key manifest's
+    `keys[]` array — checked in `verify.py` right after the manifest is
+    resolved from the trust store, before any specific key is looked up in
+    it. The receipt itself is genuinely, cleanly signed by a key that IS
+    listed in the oversized manifest; only the manifest's own size trips
+    rejection."""
+    filler_entries = [
+        manifests.key_entry(
+            f"{ISSUER_ID}/keys/2025-01#ed25519-filler-{i}",
+            keys.from_seed(
+                hashlib.sha256(f"{_LIMITS_FILLER_SEED_PREFIX}-{i}".encode()).digest()
+            ).pub,
+            KEY_VALID_FROM,
+            None,
+            "active",
+        )
+        for i in range(manifests.MAX_MANIFEST_KEYS)
+    ]
+    entries = [
+        manifests.key_entry(ISSUER_KID, ISSUER_KP.pub, KEY_VALID_FROM, None, "active"),
+        *filler_entries,
+    ]
+    assert len(entries) == manifests.MAX_MANIFEST_KEYS + 1
+    oversized_manifest = manifests.build_key_manifest(
+        ISSUER_ID, 1, MANIFEST_ISSUED_AT, entries, ISSUER_KP, ISSUER_KID
+    )
+    payload = issue.build_payload(**_base_payload_kwargs())
+    _assert_schema_valid(payload)
+    envelope = issue.issue(payload, ISSUER_KP, ISSUER_KID)
+    trust = _trust_material((ISSUER_ID, oversized_manifest, "tls"))
+    expected = {
+        "signature": "invalid",
+        "schema": "invalid",
+        "revocation": "unknown",
+        "binding": "not_checked",
+        "trust": "verified",
+        "ok": False,
+        "errors_contains": [f"issuer manifest exceeds {manifests.MAX_MANIFEST_KEYS} keys"],
+        "warnings": [],
+    }
+    write_vector(
+        "29-limits/c-manifest-array-overflow",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected,
+    )
+
+
+# --- vector 30 (G6 mixed-keyset prohibition, v0.2 §2.3/§13 amendment) ------
+
+_LEGACY_ED_SEED = bytes([31]) * 32  # Ed25519-only sibling key, continuing the numbering scheme
+_LEGACY_ED_KP = keys.from_seed(_LEGACY_ED_SEED)
+_LEGACY_KID = f"{ISSUER_ID}/keys/2025-01#ed25519-legacy-1"
+
+
+def _mixed_keyset_manifest(legacy_status: str) -> dict[str, Any]:
+    """A v0.2 key manifest declaring the hybrid suite (`ISSUER_KID`, hybrid,
+    always active) alongside an Ed25519-only sibling key (`_LEGACY_KID`)
+    whose status is the caller's choice — `"active"` reproduces the
+    mixed-keyset condition v0.2 §2.3/§13 prohibits; `"retired"` is the
+    clean, completed migration (§13's ceremony: the same
+    `manifest_version` bump that introduces the hybrid key retires every
+    Ed25519-only key)."""
+    entries = [
+        _hybrid_key_entry(ISSUER_KID, ISSUER_KP, status="active"),
+        manifests.key_entry(_LEGACY_KID, _LEGACY_ED_KP.pub, KEY_VALID_FROM, None, legacy_status),
+    ]
+    body: dict[str, Any] = {
+        "issuer": ISSUER_ID,
+        "manifest_version": 1,
+        "issued_at": MANIFEST_ISSUED_AT,
+        "keys": entries,
+    }
+    signable = manifests._signable(body)
+    body["manifest_signature"] = {
+        "kid": ISSUER_KID,
+        "sig": keys.b64u(keys.sign(signable, ISSUER_KP)),
+        "sig_ml_dsa_65": keys.b64u(_oracle_sign(signable)),
+    }
+    return body
+
+
+def gen_30_mixed_keyset() -> None:
+    # (a) sibling still active: the mixed-keyset condition is present ->
+    # warning, receipt otherwise verifies clean (the warning is the whole
+    # contract, v0.2 §2.3/§13 — no result field caps "hybrid strength").
+    manifest_a = _mixed_keyset_manifest("active")
+    assert manifests.has_active_ed_only_sibling(manifest_a) is True
+    payload_a = issue.build_payload(**_base_payload_kwargs(attest_version="0.2"))
+    _assert_schema_valid(payload_a)
+    envelope_a = _hybrid_envelope(payload_a, ISSUER_KP, ISSUER_KID)
+    trust_a = _trust_material((ISSUER_ID, manifest_a, "tls"))
+    expected_a = {
+        "signature": "valid",
+        "schema": "valid",
+        "revocation": "unknown",
+        "binding": "not_checked",
+        "trust": "verified",
+        "ok": True,
+        "errors": [],
+        "warnings_contains": ["mixed_keyset_active_ed_only_sibling"],
+    }
+    write_vector(
+        "30-mixed-keyset/a-active-ed-sibling-warn",
+        payload=payload_a,
+        envelope=envelope_a,
+        envelope_raw=None,
+        trust=trust_a,
+        expected=expected_a,
+    )
+
+    # (b) sibling retired: the migration ceremony completed correctly -> no
+    # mixed-keyset condition, no warning.
+    manifest_b = _mixed_keyset_manifest("retired")
+    assert manifests.has_active_ed_only_sibling(manifest_b) is False
+    payload_b = issue.build_payload(**_base_payload_kwargs(attest_version="0.2"))
+    _assert_schema_valid(payload_b)
+    envelope_b = _hybrid_envelope(payload_b, ISSUER_KP, ISSUER_KID)
+    trust_b = _trust_material((ISSUER_ID, manifest_b, "tls"))
+    expected_b = {
+        "signature": "valid",
+        "schema": "valid",
+        "revocation": "unknown",
+        "binding": "not_checked",
+        "trust": "verified",
+        "ok": True,
+        "errors": [],
+        "warnings": [],
+    }
+    write_vector(
+        "30-mixed-keyset/b-migrated-clean",
+        payload=payload_b,
+        envelope=envelope_b,
+        envelope_raw=None,
+        trust=trust_b,
+        expected=expected_b,
+    )
+
+
 def main() -> None:
     _clear_leaf_dirs(VECTORS_DIR)
     VECTORS_DIR.mkdir(parents=True, exist_ok=True)
@@ -2789,6 +2999,8 @@ def main() -> None:
     gen_26_hybrid()
     gen_27_valid_to_absent()
     gen_28_transparency()
+    gen_29_limits()
+    gen_30_mixed_keyset()
     leaf_count = sum(1 for _ in VECTORS_DIR.rglob("expected.json"))
     print(f"generated {leaf_count} vector cases under {VECTORS_DIR}")
 
