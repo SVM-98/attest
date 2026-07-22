@@ -487,9 +487,13 @@ rule Accept_v01_retired:
    is the literal '0.2' (Accept_v01 requires '0.1'), so dispatch is on the signed
    version alone; (2) the resolved entry MUST be 'hybrid, carrying real PQ material
    `pkpq`; (3) BOTH signatures must verify -- Ed verify(sigEd,payload,pubkey)=true
-   AND PQ verify_pq(sigPQ,payload,pkpq)=true. Status pattern 'active (a 'compromised
-   entry can never fire this rule -- fail-closed by construction; a dedicated v0.2
-   fail-closed theorem is Task 6).
+   AND PQ verify_pq(sigPQ,payload,pkpq)=true. Status pattern 'active -- a
+   'compromised entry can never fire this rule (fail-closed by construction), and
+   a 'retired one cannot either: the spec's retired-key acceptance (receipt stays
+   valid with a warning) is NOT modeled on the v0.2 path. NO dedicated v0.2
+   fail-closed theorem shipped -- Task 6 pivoted to the admission-scoped downgrade
+   theorems -- and because this rule omits AcceptInfo (below),
+   compromised_key_rejected quantifies over the v0.1 path ONLY.
    DELIBERATELY emits only Accept_v02 + Ok (+ the two Eq idioms), NOT AcceptInfo /
    AcceptProv. Reason (tractability, measured): AcceptInfo/AcceptProv are the exact
    antecedent keys of the frozen all-traces theorems acceptance_issuer_signed and
@@ -556,7 +560,13 @@ rule Reject_v01_compromised:
    operates on the SAME linear TrustHead the accept rules read, so an advanced
    head authorizes receipts. The clean advance PRESERVES provenance and requires
    an incoming 'clean flag (once flagged, trust never silently returns to clean --
-   §11.1 lineage taint). This rule is the ONLY UNFLAGGED way the head advances. */
+   §11.1 lineage taint). This rule is the ONLY UNFLAGGED way the head advances.
+   BOUNDARY (branch review 2026-07-22): the signature check below is the Ed leg
+   only (verify against spub) and the resolved 'active signer entry may be
+   'hybrid -- manifest continuity for a HYBRID signer under a broken-Ed adversary
+   is therefore NOT covered by this model. The normative hybrid manifest AND-rule
+   (v0.2 §2.3) is spec-side; modeling it belongs with P1.4's mixed-keyset fix
+   (attack_mixed_keyset_hijack exhibits the consequence). */
 rule Verifier_Continuity_Advance_v01:
     [ TrustHead(V, $I, ver, mid, prov, 'clean')
     , !ManifestEntry(mid, signerKid, salg, spub, spq, 'active')
@@ -1467,9 +1477,11 @@ lemma sanity_none_ignored:
 /* Review C1 linkage witness: an honestly ISSUED receipt acquires a revocability
    class and its honored revocation -- receipts and revocation machinery share
    one id space (the direct machine-checked refutation of the review's
-   "revocation classes are disconnected from honest receipts" finding). Both
-   signings (the receipt's and the record's) anchor to the SAME genesis
-   manifest/key to keep the two-signer search guided. */
+   "revocation classes are disconnected from honest receipts" finding). The
+   genesis manifest/key anchors the RECORD's signer; the receipt side is linked
+   by rid alone (Issued carries no key binding here) -- enough to guide the
+   two-signer search without claiming a shared-signer bind the formula does not
+   state. */
 lemma sanity_issued_receipt_revoked:
   exists-trace
   "Ex V I rid kid recTime mid #g #b #iss #p #vi #h.
@@ -1630,8 +1642,10 @@ lemma rev_record_authentic [reuse, use_induction]:
    a tautology of the honor premise), its class is honorable, the window
    admitted, AND (review I3 fix) the exact record is AUTHENTIC: really issued by
    the honest issuer (RevocationIssued) or some key of that issuer was revealed
-   beforehand (issuer-scoped). ALL HEADS -- no clean-verified condition (the
-   authenticity holds even under flagged trust; see rev_record_authentic). The
+   beforehand (issuer-scoped). SCOPED to heads with 'verified provenance and a
+   'clean flag -- the RevHonorProv premise below -- the same boundary carried by
+   rev_record_authentic (T4b): under TOFU or flagged trust this statement says
+   nothing, by design. The
    authenticity disjunct is DISCHARGED BY the [reuse] lemma rev_record_authentic
    (proven once at the admission point), so this all-traces statement chains
    RevocationHonored -> !AuthRevRecord -> RevRecordAdmitted -> (reuse) ->
@@ -1933,8 +1947,9 @@ lemma attack_tofu_forgery:
    publishes); a verifier bootstraps VERIFIED on that manifest; the attacker breaks
    kidE's Ed half and, with nothing else, drives a CLEAN continuity advance
    (ContinuityAdvance -- never the flagged branch) onto its OWN forged manifest.
-   The hybrid key never signs anything. Trust moves silently to the attacker while
-   the manifest's PQ-protected key sits there unused.
+   The hybrid key never signs a continuity advance (the negative conjunct excludes
+   exactly that -- not every conceivable kidH signature). Trust moves silently to
+   the attacker while the manifest's PQ-protected key sits there unused.
    The negative conjunct is what makes it G6 rather than a generic key-theft
    witness: no authority advance ANYWHERE in the trace was signed by the hybrid
    key. The normative fix (require a hybrid signature once any hybrid key is
