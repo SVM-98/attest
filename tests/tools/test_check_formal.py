@@ -219,12 +219,19 @@ def real_theory_src() -> str:
     return REAL_THEORY.read_text(encoding="utf-8")
 
 
-def green_summary(only: set[str] | None = None) -> str:
-    """Return a verified full or shard summary in CONTRACT corpus order."""
+def green_summary(only: set[str] | None = None, rest_status: str | None = None) -> str:
+    """Return a verified full or shard summary in CONTRACT corpus order.
+
+    With ``rest_status``, non-``only`` lemmas are emitted with that status —
+    a real ``--prove=<name>`` run reports every unproved lemma as
+    ``analysis incomplete``, so shard-shaped fixtures need the full corpus.
+    """
     lines = ["summary of summaries:", "", "analyzed: formal/attest.spthy", ""]
     for name, entry in cf.CONTRACT.items():
         if only is None or name in only:
             lines.append(f"  {name} ({entry['trait']}): verified (1 steps)")
+        elif rest_status is not None:
+            lines.append(f"  {name} ({entry['trait']}): {rest_status}")
     return "\n".join(lines) + "\n"
 
 
@@ -470,6 +477,26 @@ def test_main_only_does_not_launder_non_scoped_falsification(tmp_path: Path) -> 
     summary = green_summary(only=SHARD)
     summary += "  rotation_no_hijack (all-traces): falsified - found trace (7 steps)\n"
     rc = run_main(tmp_path, summary, extra=["--only", ",".join(sorted(SHARD))])
+    assert rc == 1
+
+
+def test_main_only_accepts_real_shard_shape(tmp_path: Path) -> None:
+    """A real ``--prove=<name>`` summary lists every unproved lemma as
+    ``analysis incomplete`` — out-of-scope incompleteness is the expected
+    shard shape, not a failure. Caught by the first full-prove run against
+    the real prover (2026-07-22): injected fixtures never had this shape."""
+    summary = green_summary(only=SHARD, rest_status="analysis incomplete (1 steps)")
+    rc = run_main(tmp_path, summary, extra=["--only", ",".join(sorted(SHARD))])
+    assert rc == 0
+
+
+def test_main_only_fails_scoped_lemma_not_verified(tmp_path: Path) -> None:
+    """In-scope lemmas must still be verified — scoping the blanket check
+    must not drop the result assertion for the shard's own lemmas."""
+    scoped = sorted(SHARD)
+    verified_part = {n for n in SHARD if n != scoped[0]}
+    summary = green_summary(only=verified_part, rest_status="analysis incomplete (1 steps)")
+    rc = run_main(tmp_path, summary, extra=["--only", ",".join(scoped)])
     assert rc == 1
 
 

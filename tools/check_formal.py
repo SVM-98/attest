@@ -700,20 +700,28 @@ def main(argv: Sequence[str] | None = None) -> int:
             _fail(f"summary reports lemma not in CONTRACT: {name}")
             failures += 1
 
-    # A summary may include results beyond a shard's required presence set,
-    # but none of those results may be non-verified contract lemmas.
+    # A summary may include results beyond a shard's required presence set: a
+    # real ``--prove=<name>`` run reports every unproved lemma as ``analysis
+    # incomplete`` — the expected shard shape, never a failure out of scope.
+    # A falsified contract lemma is an alarm regardless of scope: sharding
+    # must never launder a falsification.
+    scope_set = set(scope)
     for name, (_, result) in results.items():
-        if name in CONTRACT and result != "verified":
-            _fail(f"lemma {name} is not verified: {result}")
+        if name in CONTRACT and name not in scope_set and result == "falsified":
+            _fail(f"out-of-scope contract lemma falsified: {name}")
             failures += 1
 
-    # Result assertions, scoped to the shard (or the whole corpus).
+    # Result assertions, scoped to the shard (or the whole corpus): present,
+    # verified, and trait matching the pin.
     for name in scope:
         if name not in results:
             _fail(f"pinned lemma missing from summary: {name}")
             failures += 1
             continue
         trait, result = results[name]
+        if result != "verified":
+            _fail(f"lemma {name} is not verified: {result}")
+            failures += 1
         if trait != CONTRACT[name]["trait"]:
             _fail(f"trait mismatch for {name}: pinned {CONTRACT[name]['trait']}, summary {trait}")
             failures += 1
