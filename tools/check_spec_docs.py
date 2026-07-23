@@ -748,6 +748,10 @@ def check_standards_relationship() -> list[str]:
 # no DOTALL) so the two declarations can never bleed into each other when
 # both appear in the same paragraph -- a greedy `.*` spanning newlines could
 # otherwise let the v0.1 regex capture the v0.2 sentence's revision number.
+# Each is matched with `findall`, not `search`, and the checker requires
+# EXACTLY ONE match in the whole source: a source carrying a valid
+# declaration AND a second, conflicting one used to pass silently, because
+# `search` only ever validated the first match (2026-07-23 fix, finding 8).
 _DRAFT_V01_SNAPSHOT_RE = re.compile(r"attest-v0\.1\.md[^\n]*revision (\d+)")
 _DRAFT_V02_SNAPSHOT_RE = re.compile(r"attest-v0\.2\.md[^\n]*revision (\d+)")
 
@@ -778,15 +782,6 @@ def _internet_draft_source_path() -> Path | None:
     return candidates[0] if len(candidates) == 1 else None
 
 
-def _internet_draft_source_text() -> str:
-    """Read the real committed draft source. Raises if it is missing or
-    ambiguous -- callers that need fail-closed behavior use
-    check_internet_draft_snapshot() instead."""
-    path = _internet_draft_source_path()
-    assert path is not None, "internet-draft source missing or ambiguous"
-    return path.read_text(encoding="utf-8")
-
-
 def _revisions_in_log(spec_text: str) -> set[int]:
     """Every `(rev N)` integer inside a spec's own `## Revision log` section
     (never body prose elsewhere, which may mention a revision in passing)."""
@@ -804,16 +799,20 @@ def check_internet_draft_snapshot() -> list[str]:
 
     Checks that exactly one of `ietf/draft-martinalli-open-purchase-receipts.md`
     /`.xml` exists, that its text declares (via two pinned per-line regexes)
-    which attest-v0.1.md/attest-v0.2.md revision it mirrors, that each
-    declared revision integer EXISTS in the corresponding spec's own
-    revision log (existence, not latest-equality -- a later spec revision
-    bump alone must never turn this red; drift is instead detectable by a
-    reader comparing the declared revision against the living log), and that
-    the source cites the three RFCs the terminology defusals (RFC 9943,
-    RFC 9334) and the canonicalization section (RFC 8785) require by number.
-    Not wired into `collect_errors()`, same reasoning as
-    check_standards_relationship(): it does not cross-reference another
-    document's parsed structure, so it is called directly from `main()`.
+    which attest-v0.1.md/attest-v0.2.md revision it mirrors -- EXACTLY ONCE
+    each: a second, conflicting declaration for the same spec is ambiguous
+    and is reported as an error rather than silently validated against
+    whichever match happens to come first (2026-07-23 fix, finding 8) --
+    that each declared revision integer EXISTS in the corresponding spec's
+    own revision log (existence, not latest-equality -- a later spec
+    revision bump alone must never turn this red; drift is instead
+    detectable by a reader comparing the declared revision against the
+    living log), and that the source cites the three RFCs the terminology
+    defusals (RFC 9943, RFC 9334) and the canonicalization section
+    (RFC 8785) require by number. Not wired into `collect_errors()`, same
+    reasoning as check_standards_relationship(): it does not
+    cross-reference another document's parsed structure, so it is called
+    directly from `main()`.
     """
     source_path = _internet_draft_source_path()
     if source_path is None:
@@ -838,14 +837,15 @@ def check_internet_draft_snapshot() -> list[str]:
         ("attest-v0.1.md", _DRAFT_V01_SNAPSHOT_RE, _SPEC_V01_PATH),
         ("attest-v0.2.md", _DRAFT_V02_SNAPSHOT_RE, _SPEC_V02_PATH),
     ):
-        match = snapshot_re.search(text)
-        if match is None:
+        matches = snapshot_re.findall(text)
+        if len(matches) != 1:
             errors.append(
-                f"internet-draft: missing {spec_label} snapshot-revision declaration "
-                f"(expected to match {snapshot_re.pattern!r})"
+                f"internet-draft: expected exactly one {spec_label} snapshot-revision "
+                f"declaration (expected to match {snapshot_re.pattern!r}), found "
+                f"{len(matches)}"
             )
             continue
-        declared = int(match.group(1))
+        declared = int(matches[0])
         spec_text = spec_path.read_text(encoding="utf-8")
         if declared not in _revisions_in_log(spec_text):
             errors.append(
