@@ -130,24 +130,24 @@ being finished on branches, and are linked here rather than left invisible:
 Three further pieces make attest citable and checkable, not just built and
 tested, and are likewise linked here rather than left invisible:
 
-- **IETF Internet-Draft.** [`ietf/draft-martinalli-open-purchase-receipts.md`](https://github.com/SVM-98/attest/blob/feature/p1.6-standard-track/ietf/draft-martinalli-open-purchase-receipts.md)
+- **IETF Internet-Draft.** [`ietf/draft-martinalli-open-purchase-receipts.md`](https://github.com/SVM-98/attest/blob/pillar-1/ietf/draft-martinalli-open-purchase-receipts.md)
   is the source for `draft-martinalli-open-purchase-receipts-00`, a
   snapshot-profile mirror of the living spec (declares it mirrors v0.1
   revision 5 and v0.2 revision 6) that builds clean to `-00` txt/html in CI.
   It is ready to submit; submission to the IETF Datatracker is a deliberate
-  manual step, not something this repo automates. In progress on
-  [`feature/p1.6-standard-track`](https://github.com/SVM-98/attest/tree/feature/p1.6-standard-track).
-- **[Standards-relationship annex](https://github.com/SVM-98/attest/blob/feature/p1.6-standard-track/docs/spec/attest-standards-relationship.md).**
+  manual step, not something this repo automates. On
+  [`pillar-1`](https://github.com/SVM-98/attest/tree/pillar-1).
+- **[Standards-relationship annex](https://github.com/SVM-98/attest/blob/pillar-1/docs/spec/attest-standards-relationship.md).**
   Documents attest's boundary against every adjacent standard people compare
   it to — W3C Verifiable Credentials, eIDAS 2.0/the EUDI Wallet, JOSE/JWS and
   COSE, RFC 8785 (JCS), C2PA, SCITT/RFC 9943, and RATS (RFC 9334) — so each
   comparison is answered once instead of re-argued per issue. On
-  [`feature/p1.6-standard-track`](https://github.com/SVM-98/attest/tree/feature/p1.6-standard-track).
-- **[Conformance program](https://github.com/SVM-98/attest/blob/feature/p1.6-standard-track/docs/conformance.md).**
+  [`pillar-1`](https://github.com/SVM-98/attest/tree/pillar-1).
+- **[Conformance program](https://github.com/SVM-98/attest/blob/pillar-1/docs/conformance.md).**
   One documented command, run with a third party's own adapter against the
   vector corpus, produces a pass/fail report and a self-certification claim;
   both in-repo verifiers pass 97/97 through that exact path. On
-  [`feature/p1.6-standard-track`](https://github.com/SVM-98/attest/tree/feature/p1.6-standard-track).
+  [`pillar-1`](https://github.com/SVM-98/attest/tree/pillar-1).
 
 ## Quickstart
 
