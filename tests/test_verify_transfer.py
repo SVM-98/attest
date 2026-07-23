@@ -330,6 +330,44 @@ def test_double_assignment_earliest_leaf_index_wins() -> None:
     assert "transfer_double_assignment_conflict" in result.warnings
 
 
+def test_duplicate_transfer_claim_is_one_survivor_not_double_assignment() -> None:
+    hk = pq.HybridSigningKeys(ed=keys.generate(), mldsa=pq.generate())
+    record = _transfer_record()
+    bundle = _transfer_log_bundle([record], hk)[0]
+    claim = {"record": record, "evidence": bundle}
+
+    result = verify_with(
+        revocation_view=[_transferred_revocation_record()],
+        transfer_view=[claim, claim],
+        log_keys=[_transfer_log_key(hk)],
+        anchor_policy=_no_horizon_policy(),
+        revocability="policy",
+    )
+
+    assert result.revocation == "transferred"
+    assert "transfer_double_assignment_conflict" not in result.warnings
+
+
+def test_distinct_transfer_claims_remain_double_assignment() -> None:
+    hk = pq.HybridSigningKeys(ed=keys.generate(), mldsa=pq.generate())
+    early_record = _transfer_record(new_receipt_id=NEW_ID)
+    late_record = _transfer_record(new_receipt_id=LATE_NEW_ID)
+    early_bundle, late_bundle = _transfer_log_bundle([early_record, late_record], hk)
+
+    result = verify_with(
+        revocation_view=[_transferred_revocation_record()],
+        transfer_view=[
+            {"record": early_record, "evidence": early_bundle},
+            {"record": late_record, "evidence": late_bundle},
+        ],
+        log_keys=[_transfer_log_key(hk)],
+        anchor_policy=_no_horizon_policy(),
+        revocability="policy",
+    )
+
+    assert "transfer_double_assignment_conflict" in result.warnings
+
+
 def test_not_transferable_before_violation_ignored() -> None:
     """`transferred_at` (AT, 2026-07-23) earlier than the receipt's own
     `not_transferable_before` -> not honored, distinct warning."""

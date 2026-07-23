@@ -10,8 +10,8 @@ const chainLeaves = allLeaves.filter((d) => V.chainInput(d) !== null)
 const leaves = allLeaves.filter((d) => V.chainInput(d) === null)
 
 describe('conformance corpus through the site adapter', () => {
-  it('discovers the full vector suite (>= 95 leaves)', () => {
-    expect(allLeaves.length).toBeGreaterThanOrEqual(95)
+  it('discovers the full vector suite (>= 97 leaves)', () => {
+    expect(allLeaves.length).toBeGreaterThanOrEqual(97)
   })
 
   it.each(leaves.map((d) => [V.vectorId(d), d] as const))('%s', (_id, dir) => {

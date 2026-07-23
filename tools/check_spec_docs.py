@@ -554,6 +554,18 @@ _STAGE3_REQUIRED_LITERALS: tuple[str, ...] = (
     'revocation: "transferred"',
 )
 
+_CHAIN_AUDIT_HEADING = "### 17.5 Chain of title (separate audit surface)"
+_CHAIN_AUDIT_REQUIRED_LITERALS: tuple[str, ...] = (
+    "chain link {i}: no transfer record",
+    "chain link {i}: issuer signature invalid",
+    "chain link {i}: holder authorization invalid",
+    "chain link {i}: transfer record not logged",
+    "chain link {i}: transferred before not_transferable_before",
+    "chain link {i}: losing branch of a double assignment",
+    "chain link {i}: new receipt buyer.pubkey != new_holder_pubkey",
+    "chain link {i}: previous receipt lacks a backed transferred-class revocation",
+)
+
 
 def check_v02_stage3_transfer_profile(spec_v02: str) -> list[str]:
     """v0.2 §17 retains its heading and Stage 3 fixed vocabulary."""
@@ -570,6 +582,23 @@ def check_v02_stage3_transfer_profile(spec_v02: str) -> list[str]:
         if literal not in stage3_text:
             errors.append(f"attest-v0.2.md: §17 missing required literal {literal!r}")
     return errors
+
+
+def check_v02_chain_audit_literals(spec_v02: str) -> list[str]:
+    """v0.2 §17.5 pins the cross-language chain-audit diagnostic contract."""
+    section_match = re.search(
+        rf"^{re.escape(_CHAIN_AUDIT_HEADING)}$([\s\S]*?)(?=^### |^## |\Z)",
+        spec_v02,
+        re.MULTILINE,
+    )
+    if section_match is None:
+        return [f"attest-v0.2.md: missing required heading {_CHAIN_AUDIT_HEADING!r}"]
+    section_text = section_match.group(1)
+    return [
+        f"attest-v0.2.md: §17.5 missing required chain-audit literal {literal!r}"
+        for literal in _CHAIN_AUDIT_REQUIRED_LITERALS
+        if literal not in section_text
+    ]
 
 
 def check_v01_not_transferable_before_row(spec_v01: str) -> list[str]:
@@ -723,6 +752,7 @@ def collect_errors(
         f"attest-versioning.md: {e}" for e in check_versioning_transfer_registries(versioning)
     ]
     errors += check_v02_stage3_transfer_profile(spec_v02)
+    errors += check_v02_chain_audit_literals(spec_v02)
     errors += check_v01_not_transferable_before_row(spec_v01)
     errors += check_revision_logs(spec_v01, spec_v02)
     errors += _check_revision_log(versioning, "attest-versioning.md")

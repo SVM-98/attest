@@ -104,8 +104,8 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   classified (§2.5); the `revocation-record` and `transfer-record` log-entry types
   documented for the first time (§2.11, closing a pre-existing gap left open since
   rev 5); new §2.17 analyzing transfer-record observability and its pseudonymity
-  bound; a §5 note that a `transfer-record` log entry reveals only that some transfer
-  happened, never the parties.
+  bound; a §5 note that a `transfer-record` log entry is a content-free hash with a
+  non-authenticated issuer hint and does not by itself establish that a transfer happened.
 - Non-normative annex `docs/spec/attest-transfer-economics.md`: the resale-velocity
   problem, the issuer-royalty incentive (the Robot Cache precedent), the legal frame
   (*UsedSoft* C-128/11, *Tom Kabinet* C-263/18, and the `eu_usedsoft_asserted`

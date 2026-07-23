@@ -236,7 +236,7 @@ function resolveTransferBacking(
 
   const appendOnce = (warning: string) => { if (!warnings.includes(warning)) warnings.push(warning) }
 
-  const survivors: Array<[number, JsonObject]> = []
+  const survivors = new Map<string, [number, JsonObject]>()
   for (const claim of materialized) {
     const c = asObject(claim)
     if (!c) continue
@@ -278,12 +278,14 @@ function resolveTransferBacking(
       continue
     }
 
-    survivors.push([leafIndex, record])
+    const hash = recordHash(record)
+    const previous = survivors.get(hash)
+    if (previous === undefined || leafIndex < previous[0]) survivors.set(hash, [leafIndex, record])
   }
 
-  if (survivors.length === 0) return null
-  if (survivors.length > 1) appendOnce(TRANSFER_WARN.DOUBLE_ASSIGNMENT)
-  return survivors.reduce((best, cur) => (cur[0] < best[0] ? cur : best))[1]
+  if (survivors.size === 0) return null
+  if (survivors.size > 1) appendOnce(TRANSFER_WARN.DOUBLE_ASSIGNMENT)
+  return [...survivors.values()].reduce((best, cur) => (cur[0] < best[0] ? cur : best))[1]
 }
 
 export function classifyRevocation(

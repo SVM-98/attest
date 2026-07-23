@@ -453,6 +453,7 @@ _ERR_NO_TRANSFER_RECORD = "chain link {i}: no transfer record"
 _ERR_ISSUER_SIGNATURE_INVALID = "chain link {i}: issuer signature invalid"
 _ERR_HOLDER_AUTHORIZATION_INVALID = "chain link {i}: holder authorization invalid"
 _ERR_TRANSFER_RECORD_NOT_LOGGED = "chain link {i}: transfer record not logged"
+_ERR_NOT_TRANSFERABLE_BEFORE = "chain link {i}: transferred before not_transferable_before"
 _ERR_LOSING_BRANCH = "chain link {i}: losing branch of a double assignment"
 _ERR_LOOP_CLOSURE = "chain link {i}: new receipt buyer.pubkey != new_holder_pubkey"
 _ERR_MISSING_BACKED_REVOCATION = (
@@ -502,20 +503,23 @@ def audit_chain(
        payloads[i - 1]["receipt_id"]` and `record["new_receipt_id"] ==
        payloads[i]["receipt_id"]` — none found -> `_ERR_NO_TRANSFER_RECORD`,
        and checks 2-6 below are skipped entirely (nothing to check them
-       against); check 7 still runs independently.
+       against); check 8 still runs independently.
     2. `verify_record_signature(record, key_manifest)` -> issuer signature.
     3. `verify_authorization(record, payloads[i - 1]["buyer"]["pubkey"])` ->
        holder authorization, against the PREVIOUS receipt's own key.
     4. `record_logged_standing(...)` -> log inclusion.
-    5. Only once 2-4 all succeeded: among every OTHER transfer-view claim
+    5. When the previous receipt has `license.not_transferable_before`: both
+       it and `record["transferred_at"]` must be strict Stage-3 UTC
+       timestamps, and the transfer time must not be earlier than the floor.
+    6. Only once 2-4 all succeeded: among every OTHER transfer-view claim
        that is ALSO established (issuer sig + holder auth + logged) for the
        SAME previous `receipt_id` (regardless of ITS OWN `new_receipt_id` —
        this is what makes a double assignment detectable at all, §17.4),
        the selected record must hold the smallest log index -> losing
        branch of a double assignment.
-    6. `record["new_holder_pubkey"] == payloads[i]["buyer"]["pubkey"]` ->
+    7. `record["new_holder_pubkey"] == payloads[i]["buyer"]["pubkey"]` ->
        pubkey loop closure on the NEXT receipt.
-    7. (independent of the transfer record) an authenticated
+    8. (independent of the transfer record) an authenticated
        `status == "transferred"` revocation record for `payloads[i - 1]`'s
        `receipt_id` exists in `revocation_view`
        (`revocation.verify_record_signature`) -> the previous receipt's own
@@ -590,6 +594,33 @@ def audit_chain(
             if leaf_index is None:
                 errors.append(_ERR_TRANSFER_RECORD_NOT_LOGGED.format(i=i))
                 link_ok = False
+
+            prev_license = prev_payload.get("license")
+            not_transferable_before = (
+                prev_license.get("not_transferable_before")
+                if isinstance(prev_license, dict)
+                else None
+            )
+            if not_transferable_before is not None:
+                transferred_at = record.get("transferred_at")
+                floor_ok = _valid_utc_timestamp(not_transferable_before)
+                transferred_at_ok = _valid_utc_timestamp(transferred_at)
+                honored = False
+                if (
+                    floor_ok
+                    and transferred_at_ok
+                    and isinstance(transferred_at, str)
+                    and isinstance(not_transferable_before, str)
+                ):
+                    try:
+                        honored = _parse_date(transferred_at) >= _parse_date(
+                            not_transferable_before
+                        )
+                    except ValueError:
+                        honored = False
+                if not honored:
+                    errors.append(_ERR_NOT_TRANSFERABLE_BEFORE.format(i=i))
+                    link_ok = False
 
             if sig_ok and auth_ok and leaf_index is not None:
                 established_leaf_indices = [leaf_index]

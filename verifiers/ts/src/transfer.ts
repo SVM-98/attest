@@ -361,6 +361,7 @@ const errNoTransferRecord = (i: number) => `chain link ${i}: no transfer record`
 const errIssuerSignatureInvalid = (i: number) => `chain link ${i}: issuer signature invalid`
 const errHolderAuthorizationInvalid = (i: number) => `chain link ${i}: holder authorization invalid`
 const errTransferRecordNotLogged = (i: number) => `chain link ${i}: transfer record not logged`
+const errNotTransferableBefore = (i: number) => `chain link ${i}: transferred before not_transferable_before`
 const errLosingBranch = (i: number) => `chain link ${i}: losing branch of a double assignment`
 const errLoopClosure = (i: number) => `chain link ${i}: new receipt buyer.pubkey != new_holder_pubkey`
 const errMissingBackedRevocation = (i: number) =>
@@ -401,19 +402,22 @@ function asObject(v: JsonValue | undefined): JsonObject | null {
  * 1. select the transfer-view claim whose `record.receipt_id ==
  *    payloads[i - 1].receipt_id` and `record.new_receipt_id ==
  *    payloads[i].receipt_id` — none found -> errNoTransferRecord, and
- *    checks 2-6 below are skipped entirely; check 7 still runs
+ *    checks 2-7 below are skipped entirely; check 8 still runs
  *    independently.
  * 2. `verifyRecordSignature(record, keyManifest)` -> issuer signature.
  * 3. `verifyAuthorization(record, payloads[i - 1].buyer.pubkey)` -> holder
  *    authorization, against the PREVIOUS receipt's own key.
  * 4. `recordLoggedStanding(...)` -> log inclusion.
- * 5. Only once 2-4 all succeeded: among every OTHER transfer-view claim
+ * 5. When the previous receipt has `license.not_transferable_before`: both
+ *    it and `record.transferred_at` must be strict Stage-3 UTC timestamps,
+ *    and the transfer time must not be earlier than the floor.
+ * 6. Only once 2-4 all succeeded: among every OTHER transfer-view claim
  *    that is ALSO established (issuer sig + holder auth + logged) for the
  *    SAME previous receipt_id, the selected record must hold the smallest
  *    log index -> losing branch of a double assignment.
- * 6. `record.new_holder_pubkey == payloads[i].buyer.pubkey` -> pubkey loop
+ * 7. `record.new_holder_pubkey == payloads[i].buyer.pubkey` -> pubkey loop
  *    closure on the NEXT receipt.
- * 7. (independent of the transfer record) an authenticated `status ==
+ * 8. (independent of the transfer record) an authenticated `status ==
  *    "transferred"` revocation record for `payloads[i - 1]`'s receipt_id
  *    exists in `revocationView` -> the previous receipt's own backed
  *    extinguishment.
@@ -489,6 +493,17 @@ export function auditChain(
       if (leafIndex === null) {
         errors.push(errTransferRecordNotLogged(i))
         linkOk = false
+      }
+
+      const prevLicense = asObject(prevPayload['license'])
+      const notTransferableBefore = prevLicense ? prevLicense['not_transferable_before'] : undefined
+      if (notTransferableBefore !== undefined && notTransferableBefore !== null) {
+        const transferredAt = validStage3UtcTimestamp(record['transferred_at']) ? parseStrictUtc(record['transferred_at']) : null
+        const floor = validStage3UtcTimestamp(notTransferableBefore) ? parseStrictUtc(notTransferableBefore) : null
+        if (transferredAt === null || floor === null || transferredAt < floor) {
+          errors.push(errNotTransferableBefore(i))
+          linkOk = false
+        }
       }
 
       if (sigOk && authOk && leafIndex !== null) {
