@@ -346,6 +346,64 @@ def test_diff_verify_result_errors_contains_defaults_to_empty_list_when_absent()
     assert mismatches[0].startswith("errors_contains:")
 
 
+def test_diff_verify_result_missing_errors_warnings_is_mismatch_not_empty_list() -> None:
+    """RED for finding 1: an adapter that omits errors/warnings entirely must not
+    silently pass just because expected pins them as empty lists — the real
+    verifier never omits these fields."""
+    expected = {
+        "signature": "valid",
+        "schema": "valid",
+        "trust": "authenticated_tls",
+        "errors": [],
+        "warnings": [],
+    }
+    actual = {"signature": "valid", "schema": "valid", "trust": "authenticated_tls"}
+    mismatches = cr.diff_verify_result(expected, actual)
+    assert mismatches == [
+        "errors: missing from adapter output",
+        "warnings: missing from adapter output",
+    ]
+
+
+def test_diff_verify_result_ok_bool_rejects_int_one_as_true() -> None:
+    """RED for finding 2: ok: 1 (a JSON number) must not satisfy expected ok:
+    true — the real verifier always emits a genuine bool."""
+    expected = {
+        "signature": "valid",
+        "schema": "valid",
+        "trust": "authenticated_tls",
+        "ok": True,
+    }
+    actual = {**expected, "ok": 1}
+    mismatches = cr.diff_verify_result(expected, actual)
+    assert len(mismatches) == 1
+    assert mismatches[0].startswith("ok:")
+
+
+@pytest.mark.parametrize("field", cr._VERIFY_REQUIRED_EXACT + cr._VERIFY_CONDITIONAL_EXACT)
+def test_diff_verify_result_wrong_value_for_each_exact_field_yields_named_mismatch(
+    field: str,
+) -> None:
+    """Pins finding 4: deleting any member from _VERIFY_REQUIRED_EXACT /
+    _VERIFY_CONDITIONAL_EXACT must redden this test."""
+    base: dict[str, Any] = {
+        "signature": "valid",
+        "schema": "valid",
+        "trust": "authenticated_tls",
+        "revocation": "not_revoked",
+        "binding": "proven",
+        "transparency": "logged",
+        "corroboration": "corroborated",
+        "manifest_freshness": "fresh",
+        "ok": True,
+    }
+    expected = dict(base)
+    actual = dict(base)
+    actual[field] = False if field == "ok" else "definitely-a-wrong-value"
+    mismatches = cr.diff_verify_result(expected, actual)
+    assert any(m.startswith(f"{field}:") for m in mismatches)
+
+
 def test_diff_verify_result_ignores_extra_actual_fields() -> None:
     expected = {"signature": "valid", "schema": "valid", "trust": "authenticated_tls"}
     actual = {
@@ -411,6 +469,25 @@ def test_diff_chain_result_errors_contains_substring_pass_and_fail() -> None:
     mismatches = cr.diff_chain_result(expected, actual_fail)
     assert len(mismatches) == 1
     assert mismatches[0].startswith("errors_contains:")
+
+
+def test_diff_chain_result_missing_warnings_is_mismatch_not_empty_list() -> None:
+    """RED for finding 1 (chain leaf): warnings is always present per the real
+    verifier's contract; an adapter that omits it must fail, not default to []."""
+    expected = {"chain_valid": True, "link_status": ["valid"], "warnings": []}
+    actual = {"valid": True, "link_status": ["valid"]}
+    mismatches = cr.diff_chain_result(expected, actual)
+    assert mismatches == ["warnings: missing from adapter output"]
+
+
+def test_diff_chain_result_valid_rejects_int_one_as_true() -> None:
+    """RED for finding 2 (chain leaf): valid: 1 (a JSON number) must not
+    satisfy expected chain_valid: true."""
+    expected = {"chain_valid": True, "link_status": ["valid"], "warnings": []}
+    actual = {"valid": 1, "link_status": ["valid"], "warnings": []}
+    mismatches = cr.diff_chain_result(expected, actual)
+    assert len(mismatches) == 1
+    assert mismatches[0].startswith("valid:")
 
 
 def test_diff_chain_result_warnings_exact_list() -> None:
@@ -503,6 +580,22 @@ def test_run_adapter_garbage_stdout_produces_error_outcome(tmp_path: Path) -> No
     leaf = tmp_path / "leaf"
     leaf.mkdir()
     template = garbage_adapter_template(tmp_path)
+    outcome = cr.run_adapter(template, leaf, timeout=5.0)
+    assert outcome.ok is False
+    assert outcome.error == "adapter: stdout is not valid JSON"
+
+
+def test_run_adapter_rejects_nan_json_constant(tmp_path: Path) -> None:
+    """RED for finding 3: NaN/Infinity are not standard JSON — stdout carrying
+    them (even in an ignored extra member) must error, not parse."""
+    leaf = tmp_path / "leaf"
+    leaf.mkdir()
+    body = (
+        "import sys\n"
+        'sys.stdout.write(\'{"signature": "valid", "schema": "valid", '
+        '"trust": "authenticated_tls", "diagnostic": NaN}\')\n'
+    )
+    template = _write_script(tmp_path, "nan_adapter.py", body) + " {leaf}"
     outcome = cr.run_adapter(template, leaf, timeout=5.0)
     assert outcome.ok is False
     assert outcome.error == "adapter: stdout is not valid JSON"
