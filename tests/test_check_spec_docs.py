@@ -832,8 +832,15 @@ class TestInternetDraftSnapshot:
         assert check_spec_docs.check_internet_draft_snapshot() == []
 
     def test_draft_carries_the_terminology_defusals(self) -> None:
-        # Exercises the REAL committed draft source under ietf/.
-        text = check_spec_docs._internet_draft_source_text()
+        # Exercises the REAL committed draft source under ietf/, read the
+        # same way check_internet_draft_snapshot() itself reads it (the
+        # standalone _internet_draft_source_text() helper this test used to
+        # call was dead production code -- unused by the checker, which
+        # reads source_path directly -- so it was removed, 2026-07-23 fix,
+        # finding 10).
+        path = check_spec_docs._internet_draft_source_path()
+        assert path is not None
+        text = path.read_text(encoding="utf-8")
         for needle in ("9943", "9334", "8785"):
             assert needle in text
 
@@ -910,6 +917,41 @@ class TestInternetDraftSnapshot:
         assert "9334" not in drifted
         _write(tmp_path, f"{check_spec_docs._INTERNET_DRAFT_BASENAME}.xml", drifted)
         assert main() == 1
+
+    def test_checker_flags_two_v01_declarations_as_ambiguous(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # A source carrying a valid v0.1 declaration AND a second,
+        # conflicting one used to pass silently: the old `re.search` call
+        # only ever validated the FIRST match (2026-07-23 fix wave, finding
+        # 8 -- `findall` now requires exactly one).
+        duplicated = _MINIMAL_DRAFT_TEXT.replace(
+            "attest-v0.1.md at revision 5.</t>\n",
+            "attest-v0.1.md at revision 5.</t>\n"
+            "<t>A second, conflicting declaration also mirrors "
+            "attest-v0.1.md at revision 12.</t>\n",
+        )
+        assert duplicated.count("attest-v0.1.md") == 2
+        monkeypatch.setattr(check_spec_docs, "_INTERNET_DRAFT_DIR", tmp_path)
+        _write(tmp_path, f"{check_spec_docs._INTERNET_DRAFT_BASENAME}.xml", duplicated)
+        errors = check_spec_docs.check_internet_draft_snapshot()
+        assert any("exactly one" in e.lower() and "attest-v0.1.md" in e for e in errors)
+
+    def test_checker_flags_a_second_conflicting_v02_declaration_as_ambiguous(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        duplicated = _MINIMAL_DRAFT_TEXT.replace(
+            "attest-v0.2.md at revision 6 as the source of its Extensions pointers.</t>\n",
+            "attest-v0.2.md at revision 6 as the source of its "
+            "Extensions pointers.</t>\n"
+            "<t>A second, conflicting declaration also mirrors "
+            "attest-v0.2.md at revision 2.</t>\n",
+        )
+        assert duplicated.count("attest-v0.2.md") == 2
+        monkeypatch.setattr(check_spec_docs, "_INTERNET_DRAFT_DIR", tmp_path)
+        _write(tmp_path, f"{check_spec_docs._INTERNET_DRAFT_BASENAME}.xml", duplicated)
+        errors = check_spec_docs.check_internet_draft_snapshot()
+        assert any("exactly one" in e.lower() and "attest-v0.2.md" in e for e in errors)
 
 
 def test_versioning_doc_missing_heading_is_flagged_by_collect_errors() -> None:
