@@ -168,6 +168,39 @@ function workingOtsEvidence(checkpointText: string): {
   }
   return { evidence, policy, headerTime }
 }
+/** Same op sequence as workingOtsEvidence, but the accumulator seed is
+ * parseCheckpoint(checkpointText).signedNoteBytes — the FULL checkpoint
+ * text, header AND real signature lines (G4's v2 commitment) — and the
+ * evidence declares anchor_profile: "signed-note-v2". Mirrors
+ * test_transparency.py's `_working_ots_evidence_v2`. */
+function workingOtsEvidenceV2(checkpointText: string): {
+  evidence: Record<string, unknown>
+  policy: AnchorPolicy
+  headerTime: number
+} {
+  const signedNoteBytes = parseCheckpoint(checkpointText).signedNoteBytes
+  const headerTime = 1700000000
+  const headerHash = '4b'.repeat(32)
+  const sibling = h('ab'.repeat(32))
+  const prefix = h('cd'.repeat(16))
+  let acc = sha256(signedNoteBytes)
+  acc = sha256(new Uint8Array([...acc, ...sibling]))
+  acc = sha256(new Uint8Array([...prefix, ...acc]))
+  const accHex = Array.from(acc).map((b) => b.toString(16).padStart(2, '0')).join('')
+  const proof = {
+    kind: 'ots',
+    ops: [['append', bytesHex(sibling)], ['sha256'], ['prepend', bytesHex(prefix)], ['sha256']],
+    header_merkle_root: accHex,
+    header_time: headerTime,
+    header_hash: headerHash,
+  }
+  const evidence = { checkpoint: checkpointText, proofs: [proof], anchor_profile: 'signed-note-v2' }
+  const policy: AnchorPolicy = {
+    pinnedHeaders: { [headerHash]: { headerHash, merkleRoot: accHex, time: headerTime } },
+    crqcHorizon: null,
+  }
+  return { evidence, policy, headerTime }
+}
 function bytesHex(bytes: Uint8Array): string {
   return Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('')
 }
@@ -412,6 +445,21 @@ describe('evaluateTransparency: steps 6-7 (anchors + horizon)', () => {
     const result = evaluate(evidence, { policy })
     expect(result.transparency).toBe(`anchored_before:${iso8601(headerTime)}`)
     expect(result.corroboration).toBe(CORROBORATION_LOGGED)
+    // No anchor_profile on the anchor evidence (G4) -> legacy note-bytes-only
+    // commitment, still fully verifiable (eternal verifiability) but flagged.
+    expect(result.warnings).toEqual(['anchor_note_only'])
+  })
+
+  it('v2 anchor sets anchored_before without the note-only warning', () => {
+    // The v2 accumulator commits over the checkpoint's REAL signature lines
+    // (its signedNoteBytes), not a hand-built substitute — using CP_BUNDLE3
+    // (the actual hybrid-signed note) end to end is what makes this a
+    // genuine exercise of the v2 commitment.
+    const { evidence: anchorsEvidence, policy, headerTime } = workingOtsEvidenceV2(CP_BUNDLE3)
+    const evidence = bundleEvidence({ anchors: anchorsEvidence })
+    const result = evaluate(evidence, { policy })
+    expect(result.transparency).toBe(`anchored_before:${iso8601(headerTime)}`)
+    expect(result.corroboration).toBe(CORROBORATION_LOGGED)
     expect(result.warnings).toEqual([])
   })
 
@@ -444,7 +492,9 @@ describe('evaluateTransparency: steps 6-7 (anchors + horizon)', () => {
     const evidence = bundleEvidence({ anchors: anchorsEvidence })
     const result = evaluate(evidence, { policy })
     expect(result.transparency).toBe(TRANSPARENCY_NOT_CHECKED)
-    expect(result.warnings).toEqual(['post_horizon_unanchored'])
+    // Step 6 (anchor upgrade, note-only classification) still runs before
+    // step 7's horizon cap discards the standing it computed.
+    expect(result.warnings).toEqual(['anchor_note_only', 'post_horizon_unanchored'])
   })
 
   it('does not cap when crqc_horizon is null', () => {
@@ -932,7 +982,9 @@ describe('verify(): Stage 2 integration', () => {
     })
     expect(result.transparency).toBe(`anchored_before:${iso8601(headerTime)}`)
     expect(result.corroboration).toBe(CORROBORATION_LOGGED)
-    expect(result.warnings).toEqual(['license.drm is drm-bound (design vector 18)'])
+    // No anchor_profile on this evidence -> legacy note-bytes-only
+    // commitment, flagged (still fully verifiable, G4 eternal verifiability).
+    expect(result.warnings).toEqual(['anchor_note_only', 'license.drm is drm-bound (design vector 18)'])
     expect(result.signature).toBe('valid')
   })
 })

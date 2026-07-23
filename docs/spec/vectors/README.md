@@ -1,6 +1,6 @@
 # attest conformance vectors
 
-This directory holds the attest conformance suite: fixed, language-neutral test cases against which any implementation can be checked. Groups `01`–`25` (43 leaves) are **v0.1** conformance, against [`docs/spec/attest-v0.1.md`](../attest-v0.1.md); `26-hybrid`, `27-valid-to-absent` and `28-transparency` cover **v0.2**, against [`docs/spec/attest-v0.2.md`](../attest-v0.2.md). A v0.1-only verifier must reject v0.2 envelopes and is therefore measured against the v0.1 subset, not all 66 leaves. Each vector is a leaf directory (identified by containing `expected.json`) holding the raw inputs to feed the verification algorithm and the exact `VerificationResult` a conformant verifier must produce.
+This directory holds the attest conformance suite: fixed, language-neutral test cases against which any implementation can be checked. Groups `01`–`25`, `29-limits`, and `31-manifest-currency` (50 leaves — corrected 2026-07-23, rev 5: `31-manifest-currency` carries 5 leaves, not the 3 an earlier count stated) are **v0.1** conformance, against [`docs/spec/attest-v0.1.md`](../attest-v0.1.md) — `29-limits` was added by the G1 normative-ceilings amendment (v0.1 rev 3 / v0.2 rev 2, 2026-07-22, attest-versioning.md §5), and `31-manifest-currency` by the G2/G3 manifest-currency amendment (v0.1 rev 4, 2026-07-22, v0.1 §7.2/§7.3), both of which bind v0.1 as well as v0.2. `26-hybrid`, `27-valid-to-absent`, `28-transparency`, `30-mixed-keyset`, `32-anchor-v2`, and `33-logged-revocation` cover **v0.2**, against [`docs/spec/attest-v0.2.md`](../attest-v0.2.md). A v0.1-only verifier must reject v0.2 envelopes and is therefore measured against the v0.1 subset (50 leaves), not all 82. Each vector is a leaf directory (identified by containing `expected.json`) holding the raw inputs to feed the verification algorithm and the exact `VerificationResult` a conformant verifier must produce.
 
 **Normative conformance requirement**: an implementation is attest-conformant iff it produces every vector's expected result. There is no partial conformance — any single mismatch is a conformance failure.
 
@@ -10,13 +10,14 @@ Each leaf directory contains:
 
 - `payload.json` — the receipt payload, for readability (not itself fed to `verify()`; it is embedded inside `envelope.json`).
 - `envelope.json` — the full envelope (`payload` + `signatures` + optional `delivery`), or `envelope.raw.json` (vector 06 only) for a case whose raw bytes intentionally cannot round-trip through a parsed object.
-- `manifests.json` — the trust material: `{"manifests": {...}, "provenance": {...}, "chains": {...}}`, fed straight into the verifier's trust store.
+- `manifests.json` — the trust material: `{"manifests": {...}, "provenance": {...}, "chains": {...}, "artifact_manifests": {...}, "artifact_manifest_chains": {...}}`, fed straight into the verifier's trust store. The last two (group 31 only) are nested by issuer, then `work.artifact_series`.
 - `expected.json` — the spec-intended `VerificationResult`: `signature`, `schema`, `trust`, `revocation`, `binding`, `ok`, plus `errors`/`errors_contains` and `warnings`/`warnings_contains`.
 - optional `disclosure.json` — a buyer-binding disclosure, salt path (`identifier`, `identifier_type`, `salt_b64u`) or challenge path (`nonce_b64u`, `sig_b64u`), for vectors that check §6 step 7.
 - optional `revocation.json` — a single issuer-signed revocation record, fed to the verifier as its revocation view, for vectors that check §6 step 6.
 - optional `manifest_pristine.json` — only for vector 11: the untampered, self-consistent manifest, alongside the tampered one actually used for verification.
 - optional `canonical.json` — the exact canonical serialization bytes of the leaf's payload. A conforming implementation MUST reproduce these bytes exactly when canonicalizing the parsed payload. Present on vectors 21f/21g (supplementary-plane encodings) and 24.
-- optional `transparency.json` / `log-keys.json` / `anchor-policy.json` — group 28 only: the untrusted transparency/corroboration evidence bundle, the verifier's pinned transparency-log signing identities, and its pinned Bitcoin block headers + CRQC horizon, fed to the verifier as `transparency`/`log_keys`/`anchor_policy`. Only group 28's `expected.json` carries the corresponding `transparency`/`corroboration`/`manifest_freshness` result fields.
+- optional `transparency.json` / `log-keys.json` / `anchor-policy.json` — groups 28 and 32: the untrusted transparency/corroboration evidence bundle, the verifier's pinned transparency-log signing identities, and its pinned Bitcoin block headers + CRQC horizon, fed to the verifier as `transparency`/`log_keys`/`anchor_policy`. Only groups 28 and 32's `expected.json` carry the corresponding `transparency`/`corroboration`/`manifest_freshness` result fields.
+- optional `revocation-evidence.json` — group 33 only (G5, TM-47, v0.2 §8/§15 amendment): the untrusted transparency evidence bundle for the SPECIFIC `refund_window` revocation record in `revocation.json`, fed to the verifier as `revocation_evidence` and reusing group 33's own `log-keys.json`/`anchor-policy.json`. A DIFFERENT evidence channel from `transparency.json` — group 33's `expected.json` does NOT carry `transparency`/`corroboration`/`manifest_freshness`.
 
 ## Vector index
 
@@ -59,9 +60,9 @@ Each leaf directory contains:
 | 20b | `sig-canonicity/b-small-order-pubkey` | Signer pubkey (`A`) is a small-order point — rejected (zip215:false / libsodium-equivalent ruleset). |
 | 20c | `sig-canonicity/c-small-order-r` | Signature's `R` component is a small-order point, `S` otherwise genuine — rejected. |
 | 21a | `canon-strict/a-bom` | A UTF-8 byte-order mark prepended to the raw envelope bytes — rejected at strict parsing. |
-| 21b | `canon-strict/b-depth-255` | Whole-text nesting depth exactly 255 — accepted (unknown-field tolerance, vector 10). |
-| 21c | `canon-strict/c-depth-256` | Whole-text nesting depth exactly 256, the boundary — still accepted. |
-| 21d | `canon-strict/d-depth-257` | Whole-text nesting depth 257, one past the boundary — rejected at strict parsing (maximum nesting depth exceeded). |
+| 21b | `canon-strict/b-depth-255` | Whole-text nesting depth exactly 255 — accepted (unknown-field tolerance, vector 10) against canon.py's structural cap (`canon.MAX_DEPTH`, 256), one short of the boundary. |
+| 21c | `canon-strict/c-depth-256` | Whole-text nesting depth exactly 256, canon.py's own structural boundary — still accepted; the boundary is strict `>`. |
+| 21d | `canon-strict/d-depth-257` | Whole-text nesting depth 257, one past canon.py's boundary — rejected at strict parsing (maximum nesting depth exceeded). |
 | 21e | `canon-strict/e-lone-surrogate` | A lone UTF-16 surrogate injected via `\uXXXX` escape — rejected at strict parsing (a payload carrying one can never be signed in the first place). |
 | 21f | `canon-strict/f-supplementary-raw` | A supplementary-plane character (outside the BMP) encoded as raw UTF-8 bytes — verifies clean; carries `canonical.json` for the payload's exact canonical bytes. |
 | 21g | `canon-strict/g-supplementary-escaped` | The same payload and signature as 21f, but the envelope bytes use `𝄞`-style surrogate-pair escaping instead of raw UTF-8 — verifies clean with the identical result, proving canonicalization is transport-escaping-independent; carries the same `canonical.json`. |
@@ -110,11 +111,62 @@ The cross-core corpus for `verify()`'s Stage 2 `transparency`/`corroboration`/`m
 | 28g | `g-entry-hash-mismatch` | The evidence's `entry` disagrees with the hash `verify()` independently computes from the actual receipt — `transparency_entry_mismatch`, regardless of an otherwise-valid checkpoint/proof. |
 | 28h | `h-rotation-chain-omitted` | A self-consistent `manifest_version: 2` issuer manifest, logged as a key-manifest claim, but the trust store holds no rotation chain for the issuer at all — `corroboration` is downgraded to `"none"` with `corroboration_requires_rotation_chain`, even though `transparency` (`"logged"`) and `manifest_freshness` (`"verified_as_of:1"`) are unaffected. |
 | 28i | `i-compromised-key-fail-closed` | A receipt rejected outright for a compromised signing key (`signature: "invalid"`, `ok: false`) still reports `transparency: "logged"`/`corroboration: "logged"` for its own genuinely-logged evidence — proving corroboration can never rescue an otherwise-invalid receipt (design fix 6; transparency is resolved before the pass/fail verdict). |
-| 28j | `j-ots-anchor` | A PQ-surviving `ots` proof replaying from `SHA-256(checkpoint.note_bytes)` to a pinned Bitcoin block header — `transparency` upgrades to `anchored_before:2023-11-14T22:13:20Z` (header time `1700000000`, `transparency.py`'s own documented KAT). |
+| 28j | `j-ots-anchor` | A PQ-surviving `ots` proof replaying from `SHA-256(checkpoint.note_bytes)` to a pinned Bitcoin block header — `transparency` upgrades to `anchored_before:2023-11-14T22:13:20Z` (header time `1700000000`, `transparency.py`'s own documented KAT). No `anchor_profile` declared → legacy `"note-v1"` commitment (§11.1.1, G4, 2026-07-22), so `warnings` now also carries `anchor_note_only`. |
 | 28k | `k-rfc3161-only` | An `rfc3161`-only anchor proof — opaque classical corroboration only, never sets `pq_surviving`, so `transparency` stays `"logged"` (no PQ/post-horizon standing); the verbatim RFC 3161 warning is asserted. **Adapted**: no leaf here sets `anchor-policy.json`'s `crqc_horizon` — an rfc3161-only proof never reaches `anchor.passes_horizon` regardless of horizon configuration, so a horizon value would add configuration, not test coverage. |
 | 28l | `l-payload-only-precommit` | The evidence entry's `core_sha256` is hashed over the payload ALONE (no domain separation, no signature commitment) — exactly the "pre-sign, log now, sign later" attack `receipt_core_hash`'s domain separation defeats. Same observable outcome as 28g (`transparency_entry_mismatch`), different attacker narrative: this is specifically the hash an attacker could compute before the receipt was ever signed. |
 | 28m | `m-hybrid-revocation-and-rule` | **Adapted** from the original "post-horizon ed-only revocation" framing: `verify.py`'s revocation classification has no `crqc_horizon`-shaped parameter at all (revocation and the transparency/anchor horizon cap are separate subsystems), so that framing cannot be expressed through any `verify()` input. Pins the mechanism that would have to exist for it to hold instead: an Ed25519-only-signed revocation record against a HYBRID (`pub_ml_dsa_65`-carrying) issuer key is unconditionally rejected/ignored (the Task 6/8 sibling-hybrid AND rule, fail-closed) — `revocation: "unknown"`, the record ignored with a warning, `ok: true`. |
 | 28n | `n-unknown-entry-type` | An evidence `entry` whose `type` the log's closed schema doesn't recognize — the claim is unresolvable before any checkpoint/proof is even consulted (`transparency_claim_unresolvable`); the receipt itself verifies untouched (`ok: true`). |
+
+### 29: normative ceilings (G1, v0.1 rev 3 / v0.2 rev 2 amendment, attest-versioning.md §5)
+
+Checked against v0.1 §11.3/§15 and v0.2 §6.2/§16 (the same amendment binds both — a v0.1-only verifier must enforce these ceilings too). Both leaves are a genuinely, cleanly signed envelope, rejected purely for crossing one of the newly-introduced acceptance-floor ceilings — never for a schema-shape or signature problem otherwise. Three ceilings are genuinely new under this amendment (a verifier MUST accept within them, MAY reject beyond, v0.1 §11.3): raw envelope size, issuer key manifest `keys[]` length, and artifact manifest `artifacts[]` length. Only the first two sit on `verify()`'s own wire surface, so only those two carry dedicated `29-limits` vector leaves; the artifact-manifest ceiling is exercised directly against `verify_artifact_manifest`/`verifyArtifactManifest` instead (v0.1 §11.3/§15) and carries no vector leaf of its own. The amendment's other ceilings (nesting depth, revocation-view record count, and v0.2's Stage 2 evidence bounds, §16.1) norm pre-existing, already-enforced behavior and are likewise not exercised by dedicated `29-limits` leaves — the nesting-depth boundary is exercised instead by `21-canon-strict` leaves `b`/`c`/`d`, unaffected by this amendment (see above).
+
+| Leaf | Name | Checks |
+| --- | --- | --- |
+| 29a | `limits/a-envelope-oversize` | The raw, undecoded envelope exceeds `MAX_ENVELOPE_BYTES` (1,048,576) — rejected at the parse boundary, before any parsing work: `schema: "invalid"`. |
+| 29c | `limits/c-manifest-array-overflow` | The issuer's key manifest `keys[]` array exceeds `MAX_MANIFEST_KEYS` (256) — rejected right after the manifest is resolved from the trust store, before any specific key lookup: `schema: "invalid"`. |
+
+### 30: mixed-keyset prohibition (G6, v0.2 rev 3 amendment, v0.2 §2.3/§13)
+
+Checked against [`docs/spec/attest-v0.2.md`](../attest-v0.2.md) §2.3/§13 — an issuer that declares the hybrid profile MUST NOT hold an Ed25519-only key in state `active`; the migration ceremony is a single manifest step (the same `manifest_version` bump that introduces the hybrid key retires every Ed25519-only key). Motivated by `attack_mixed_keyset_hijack` (the formal threat-model exhibit).
+
+| Leaf | Name | Checks |
+| --- | --- | --- |
+| 30a | `mixed-keyset/a-active-ed-sibling-warn` | The resolved issuer manifest declares the hybrid suite AND still holds an Ed25519-only key in state `active` — the receipt verifies clean otherwise, but carries the `mixed_keyset_active_ed_only_sibling` warning. The warning is the entire verifier-side contract: no result field caps a "hybrid strength" classification, since none exists. |
+| 30b | `mixed-keyset/b-migrated-clean` | Same manifest shape, but the Ed25519-only sibling is `retired` (the completed migration ceremony) — no mixed-keyset condition, no warning. |
+
+### 31: manifest currency (G2/G3, v0.1 rev 4 amendment, v0.1 §7.2/§7.3)
+
+Checked against [`docs/spec/attest-v0.1.md`](../attest-v0.1.md) §7.2/§7.3 — artifact manifests gain `manifest_version` (REQUIRED on manifests produced after this revision; absent on a legacy manifest, which stays valid with a warning, eternal verifiability per attest-versioning.md §3); every artifact manifest is authenticated before currency comparison; and a verifier holding persistent trust state MUST NOT accept, for the same (issuer, `artifact_series`) pair, an artifact manifest with `manifest_version` lower than the newest already accepted. Not gated by `attest_version`, so it binds v0.2 implementations too. All five leaves share one receipt and one issuer key manifest; only the artifact-manifest trust material (`manifests.json`'s `artifact_manifests`/`artifact_manifest_chains`, nested by issuer then `work.artifact_series`) differs per leaf.
+
+| Leaf | Name | Checks |
+| --- | --- | --- |
+| 31a | `manifest-currency/a-rollback-rejected` | The trust store's own artifact-manifest chain history already holds `manifest_version: 2`, but the manifest currently PINNED for the series is the OLDER `manifest_version: 1` (a rollback attempt, or a stale re-import) — mirrors vector 14b's key-manifest discontinuity shape: `trust: "unverified_rotation"`, the receipt's own signature otherwise verifies clean. |
+| 31b | `manifest-currency/b-monotone-ok` | Same chain, but the pinned manifest IS the chain tail (`manifest_version: 2`) — no currency violation, `trust` stays at its provenance-derived value. |
+| 31c | `manifest-currency/c-legacy-unversioned-warn` | The pinned artifact manifest predates this amendment (no `manifest_version` at all) — warned (`artifact_manifest_unversioned`), never rejected: `trust` stays at its provenance-derived value, `ok: true`. |
+| 31d | `manifest-currency/d-unauthenticated-ignored` | A signed v1 is followed by an unsigned v2 candidate. The artifact-manifest machinery is skipped: `artifact_manifest_unauthenticated` is the only warning, no currency conclusion is made, and the provenance-derived trust remains unchanged. |
+| 31e | `manifest-currency/e-legacy-transition-warn-only` | A legacy trusted manifest is followed by the first versioned candidate. Currency is not evaluable across the transition: the candidate is accepted, only `artifact_manifest_unversioned` is emitted for the legacy side, and trust is not `unverified_rotation`. |
+
+### 32: anchor profile v2 (G4, v0.2 rev 4 amendment, v0.2 §11.1.1)
+
+Checked against [`docs/spec/attest-v0.2.md`](../attest-v0.2.md) §11.1.1 — the `ots` OTS commitment covers the checkpoint's FULL signed note (header AND signature lines, `signed_note_bytes`) instead of the unsigned header alone (`note_bytes`), closing TM-33's residual chosen-unsigned-note pre-anchoring risk; newly-produced anchors MUST declare `anchor_profile: "signed-note-v2"`, while absent/`"note-v1"` legacy anchors remain fully verifiable forever, classified with warning `anchor_note_only` (eternal verifiability, attest-versioning.md §3). One receipt/checkpoint fixture, three anchor-evidence variants.
+
+| Leaf | Name | Checks |
+| --- | --- | --- |
+| 32a | `a-v2-valid` | `anchor_profile: "signed-note-v2"`, `ots` op-chain genuinely committing over `signed_note_bytes` — `transparency` upgrades to `anchored_before:<T>`, no `anchor_note_only` warning. |
+| 32b | `b-v2-commit-mismatch` | Same declared `"signed-note-v2"` profile, but the op-chain was built from `SHA-256(note_bytes)` alone (the legacy v1 seed) — the replayed chain lands on a different root than pinned, so the anchor FAILS (`ots op-chain result does not match header_merkle_root`): a v1-shaped commitment cannot pass as v2 proof of the signed note's existence. |
+| 32c | `c-v1-note-only-warn` | No `anchor_profile` declared (legacy), genuinely v1-shaped op-chain — verifies and upgrades standing exactly as every pre-G4 anchor always has, now carrying `anchor_note_only`. |
+
+### 33: logged revocation and deadline effectiveness (G5, TM-47, v0.2 rev 5 amendment, v0.2 §8/§15)
+
+Checked against [`docs/spec/attest-v0.2.md`](../attest-v0.2.md) §8/§15 item 5 — `revocation-record` is a third loggable entry type, and a `refund_window` revocation record is effective only when a Stage-2-capable verifier's `revocation_evidence` proves the record's log entry was logged and OTS-anchored no later than the receipt's own refund-window deadline (`issued_at + revocation_window_days`). One `refund_window` receipt/record fixture (14-day window) drives (a)-(c); (d) is an independent `policy`-class fixture pinning that class as unaffected.
+
+| Leaf | Name | Checks |
+| --- | --- | --- |
+| 33a | `a-timely-logged-honored` | The record's `revocation-record` log entry is genuinely logged and OTS-anchored to a pinned header BEFORE the deadline — the deadline rule is satisfied, `revocation: "revoked"`. |
+| 33b | `b-unlogged-ignored-warn` | A Stage-2-capable verifier (`log_keys`/`anchor_policy` configured), but NO `revocation_evidence` for this record at all — never proven logged, ignored: `revocation: "invalid_revocation_ignored"` plus `revocation_unlogged_deadline`. |
+| 33c | `c-late-anchor-ignored` | `revocation_evidence` present and genuinely verifies as logged, but the OTS anchor's pinned header time is AFTER the deadline — same ignored-with-warning outcome as 33b, different cause. |
+| 33d | `d-policy-class-unchanged` | A `policy`-class record (not `refund_window`) under a Stage-2-capable verifier with no `revocation_evidence` — `revocation: "revoked"`, UNCHANGED; the deadline rule never engages outside `refund_window`. |
 
 ## Regeneration
 

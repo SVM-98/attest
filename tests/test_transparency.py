@@ -538,6 +538,58 @@ def test_evaluate_transparency_sets_anchored_before_on_verified_pq_anchor() -> N
     )
     assert result.transparency == f"anchored_before:{expected_iso}"
     assert result.corroboration == transparency.CORROBORATION_LOGGED
+    # No `anchor_profile` on the anchor evidence (G4) -> legacy note-bytes-only
+    # commitment, still fully verifiable (eternal verifiability) but flagged.
+    assert result.warnings == ["anchor_note_only"]
+
+
+def _working_ots_evidence_v2(
+    checkpoint_text: str,
+) -> tuple[dict[str, Any], anchor.AnchorPolicy, int]:
+    """Same op sequence as `_working_ots_evidence`, but the accumulator seed
+    is `tlog.parse_checkpoint(checkpoint_text).signed_note_bytes` — the FULL
+    checkpoint text, header AND real signature lines (G4's v2 commitment) —
+    and the evidence declares `anchor_profile: "signed-note-v2"`."""
+    signed_note_bytes = tlog.parse_checkpoint(checkpoint_text).signed_note_bytes
+    header_time = 1700000000
+    header_hash = "4b" * 32
+    sibling = bytes.fromhex("ab" * 32)
+    prefix = bytes.fromhex("cd" * 16)
+    acc = hashlib.sha256(signed_note_bytes).digest()
+    acc = hashlib.sha256(acc + sibling).digest()
+    acc = hashlib.sha256(prefix + acc).digest()
+    ops = [["append", sibling.hex()], ["sha256"], ["prepend", prefix.hex()], ["sha256"]]
+    proof = {
+        "kind": "ots",
+        "ops": ops,
+        "header_merkle_root": acc.hex(),
+        "header_time": header_time,
+        "header_hash": header_hash,
+    }
+    pinned = anchor.PinnedHeader(header_hash=header_hash, merkle_root=acc.hex(), time=header_time)
+    policy = anchor.AnchorPolicy(pinned_headers={header_hash: pinned}, crqc_horizon=None)
+    return (
+        {"checkpoint": checkpoint_text, "proofs": [proof], "anchor_profile": "signed-note-v2"},
+        policy,
+        header_time,
+    )
+
+
+def test_evaluate_transparency_v2_anchor_sets_anchored_before_without_note_only_warning() -> None:
+    bundle = _Bundle()
+    # The v2 accumulator commits over the checkpoint's REAL signature lines
+    # (its `signed_note_bytes`), not a hand-built substitute — using
+    # `bundle.checkpoint_text` (the actual hybrid-signed note) end to end is
+    # what makes this test a genuine exercise of the v2 commitment.
+    anchors_evidence, policy, header_time = _working_ots_evidence_v2(bundle.checkpoint_text)
+    evidence = bundle.evidence()
+    evidence["anchors"] = anchors_evidence
+    result = _evaluate(bundle, evidence, policy=policy)
+    expected_iso = datetime.datetime.fromtimestamp(header_time, tz=datetime.UTC).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    assert result.transparency == f"anchored_before:{expected_iso}"
+    assert result.corroboration == transparency.CORROBORATION_LOGGED
     assert result.warnings == []
 
 
@@ -581,7 +633,10 @@ def test_evaluate_transparency_horizon_cap_applies_when_anchor_too_late() -> Non
     evidence["anchors"] = anchors_evidence
     result = _evaluate(bundle, evidence, policy=policy)
     assert result.transparency == transparency.TRANSPARENCY_NOT_CHECKED
-    assert result.warnings == ["post_horizon_unanchored"]
+    # Step 6 (anchor upgrade, note-only classification) still runs before
+    # step 7's horizon cap discards the standing it computed — the warning
+    # survives the cap even though the upgraded `transparency` value doesn't.
+    assert result.warnings == ["anchor_note_only", "post_horizon_unanchored"]
 
 
 def test_evaluate_transparency_no_horizon_cap_when_crqc_horizon_none() -> None:
@@ -1307,6 +1362,8 @@ def test_verify_accepts_evaluator_max_scale_anchor_evidence() -> None:
     )
     assert result.transparency == "anchored_before:2023-11-14T22:13:20Z"
     assert result.corroboration == transparency.CORROBORATION_LOGGED
-    assert result.warnings == ()
+    # No `anchor_profile` on this evidence -> legacy note-bytes-only
+    # commitment, flagged (still fully verifiable, G4 eternal verifiability).
+    assert result.warnings == ("anchor_note_only",)
     assert result.signature == "valid"
     assert result.ok is True

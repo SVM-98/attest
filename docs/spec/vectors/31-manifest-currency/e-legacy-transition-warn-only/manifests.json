@@ -1,0 +1,95 @@
+{
+  "artifact_manifest_chains": {
+    "store.example.com": {
+      "store.example.com/works/EXG-001": [
+        {
+          "artifacts": [
+            {
+              "filename": "example-game-1.0-setup.exe",
+              "platform": "windows-x86_64",
+              "role": "installer",
+              "sha256": "3f33b4d5852414a2de7bfbe6d2fafb054d5b4460d77b06b4d9273b4ed8b5fc3a",
+              "size_bytes": 734003200
+            }
+          ],
+          "issuer": "store.example.com",
+          "manifest_signature": {
+            "kid": "store.example.com/keys/2025-01#ed25519-1",
+            "sig": "IOiiRDiM6X3YVgw0IO9aaA_OfWrdTAIHdiqYAZsa4OQSpyhM3vpEuy0o4B9OuSCStrc2LLYrkcuGaIfYiq56AQ"
+          },
+          "released_at": "2025-02-01T00:00:00Z",
+          "series": "store.example.com/works/EXG-001",
+          "version": 1
+        },
+        {
+          "artifacts": [
+            {
+              "filename": "example-game-1.0-setup.exe",
+              "platform": "windows-x86_64",
+              "role": "installer",
+              "sha256": "3f33b4d5852414a2de7bfbe6d2fafb054d5b4460d77b06b4d9273b4ed8b5fc3a",
+              "size_bytes": 734003200
+            }
+          ],
+          "issuer": "store.example.com",
+          "manifest_signature": {
+            "kid": "store.example.com/keys/2025-01#ed25519-1",
+            "sig": "_WrDPpVxXTKjO1P7D6YAqNEnqpGcDV-zhliTUzNP5sXWT3FoOrZsO9OQ6eB1rB1wHo0JP3-XhjRFARlWgCK9BQ"
+          },
+          "manifest_version": 1,
+          "released_at": "2025-03-01T00:00:00Z",
+          "series": "store.example.com/works/EXG-001",
+          "version": 2
+        }
+      ]
+    }
+  },
+  "artifact_manifests": {
+    "store.example.com": {
+      "store.example.com/works/EXG-001": {
+        "artifacts": [
+          {
+            "filename": "example-game-1.0-setup.exe",
+            "platform": "windows-x86_64",
+            "role": "installer",
+            "sha256": "3f33b4d5852414a2de7bfbe6d2fafb054d5b4460d77b06b4d9273b4ed8b5fc3a",
+            "size_bytes": 734003200
+          }
+        ],
+        "issuer": "store.example.com",
+        "manifest_signature": {
+          "kid": "store.example.com/keys/2025-01#ed25519-1",
+          "sig": "_WrDPpVxXTKjO1P7D6YAqNEnqpGcDV-zhliTUzNP5sXWT3FoOrZsO9OQ6eB1rB1wHo0JP3-XhjRFARlWgCK9BQ"
+        },
+        "manifest_version": 1,
+        "released_at": "2025-03-01T00:00:00Z",
+        "series": "store.example.com/works/EXG-001",
+        "version": 2
+      }
+    }
+  },
+  "chains": {},
+  "manifests": {
+    "store.example.com": {
+      "issued_at": "2025-01-01T00:00:00Z",
+      "issuer": "store.example.com",
+      "keys": [
+        {
+          "kid": "store.example.com/keys/2025-01#ed25519-1",
+          "pub": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
+          "status": "active",
+          "valid_from": "2025-01-01T00:00:00Z",
+          "valid_to": null
+        }
+      ],
+      "manifest_signature": {
+        "kid": "store.example.com/keys/2025-01#ed25519-1",
+        "sig": "VZfebZVkctMN8kvVxm557T7co5Z-1VPlVpvkrzbulHQAMeIbDrx6sTn9NcLzYyBARpdAS8Ke6WpikTbqKIdKBw"
+      },
+      "manifest_version": 1
+    }
+  },
+  "provenance": {
+    "store.example.com": "tls"
+  }
+}
