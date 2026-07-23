@@ -771,6 +771,42 @@ class TestStandardsRelationship:
         errors = check_spec_docs.check_standards_relationship()
         assert any("SCITT and RFC 9943" in e for e in errors)
 
+    def test_main_exits_nonzero_when_annex_file_is_missing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Pins the main() wiring: check_standards_relationship() is called
+        # directly from main() (not through collect_errors()), so a test that
+        # only calls the checker function directly would stay green even if
+        # main() stopped calling it.
+        monkeypatch.setattr(
+            check_spec_docs, "_STANDARDS_RELATIONSHIP_PATH", SPEC_DIR / "does-not-exist.md"
+        )
+        assert main() == 1
+
+    def test_main_exits_nonzero_when_annex_heading_is_renamed(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        text = (SPEC_DIR / "attest-standards-relationship.md").read_text(encoding="utf-8")
+        drifted = text.replace("## 6. SCITT and RFC 9943", "## 6. SCITT")
+        monkeypatch.setattr(
+            check_spec_docs, "_STANDARDS_RELATIONSHIP_PATH", _write(tmp_path, "d.md", drifted)
+        )
+        assert main() == 1
+
+    def test_main_exits_nonzero_when_annex_literal_is_removed(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        text = (SPEC_DIR / "attest-standards-relationship.md").read_text(encoding="utf-8")
+        # RFC 9943 is a required literal (and also part of a required heading,
+        # so this mutation removes both at once -- either alone is sufficient
+        # to make main() non-zero, which is all this test needs to pin).
+        drifted = text.replace("RFC 9943", "the SCITT architecture document")
+        assert "RFC 9943" not in drifted
+        monkeypatch.setattr(
+            check_spec_docs, "_STANDARDS_RELATIONSHIP_PATH", _write(tmp_path, "d.md", drifted)
+        )
+        assert main() == 1
+
 
 def test_versioning_doc_missing_heading_is_flagged_by_collect_errors() -> None:
     docs = _base_docs()
