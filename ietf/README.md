@@ -33,11 +33,16 @@ Every citation in the draft (`RFC2119`, `RFC8174`, `RFC8785`, `RFC8032`,
 `W3C.VC-DATA-MODEL`, `C2PA`, `ATTEST-REPO`) is a full inline `<reference>`
 element inside `<references>` — never an `xi:include` pulling from
 `bib.ietf.org`. `bib.ietf.org` is outside the network this sandbox allows,
-and inline references make the build deterministic and reproducible with no
-network access at all, in any environment. The build command below passes
-`--no-network` to `xml2rfc` to make that a verified property, not an
-assumption: both local builds below completed with `--no-network` and zero
-network calls.
+and inline references make the RENDER step deterministic and reproducible
+with no network access at all, in any environment — distinct from the
+one-time pinned-toolchain install above (`uvx --from xml2rfc==3.34.0`),
+which MAY fetch the package from PyPI the first time it runs in a given
+environment (cached thereafter, per `uv`'s own resolver, and not repeated
+on a subsequent invocation). The build command below passes `--no-network`
+to the `xml2rfc` render step itself to make that narrower claim a verified
+property, not an assumption: both local builds below completed with
+`--no-network` and zero network calls made *by xml2rfc's own reference
+resolution* — the property inline references exist to guarantee.
 
 ## Build
 

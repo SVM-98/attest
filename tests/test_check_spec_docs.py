@@ -793,6 +793,25 @@ class TestStandardsRelationship:
         )
         assert main() == 1
 
+    def test_checker_heading_inside_fenced_block_does_not_satisfy(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """RED for finding 5(a): a required heading present only inside a
+        fenced code block (illustrative content) must not satisfy the
+        checker -- fenced blocks must be stripped first, the same way
+        collect_errors() already does for the threat-model/privacy docs via
+        _strip_fenced_blocks()."""
+        text = (SPEC_DIR / "attest-standards-relationship.md").read_text(encoding="utf-8")
+        fenced = text.replace(
+            "## 6. SCITT and RFC 9943",
+            "```text\n## 6. SCITT and RFC 9943\n```",
+        )
+        monkeypatch.setattr(
+            check_spec_docs, "_STANDARDS_RELATIONSHIP_PATH", _write(tmp_path, "d.md", fenced)
+        )
+        errors = check_spec_docs.check_standards_relationship()
+        assert any("SCITT and RFC 9943" in e for e in errors)
+
     def test_main_exits_nonzero_when_annex_literal_is_removed(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -917,6 +936,25 @@ class TestInternetDraftSnapshot:
         assert "9334" not in drifted
         _write(tmp_path, f"{check_spec_docs._INTERNET_DRAFT_BASENAME}.xml", drifted)
         assert main() == 1
+
+    def test_checker_declaration_inside_xml_comment_does_not_satisfy(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """RED for finding 5(b): a snapshot-revision declaration present only
+        inside an XML comment must not satisfy the checker -- comments are
+        never rendered, operative content and must be stripped before the
+        findall, the same way fenced Markdown blocks are stripped for the
+        standards-relationship annex."""
+        commented = _MINIMAL_DRAFT_TEXT.replace(
+            "<t>Relationship to the living specification: this document "
+            "mirrors attest-v0.1.md at revision 5.</t>\n",
+            "<!-- <t>Relationship to the living specification: this "
+            "document mirrors attest-v0.1.md at revision 5.</t> -->\n",
+        )
+        monkeypatch.setattr(check_spec_docs, "_INTERNET_DRAFT_DIR", tmp_path)
+        _write(tmp_path, f"{check_spec_docs._INTERNET_DRAFT_BASENAME}.xml", commented)
+        errors = check_spec_docs.check_internet_draft_snapshot()
+        assert any("attest-v0.1.md" in e and "found 0" in e for e in errors)
 
     def test_checker_flags_two_v01_declarations_as_ambiguous(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

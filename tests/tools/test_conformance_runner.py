@@ -404,6 +404,37 @@ def test_diff_verify_result_wrong_value_for_each_exact_field_yields_named_mismat
     assert any(m.startswith(f"{field}:") for m in mismatches)
 
 
+def test_diff_verify_result_errors_contains_non_string_item_does_not_crash() -> None:
+    """RED for finding 4: an adapter emitting a non-string `errors` item (e.g.
+    a stray integer instead of a message string) must yield a mismatch, not
+    raise TypeError from the substring-membership test -- adapter output is
+    untrusted and may carry any valid-JSON shape."""
+    expected = {
+        "signature": "valid",
+        "schema": "valid",
+        "trust": "authenticated_tls",
+        "errors_contains": ["boom"],
+    }
+    actual = {**expected, "errors": [1]}
+    mismatches = cr.diff_verify_result(expected, actual)
+    assert len(mismatches) == 1
+    assert mismatches[0].startswith("errors_contains:")
+
+
+def test_diff_verify_result_warnings_contains_non_string_item_does_not_crash() -> None:
+    """RED for finding 4: same guard, `warnings_contains` side."""
+    expected = {
+        "signature": "valid",
+        "schema": "valid",
+        "trust": "authenticated_tls",
+        "warnings_contains": ["dep"],
+    }
+    actual = {**expected, "warnings": [None]}
+    mismatches = cr.diff_verify_result(expected, actual)
+    assert len(mismatches) == 1
+    assert mismatches[0].startswith("warnings_contains:")
+
+
 def test_diff_verify_result_ignores_extra_actual_fields() -> None:
     expected = {"signature": "valid", "schema": "valid", "trust": "authenticated_tls"}
     actual = {
@@ -488,6 +519,36 @@ def test_diff_chain_result_valid_rejects_int_one_as_true() -> None:
     mismatches = cr.diff_chain_result(expected, actual)
     assert len(mismatches) == 1
     assert mismatches[0].startswith("valid:")
+
+
+def test_diff_chain_result_missing_link_status_is_mismatch_not_empty_list() -> None:
+    """RED for finding 3: same bug class as the T3 fix for valid/warnings,
+    not previously covered for this field -- an adapter that omits
+    link_status entirely must not silently pass just because expected pins
+    it as an empty list."""
+    expected = {"chain_valid": True, "link_status": [], "warnings": []}
+    actual = {"valid": True, "warnings": []}
+    mismatches = cr.diff_chain_result(expected, actual)
+    assert mismatches == ["link_status: missing from adapter output"]
+
+
+def test_diff_chain_result_errors_contains_non_string_item_does_not_crash() -> None:
+    """RED for finding 4: chain-leaf side of the same TypeError-crash guard."""
+    expected = {
+        "chain_valid": False,
+        "link_status": ["invalid"],
+        "errors_contains": ["floor"],
+        "warnings": [],
+    }
+    actual = {
+        "valid": False,
+        "link_status": ["invalid"],
+        "errors": [1],
+        "warnings": [],
+    }
+    mismatches = cr.diff_chain_result(expected, actual)
+    assert len(mismatches) == 1
+    assert mismatches[0].startswith("errors_contains:")
 
 
 def test_diff_chain_result_warnings_exact_list() -> None:

@@ -96,6 +96,9 @@ _CANONICAL_TM_REF_RE = re.compile(r"TM-\d+")
 _ANY_SPEC_VERSION_RE = re.compile(r"\bv\d+\.\d+(?=\s*§)")
 # CommonMark opens a fence with ``` or ~~~, indented up to three spaces.
 _FENCED_BLOCK_RE = re.compile(r"^ {0,3}(```|~~~).*?^ {0,3}\1", re.MULTILINE | re.DOTALL)
+# XML comments (used only by check_internet_draft_snapshot(), which scans
+# the .xml source rather than Markdown).
+_XML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 _PC_ROW_RE = re.compile(r"^\| PC-(\d+) \| ([^|]*) \| ([^|]*) \| ([^|]*) \|\s*$", re.MULTILINE)
 _PC01_PIN_RE = re.compile(r"key set exactly `?\{([^}]*)\}")
 _PC01_REQUIRED_PIN_RE = re.compile(r"`properties\.buyer\.required` equals `?(\[[^`]*\])`?")
@@ -177,6 +180,18 @@ def parse_pc_rows(privacy: str) -> list[PcRow]:
 def _strip_fenced_blocks(text: str) -> str:
     """Blank out fenced code blocks, preserving line count so nothing shifts."""
     return _FENCED_BLOCK_RE.sub(lambda m: "\n" * m.group(0).count("\n"), text)
+
+
+def _strip_xml_comments(text: str) -> str:
+    """Blank out XML comments, preserving line count so nothing shifts.
+
+    An XML comment is never rendered, operative content; a snapshot-revision
+    declaration or required literal appearing only inside one must not
+    satisfy the Internet-Draft checker (2026-07-23 fix, finding 5b) -- the
+    same non-operative-content rationale `_strip_fenced_blocks` already
+    applies to fenced Markdown blocks.
+    """
+    return _XML_COMMENT_RE.sub(lambda m: "\n" * m.group(0).count("\n"), text)
 
 
 def check_ids(tm_ids: list[int]) -> list[str]:
@@ -725,13 +740,20 @@ def check_standards_relationship() -> list[str]:
     Checks the file exists, carries its seven pinned H2 headings verbatim (the
     Internet-Draft appendix and this checker both depend on them), and cites
     the three RFCs the SCITT/RATS defusal and the JCS entry require by number.
-    Not wired into `collect_errors()`: unlike the threat-model/privacy/spec
-    quintet it does not cross-reference another document's parsed structure,
-    so it is called directly from `main()`.
+    Fenced code blocks are stripped before either scan (a heading or literal
+    appearing only inside an illustrative fence is never operative content
+    and must not satisfy this guard, 2026-07-23 fix, finding 5a). Not wired
+    into `collect_errors()`: unlike the threat-model/privacy/spec quintet it
+    does not cross-reference another document's parsed structure, so it is
+    called directly from `main()`.
     """
     if not _STANDARDS_RELATIONSHIP_PATH.exists():
         return ["attest-standards-relationship.md: file is missing"]
-    text = _STANDARDS_RELATIONSHIP_PATH.read_text(encoding="utf-8")
+    # Illustrative fenced examples read exactly like the real thing (see
+    # collect_errors()'s identical rationale for the threat-model/privacy
+    # docs); a required heading or literal appearing only inside one must
+    # not satisfy this fail-closed guard (2026-07-23 fix, finding 5a).
+    text = _strip_fenced_blocks(_STANDARDS_RELATIONSHIP_PATH.read_text(encoding="utf-8"))
     errors: list[str] = []
     for heading in _STANDARDS_RELATIONSHIP_REQUIRED_HEADINGS:
         if re.search(rf"^{re.escape(heading)}$", text, re.MULTILINE) is None:
@@ -799,8 +821,11 @@ def check_internet_draft_snapshot() -> list[str]:
     """Fail-closed existence/shape guard for the Internet-Draft source.
 
     Checks that exactly one of `ietf/draft-martinalli-open-purchase-receipts.md`
-    /`.xml` exists, that its text declares (via two pinned per-line regexes)
-    which attest-v0.1.md/attest-v0.2.md revision it mirrors -- EXACTLY ONCE
+    /`.xml` exists, that its text (XML comments stripped first -- a
+    declaration or required literal inside a `<!-- ... -->` comment is
+    never operative content and must not satisfy this guard, 2026-07-23
+    fix, finding 5b) declares (via two pinned per-line regexes) which
+    attest-v0.1.md/attest-v0.2.md revision it mirrors -- EXACTLY ONCE
     each: a second, conflicting declaration for the same spec is ambiguous
     and is reported as an error rather than silently validated against
     whichever match happens to come first (2026-07-23 fix, finding 8) --
@@ -831,7 +856,10 @@ def check_internet_draft_snapshot() -> list[str]:
             f"found {candidate_count}"
         ]
 
-    text = source_path.read_text(encoding="utf-8")
+    # Strip XML comments before any scan: a snapshot declaration or required
+    # literal inside a `<!-- ... -->` comment is never operative content and
+    # must not satisfy this fail-closed guard (2026-07-23 fix, finding 5b).
+    text = _strip_xml_comments(source_path.read_text(encoding="utf-8"))
     errors: list[str] = []
 
     for spec_label, snapshot_re, spec_path in (

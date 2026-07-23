@@ -216,8 +216,9 @@ def diff_verify_result(expected: dict[str, Any], actual: dict[str, Any]) -> list
     present in ``expected``; ``errors``/``warnings`` as exact lists only when
     present in ``expected``; each ``errors_contains``/``warnings_contains``
     entry must be a substring of at least one element of the adapter's
-    ``errors``/``warnings`` (an absent list defaults to ``[]``). Extra members
-    in ``actual`` are ignored.
+    ``errors``/``warnings`` (an absent list defaults to ``[]``; a non-string
+    element in that list simply fails to match, it never raises -- adapter
+    output is untrusted). Extra members in ``actual`` are ignored.
     """
     mismatches: list[str] = []
 
@@ -254,7 +255,7 @@ def diff_verify_result(expected: dict[str, Any], actual: dict[str, Any]) -> list
     ):
         act_list = actual.get(base_field, [])
         for substr in expected.get(contains_field, []):
-            if not any(substr in item for item in act_list):
+            if not any(isinstance(item, str) and substr in item for item in act_list):
                 mismatches.append(
                     f"{contains_field}: expected a {base_field[:-1]} containing "
                     f"{_fmt(substr)}, got {_fmt(act_list)}"
@@ -268,8 +269,12 @@ def diff_chain_result(expected: dict[str, Any], actual: dict[str, Any]) -> list[
 
     Mirrors the chain-audit match rules of the three in-repo harnesses:
     ``expected["chain_valid"]`` <-> ``actual["valid"]`` exact; ``link_status``
-    exact list; ``errors_contains`` substring; ``warnings`` exact list
-    (always present, never conditional).
+    exact list, always present (missing from ``actual`` is a mismatch, never
+    defaulted to ``[]``, mirroring the ``valid``/``warnings`` treatment
+    below); ``errors_contains`` substring (a non-string element in
+    ``actual["errors"]`` simply fails to match, it never raises -- adapter
+    output is untrusted); ``warnings`` exact list (always present, never
+    conditional).
     """
     mismatches: list[str] = []
 
@@ -280,15 +285,18 @@ def diff_chain_result(expected: dict[str, Any], actual: dict[str, Any]) -> list[
         mismatches.append(f"valid: expected {_fmt(exp_valid)}, got {_fmt(actual['valid'])}")
 
     exp_link_status = expected.get("link_status", [])
-    act_link_status = actual.get("link_status", [])
-    if act_link_status != exp_link_status:
-        mismatches.append(
-            f"link_status: expected {_fmt(exp_link_status)}, got {_fmt(act_link_status)}"
-        )
+    if "link_status" not in actual:
+        mismatches.append("link_status: missing from adapter output")
+    else:
+        act_link_status = actual["link_status"]
+        if act_link_status != exp_link_status:
+            mismatches.append(
+                f"link_status: expected {_fmt(exp_link_status)}, got {_fmt(act_link_status)}"
+            )
 
     act_errors = actual.get("errors", [])
     for substr in expected.get("errors_contains", []):
-        if not any(substr in item for item in act_errors):
+        if not any(isinstance(item, str) and substr in item for item in act_errors):
             mismatches.append(
                 f"errors_contains: expected an error containing {_fmt(substr)}, "
                 f"got {_fmt(act_errors)}"
