@@ -76,14 +76,20 @@ solution. The Regulation does not treat every EAA alike: a **qualified**
 EAA (QEAA) is, by definition, issued by a qualified trust service provider
 operating under that provider's qualified-status obligations and the
 trust-list apparatus that vouches for its certificate, while the EUDI
-architecture separately recognizes a public-sector EAA (issued by or on
-behalf of a public-sector body under its own authority, with no
-qualified-trust-service-provider dependency) and a non-qualified EAA (issued
-by any other attestation provider, likewise with no such dependency). An
-EAA's evidentiary weight therefore depends on which of the three it is: for
-a QEAA, the qualified provider and its trust-list-anchored certificate carry
-that weight; for a public-sector or non-qualified EAA, whatever authority or
-reputation the issuing provider otherwise has does.
+architecture separately recognizes a public-sector EAA — issued by or on
+behalf of a public-sector body responsible for an authentic source of
+attributes (Art. 3(46)), which the Regulation grants legal effect
+equivalent to a QEAA (Art. 45b(2)) and subjects to its own statutory regime
+of reliability equivalent to a qualified trust service provider, conformity
+assessment, notification, and public listing (Art. 45f(2)–(3)) in place of
+a qualified-trust-service-provider dependency — and a non-qualified EAA
+(issued by any other attestation provider, without either apparatus). An
+EAA's evidentiary weight therefore depends on which of the three it is: a
+QEAA rests on its qualified provider and trust-list-anchored certificate; a
+public-sector EAA rests on the designated public-sector body and the
+equivalent statutory regime the Regulation places over it; a non-qualified
+EAA rests on whatever authority or reputation its issuing provider otherwise
+has.
 
 attest issues merchant purchase evidence with none of that apparatus present
 anywhere in its verification path: an issuer-signed record of a license
@@ -284,24 +290,34 @@ make an unsigned or invalidly-signed receipt authentic — a receipt that
 fails signature verification stays failed regardless of what the log says
 about it (conformance vector 28i pins exactly this: a receipt rejected for a
 compromised signing key still honestly reports `transparency: "logged"` for
-its own genuinely-logged evidence). That log evidence cannot rescue an
-invalid signature is not, on its own, a difference from SCITT: RFC 9943
-mandates issuer-signature verification and authentication before a
-transparency service will register a statement at all, and its own §9.2 is
-explicit that registration proves only that an issuer produced a statement,
-never that the statement's contents are accurate — SCITT and attest **share**
-that behavior. The real distinction is elsewhere: whether a relying party's
-acceptance of a statement REQUIRES a trusted transparency-service receipt
-before it is honored. SCITT's architecture centers the receipt as the
-trust-establishing act for a statement's standing inside its ecosystem.
-attest does not: v0.1's `verified` verdict (§11.1) is reached from signature,
-schema, revocation, and binding checks alone, with no transparency evidence
-required anywhere in that path, and Stage 2's `transparency`/`corroboration`
-components are additive corroboration, never a gate on that verdict. That is
-the true difference in trust models — not that attest inverts SCITT's
-registration-centric design, but that attest never requires the analogous
-receipt SCITT does for a relying party to accept a statement — and it is not
-a claim that SCITT's model is the wrong one for its own purpose.
+its own genuinely-logged evidence). One shared property is genuine: RFC 9943
+§9.2 is explicit that registration proves only that an issuer produced a
+statement, never that its contents are accurate, and neither system lets
+transparency evidence turn an invalidly-signed statement into a valid one.
+But where signature verification sits is NOT shared. A SCITT transparency
+service MUST verify and authenticate a signed statement *before* it registers
+it (RFC 9943 §§5.1.1.1, 6.3); attest's log append validates only the closed
+log-entry shape (v0.2 §8), a receipt entry's `issuer` is an unauthenticated
+hint, and no receipt-signature check gates admission — which is precisely why
+conformance vector 28i can log an invalidly-signed receipt at all. On that
+axis attest's log is *more* purely corroborative than SCITT's, not less. The
+relying-party end differs too, though less starkly than a bare "requires"
+would suggest: SCITT's security guidance treats a discoverable receipt from a
+trusted transparency service as important to a statement's standing
+(RFC 9943 §9.3) while leaving post-verification acceptance policy to the
+relying party (§7.1); attest consults no transparency evidence anywhere in
+its own acceptance path. A receipt's `ok` verdict turns on `signature`,
+`schema`, non-`revoked` status, and the absence of errors (v0.1 §11.1), and
+its `trust: "verified"` value comes from TLS-rooted key provenance (§7.4) —
+neither reads the log. Stage 2's `transparency`/`corroboration` components are
+additive corroboration that affect `ok` only in the two narrowly scoped cases
+v0.2 §10 calls out (a `refund_window` revocation record's effectiveness under
+Stage-2 evidence, and an honored `transferred`-class record under Stage 3),
+never as a general gate. That is the true difference in trust models — not
+that attest inverts SCITT's registration-centric design, but that attest
+centers no transparency receipt in its own acceptance path the way SCITT's
+architecture centers one — and it is not a claim that SCITT's model is the
+wrong one for its own purpose.
 
 Where Stage 2 genuinely does touch SCITT's territory, stated honestly rather
 than as a concession: the C2SP tlog-tiles log substrate and inclusion-proof
