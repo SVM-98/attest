@@ -253,3 +253,13 @@ export const VERIFY_TRANSPARENCY_WARN = {
   // string (Python parity: verify.py).
   REVOCATION_UNLOGGED_DEADLINE: 'revocation_unlogged_deadline',
 } as const
+
+// v0.2 Stage 3 (§17.2-§17.4, verbatim; TS parity: Python's verify.py) —
+// transferred-class backing warnings for classifyRevocation's transferred
+// branch (revocation.ts).
+export const TRANSFER_WARN = {
+  REVOCATION_UNBACKED: 'transferred_revocation_unbacked',
+  RECORD_UNLOGGED: 'transfer_record_unlogged',
+  NOT_YET_TRANSFERABLE: 'transfer_not_yet_transferable',
+  DOUBLE_ASSIGNMENT: 'transfer_double_assignment_conflict',
+} as const

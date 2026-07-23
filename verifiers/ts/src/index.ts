@@ -42,3 +42,17 @@ export {
   evaluateTransparency,
 } from './transparency.js'
 export type { TransparencyResult, EvaluateTransparencyOptions } from './transparency.js'
+
+// v0.2 Stage 3 (§17, issuer-mediated transfer): issuer-mediated transfer
+// record verification (design §9: verification-side only — no build/sign).
+export {
+  authorizationMessage,
+  LABEL_TRANSFER_AUTHORIZATION,
+  verifyAuthorization,
+  recordHash as transferRecordHash,
+  verifyRecordSignature as verifyTransferRecordSignature,
+  verifyRecord as verifyTransferRecord,
+  recordLoggedStanding,
+  auditChain,
+} from './transfer.js'
+export type { ChainAuditResult } from './transfer.js'
