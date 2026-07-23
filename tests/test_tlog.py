@@ -298,6 +298,56 @@ def test_encode_entry_rejects_revocation_record_uppercase_hex() -> None:
         tlog.encode_entry(entry)
 
 
+def _valid_transfer_record_entry() -> dict[str, object]:
+    return {
+        "type": "transfer-record",
+        "issuer": "shop.example.com",
+        "record_sha256": "d" * 64,
+    }
+
+
+def test_encode_entry_accepts_valid_transfer_record_entry() -> None:
+    entry = _valid_transfer_record_entry()
+    encoded = tlog.encode_entry(entry)
+    assert isinstance(encoded, bytes)
+    assert encoded == canon.dumps(entry).encode("utf-8")
+
+
+def test_encode_entry_rejects_transfer_record_missing_member() -> None:
+    entry = _valid_transfer_record_entry()
+    del entry["record_sha256"]
+    with pytest.raises(tlog.TlogError):
+        tlog.encode_entry(entry)
+
+
+def test_encode_entry_rejects_transfer_record_extra_member() -> None:
+    entry = _valid_transfer_record_entry()
+    entry["receipt_id"] = "01J1V5B4M9Z8QWERTY12345678"
+    with pytest.raises(tlog.TlogError):
+        tlog.encode_entry(entry)
+
+
+def test_encode_entry_rejects_transfer_record_short_hex() -> None:
+    entry = _valid_transfer_record_entry()
+    entry["record_sha256"] = "d" * 63
+    with pytest.raises(tlog.TlogError):
+        tlog.encode_entry(entry)
+
+
+def test_encode_entry_rejects_transfer_record_uppercase_hex() -> None:
+    entry = _valid_transfer_record_entry()
+    entry["record_sha256"] = "D" * 64
+    with pytest.raises(tlog.TlogError):
+        tlog.encode_entry(entry)
+
+
+def test_encode_entry_rejects_transfer_record_wrong_type_bad_issuer() -> None:
+    entry = _valid_transfer_record_entry()
+    entry["issuer"] = "NOT-A-VALID-DNS-NAME"
+    with pytest.raises(tlog.TlogError):
+        tlog.encode_entry(entry)
+
+
 def test_encode_entry_accepts_an_at_bound_scalar() -> None:
     entry = _valid_receipt_entry()
     # Repeated one-character DNS labels plus a final two-character label make
