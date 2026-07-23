@@ -82,11 +82,29 @@ export interface VerifyTransparencyOptions {
   // `revocationView`, reusing the SAME `logKeys`/`anchorPolicy`
   // configuration — see `classifyRevocation`'s deadline-effectiveness rule.
   revocationEvidence?: JsonValue | null
+  // v0.2 Stage 3's (§17) evidence channel — the SECOND sanctioned exception
+  // to "Stage 2 is purely informational", after G5's `revocationEvidence`:
+  // an untrusted list of claims, each `{record: <a transfer.ts transfer
+  // record>, evidence: <§10.2 evidence bundle>}`, reusing the SAME
+  // `logKeys`/`anchorPolicy` Stage-2-capability gate (both supplied). A
+  // `status: "transferred"` record in `revocationView` is honored —
+  // `revocation: "transferred"`, capping `ok` the same way `"revoked"`
+  // already does — only when this channel proves a BACKED transfer record
+  // for the same receipt_id; see `classifyRevocation`'s transferred branch
+  // (revocation.ts). A caller that never supplies `transferView` sees ZERO
+  // behavior change, exactly like every other Stage 2/3 addition. Typed as
+  // a list (not a single JsonValue) to match its runtime shape and
+  // `revocationView`'s own sibling convention above.
+  transferView?: JsonValue[] | null
 }
 const KNOWN_EOL = new Set(['artifacts-remain-redownloadable', 'escrow', 'none'])
 
 export function isOk(r: VerificationResult): boolean {
-  return r.signature === 'valid' && r.schema === 'valid' && r.revocation !== 'revoked' && r.errors.length === 0
+  return (
+    r.signature === 'valid' && r.schema === 'valid' &&
+    r.revocation !== 'revoked' && r.revocation !== 'transferred' &&
+    r.errors.length === 0
+  )
 }
 
 function obj(v: JsonValue | undefined): JsonObject | null {
@@ -380,9 +398,15 @@ export function verify(
   const logKeys = options.logKeys ?? null
   const anchorPolicy = options.anchorPolicy ?? null
   const revocationEvidence = options.revocationEvidence ?? null
+  const transferView = options.transferView ?? null
 
   if (revocationView !== null && !Array.isArray(revocationView))
     throw new TypeError('revocation_view must be a list of records or None')
+  // Same caller-contract enforcement, extended to the Stage 3 channel: a
+  // lone claim OBJECT must fail loud rather than be silently iterated as
+  // dict keys by classifyRevocation's transferred-branch resolver.
+  if (transferView !== null && !Array.isArray(transferView))
+    throw new TypeError('transfer_view must be a list of claims or None')
 
   // Fail loud if the trust store / revocation view was JSON.parse'd (JS numbers) rather
   // than loadsStrict-parsed (bigint). Prevents a silent revocation fail-open. Does NOT
@@ -691,7 +715,7 @@ export function verify(
   if (schema === 'valid') {
     revocation = classifyRevocation(
       payload, revocationView, manifest, warnings, errors, maxRevocationRecords,
-      logKeys, anchorPolicy, revocationEvidence,
+      logKeys, anchorPolicy, revocationEvidence, transferView,
     )
     binding = disclosure != null ? classifyBinding(payload, disclosure) : 'not_checked'
   }

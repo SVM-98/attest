@@ -40,7 +40,19 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from attest import anchor, bundle, canon, issue, keys, manifests, pq, tlog, verify
+from attest import (
+    anchor,
+    bundle,
+    canon,
+    issue,
+    keys,
+    manifests,
+    pq,
+    revocation,
+    tlog,
+    transfer,
+    verify,
+)
 
 EXIT_OK = 0
 EXIT_VERIFICATION_FAILED = 1
@@ -852,6 +864,139 @@ def _cmd_issue(args: argparse.Namespace) -> int:
         _write_secret_text(args.salt_out, keys.b64u(salt))
 
     _print_json({"out": str(args.out), "receipt_id": payload.get("receipt_id")})
+    return EXIT_OK
+
+
+# --- transfer: issuer-mediated transfer operations (v0.2 §17) ----------------
+
+
+def _cmd_transfer_authorize(args: argparse.Namespace) -> int:
+    if _same_file_target(args.receipt, args.out):
+        # Same input-vs-output aliasing hazard as manifest init/issue (finding 18
+        # policy): writing --out would clobber the receipt just read.
+        raise CliUsageError("--receipt and --out must be different paths")
+    if _same_file_target(args.holder_seed, args.out):
+        # Same input-vs-output aliasing hazard as manifest init/issue (finding 18
+        # policy): writing --out would clobber the holder signing seed just read.
+        raise CliUsageError("--holder-seed and --out must be different paths")
+    envelope = _read_json(args.receipt)
+    if not isinstance(envelope, dict):
+        raise CliUsageError(f"{args.receipt} must contain a JSON object")
+    payload = envelope.get("payload")
+    if not isinstance(payload, dict):
+        raise CliUsageError(f"{args.receipt} is missing object member 'payload'")
+    receipt_id = payload.get("receipt_id")
+    if not isinstance(receipt_id, str):
+        raise CliUsageError(f"{args.receipt} payload is missing string 'receipt_id'")
+
+    holder_kp = _load_seed_kp(args.holder_seed)
+    sig = transfer.sign_authorization(
+        receipt_id, args.new_holder_pubkey, args.transferred_at, holder_kp
+    )
+    # Not secret: a holder-authorization signature is meant to be handed to
+    # the issuer to build the transfer record, exactly like any other
+    # signed side-document — unlike a seed or salt, its disclosure is not a
+    # security concern.
+    _write_json_file(args.out, {"sig": keys.b64u(sig)})
+    _print_json({"out": str(args.out), "receipt_id": receipt_id})
+    return EXIT_OK
+
+
+def _cmd_transfer_record(args: argparse.Namespace) -> int:
+    if _same_file_target(args.receipt, args.out):
+        # The issuer must read the old receipt before it can verify the
+        # outgoing holder's authorization; never let --out clobber that input.
+        raise CliUsageError("--receipt and --out must be different paths")
+    if _same_file_target(args.seed, args.out):
+        raise CliUsageError("--seed and --out must be different paths")
+    if args.mldsa_seed is not None and _same_file_target(args.mldsa_seed, args.out):
+        raise CliUsageError("--mldsa-seed and --out must be different paths")
+    if _same_file_target(args.holder_authorization, args.out):
+        # Same input-vs-output aliasing hazard as manifest init/issue (finding 18
+        # policy): writing --out would clobber the holder authorization just read.
+        raise CliUsageError("--holder-authorization and --out must be different paths")
+    if args.revocation_out is not None and (
+        _same_file_target(args.revocation_out, args.seed)
+        or _same_file_target(args.revocation_out, args.receipt)
+        or _same_file_target(args.revocation_out, args.holder_authorization)
+        or _same_file_target(args.revocation_out, args.out)
+        or (
+            args.mldsa_seed is not None
+            and _same_file_target(args.revocation_out, args.mldsa_seed)
+        )
+    ):
+        # Same input-vs-output aliasing hazard as manifest init/issue (finding 18
+        # policy), extended to the second transfer output.
+        raise CliUsageError(
+            "--revocation-out must differ from --receipt, --seed, --mldsa-seed, "
+            "--holder-authorization, and --out"
+        )
+
+    envelope = _read_json(args.receipt)
+    if not isinstance(envelope, dict):
+        raise CliUsageError(f"{args.receipt} must contain a JSON object")
+    payload = envelope.get("payload")
+    if not isinstance(payload, dict):
+        raise CliUsageError(f"{args.receipt} is missing object member 'payload'")
+    receipt_id = payload.get("receipt_id")
+    if not isinstance(receipt_id, str):
+        raise CliUsageError(f"{args.receipt} payload is missing string 'receipt_id'")
+    buyer = payload.get("buyer")
+    holder_pubkey = buyer.get("pubkey") if isinstance(buyer, dict) else None
+    if not isinstance(holder_pubkey, str):
+        raise CliUsageError(
+            f"{args.receipt} payload must carry a non-null buyer.pubkey to transfer"
+        )
+
+    holder_authorization = _read_json(args.holder_authorization)
+    if not isinstance(holder_authorization, dict) or not isinstance(
+        holder_authorization.get("sig"), str
+    ):
+        raise CliUsageError(f"{args.holder_authorization} must be a JSON object {{'sig': <b64u>}}")
+    try:
+        holder_sig = keys.b64u_decode(holder_authorization["sig"])
+    except (TypeError, ValueError) as exc:
+        raise CliUsageError(f"{args.holder_authorization} has a malformed 'sig': {exc}") from exc
+
+    authorization_record = {
+        "receipt_id": receipt_id,
+        "new_holder_pubkey": args.new_holder_pubkey,
+        "transferred_at": args.transferred_at,
+        "holder_authorization": holder_authorization,
+    }
+    if not transfer.verify_authorization(authorization_record, holder_pubkey):
+        raise CliUsageError(
+            "holder authorization does not verify against the old receipt's buyer.pubkey"
+        )
+
+    ed_signing_kp = _load_seed_kp(args.seed)
+    signing_kp: keys.SigningKeyPair | pq.HybridSigningKeys = ed_signing_kp
+    if args.mldsa_seed is not None:
+        mldsa_kp = _load_mldsa_kp(args.mldsa_seed)
+        signing_kp = pq.HybridSigningKeys(ed=ed_signing_kp, mldsa=mldsa_kp)
+
+    record = transfer.build_record(
+        receipt_id,
+        args.new_receipt_id,
+        args.new_holder_pubkey,
+        args.transferred_at,
+        holder_sig,
+        signing_kp,
+        args.kid,
+    )
+    _write_json_file(args.out, record)
+    report = {
+        "out": str(args.out),
+        "receipt_id": receipt_id,
+        "new_receipt_id": args.new_receipt_id,
+    }
+    if args.revocation_out is not None:
+        revocation_record = revocation.build_record(
+            receipt_id, "transferred", args.transferred_at, signing_kp, args.kid
+        )
+        _write_json_file(args.revocation_out, revocation_record)
+        report["revocation_out"] = str(args.revocation_out)
+    _print_json(report)
     return EXIT_OK
 
 
@@ -1787,6 +1932,57 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--out", required=True, type=Path, help="output envelope JSON path")
     p.set_defaults(func=_cmd_issue)
+
+    p_transfer = sub.add_parser("transfer", help="Issuer-mediated transfer operations (v0.2 §17)")
+    transfer_sub = p_transfer.add_subparsers(dest="transfer_command", required=True)
+
+    p = transfer_sub.add_parser(
+        "authorize", help="Sign the OUTGOING holder's transfer authorization"
+    )
+    p.add_argument("--receipt", required=True, type=Path, help="OLD receipt envelope JSON")
+    p.add_argument(
+        "--new-holder-pubkey", required=True, help="incoming holder's Ed25519 pubkey, b64u"
+    )
+    p.add_argument("--transferred-at", required=True, help="ISO-8601 UTC signed time")
+    p.add_argument(
+        "--holder-seed", required=True, type=Path, help="OLD receipt's own buyer.pubkey seed"
+    )
+    p.add_argument("--out", required=True, type=Path, help="output {'sig': <b64u>} JSON path")
+    p.set_defaults(func=_cmd_transfer_authorize)
+
+    p = transfer_sub.add_parser(
+        "record", help="Verify holder authorization and sign an issuer-mediated transfer record"
+    )
+    p.add_argument("--receipt", required=True, type=Path, help="OLD receipt envelope JSON")
+    p.add_argument("--new-receipt-id", required=True, help="NEW receipt_id (ULID)")
+    p.add_argument(
+        "--new-holder-pubkey", required=True, help="incoming holder's Ed25519 pubkey, b64u"
+    )
+    p.add_argument("--transferred-at", required=True, help="ISO-8601 UTC signed time")
+    p.add_argument(
+        "--holder-authorization",
+        required=True,
+        type=Path,
+        help="JSON file from `transfer authorize`: {'sig': <b64u>}",
+    )
+    p.add_argument("--seed", required=True, type=Path, help="issuer signing key seed")
+    p.add_argument("--kid", required=True)
+    p.add_argument(
+        "--mldsa-seed",
+        type=Path,
+        default=None,
+        help="ML-DSA-65 key file (from `keygen --hybrid`); makes the record signature hybrid",
+    )
+    p.add_argument(
+        "--revocation-out",
+        type=Path,
+        default=None,
+        help="also write a status:'transferred' revocation record for the old receipt",
+    )
+    p.add_argument(
+        "--out", required=True, type=Path, help="output signed transfer record JSON path"
+    )
+    p.set_defaults(func=_cmd_transfer_record)
 
     p_log = sub.add_parser(
         "log", help="Transparency-log operator/holder commands (offline-signer split)"

@@ -35,7 +35,8 @@ const loadJson = (p: string) => JSON.parse(readFileSync(p, 'utf-8'))
 // the self-verify is silently swallowed as `false`. Route these two files
 // through the same strict parser loadsStrict() uses for envelope bytes so
 // integers arrive as bigint, matching the runtime type the verifier expects.
-const loadJsonStrict = (p: string): JsonObject => loadsStrict(new Uint8Array(readFileSync(p))) as JsonObject
+const loadJsonValueStrict = (p: string): JsonValue => loadsStrict(new Uint8Array(readFileSync(p)))
+const loadJsonStrict = (p: string): JsonObject => loadJsonValueStrict(p) as JsonObject
 
 export function envelopeBytes(dir: string): Uint8Array {
   const raw = join(dir, 'envelope.raw.json')
@@ -98,6 +99,41 @@ export function logKeys(dir: string): LogKey[] | null {
 export function revocationEvidence(dir: string): JsonValue | null {
   const p = join(dir, 'revocation-evidence.json')
   return existsSync(p) ? loadJsonStrict(p) : null
+}
+// group 35 (transfer conformance corpus, v0.2 §17 Stage 3) only — mirrors
+// revocationEvidence(dir)'s file-presence convention. A DIFFERENT evidence
+// channel from transparency.json: fed to verify() as transferView, reusing
+// group 35's own logKeys/anchorPolicy. Absent for every leaf outside group
+// 35, so verify() sees `transferView: null` and existing leaves see zero
+// behavior change.
+export function transferView(dir: string): JsonValue[] | null {
+  const p = join(dir, 'transfer-view.json')
+  return existsSync(p) ? (loadJsonValueStrict(p) as JsonValue[]) : null
+}
+// group 36 (transfer-chain conformance corpus, v0.2 §17.5) only: a leaf
+// containing `chain.json` is routed to `auditChain` instead of `verify()` —
+// see tools/gen_vectors.py's gen_36_transfer_chain docstring for the shape.
+export interface ChainInput {
+  payloads: JsonObject[]
+  transferView: JsonValue[]
+  revocationView: JsonValue[]
+}
+export function chainInput(dir: string): ChainInput | null {
+  const p = join(dir, 'chain.json')
+  if (!existsSync(p)) return null
+  const parsed = loadJsonValueStrict(p) as JsonObject
+  return {
+    payloads: parsed.payloads as JsonObject[],
+    transferView: parsed.transfer_view as JsonValue[],
+    revocationView: parsed.revocation_view as JsonValue[],
+  }
+}
+// group 36 only: auditChain takes ONE trusted keyManifest, not a full
+// TrustStore — every group 36 leaf's manifests.json trusts exactly one
+// issuer, so its sole `manifests` value is that manifest.
+export function soleKeyManifest(dir: string): JsonObject {
+  const store = trustStore(dir)
+  return Object.values(store.manifests)[0]!
 }
 export function anchorPolicy(dir: string): AnchorPolicy | null {
   const p = join(dir, 'anchor-policy.json')

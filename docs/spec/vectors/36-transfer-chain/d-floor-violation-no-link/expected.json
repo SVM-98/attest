@@ -1,0 +1,10 @@
+{
+  "chain_valid": false,
+  "errors_contains": [
+    "chain link 1: transferred before not_transferable_before"
+  ],
+  "link_status": [
+    "invalid"
+  ],
+  "warnings": []
+}

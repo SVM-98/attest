@@ -63,7 +63,8 @@
         "drm": { "enum": ["drm-free", "drm-bound"] },
         "terms_uri": { "type": "string", "format": "uri" },
         "legal_text_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-        "jurisdiction_flags": { "type": "object", "additionalProperties": { "type": "boolean" } }
+        "jurisdiction_flags": { "type": "object", "additionalProperties": { "type": "boolean" } },
+        "not_transferable_before": { "type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$" }
       },
       "allOf": [
         {
@@ -98,6 +99,20 @@
               { "properties": { "artifacts": { "type": "array", "minItems": 1 } }, "required": ["artifacts"] }
             ]
           }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "attest_version": { "const": "0.2" },
+          "license": { "properties": { "transferable": { "const": true } }, "required": ["transferable"] }
+        },
+        "required": ["attest_version", "license"]
+      },
+      "then": {
+        "properties": {
+          "buyer": { "properties": { "pubkey": { "type": "string" } }, "required": ["pubkey"] }
         }
       }
     }

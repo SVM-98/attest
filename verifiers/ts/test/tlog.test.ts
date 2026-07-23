@@ -245,6 +245,9 @@ function validReceiptEntry(): Record<string, unknown> {
 function validRevocationRecordEntry(): Record<string, unknown> {
   return { type: 'revocation-record', issuer: 'shop.example.com', record_sha256: 'c'.repeat(64) }
 }
+function validTransferRecordEntry(): Record<string, unknown> {
+  return { type: 'transfer-record', issuer: 'shop.example.com', record_sha256: 'd'.repeat(64) }
+}
 
 describe('encodeEntry', () => {
   it('accepts a valid key-manifest entry and round-trips through canonicalBytes', () => {
@@ -280,6 +283,30 @@ describe('encodeEntry', () => {
 
   it('rejects a revocation-record entry with uppercase hex', () => {
     const entry = { ...validRevocationRecordEntry(), record_sha256: 'C'.repeat(64) }
+    expect(() => encodeEntry(entry)).toThrow(TlogError)
+  })
+
+  it('accepts a valid transfer-record entry (v0.2 §17.1, Stage 3)', () => {
+    const entry = validTransferRecordEntry()
+    const encoded = encodeEntry(entry)
+    expect(encoded).toBeInstanceOf(Uint8Array)
+    const expectedJson = '{"issuer":"shop.example.com","record_sha256":"' + 'd'.repeat(64) + '","type":"transfer-record"}'
+    expect(new TextDecoder().decode(encoded)).toBe(expectedJson)
+  })
+
+  it('rejects a transfer-record entry missing a member', () => {
+    const entry = validTransferRecordEntry()
+    delete entry.record_sha256
+    expect(() => encodeEntry(entry)).toThrow(TlogError)
+  })
+
+  it('rejects a transfer-record entry with an extra member', () => {
+    const entry = { ...validTransferRecordEntry(), receipt_id: '01J1V5B4M9Z8QWERTY12345678' }
+    expect(() => encodeEntry(entry)).toThrow(TlogError)
+  })
+
+  it('rejects a transfer-record entry with uppercase hex', () => {
+    const entry = { ...validTransferRecordEntry(), record_sha256: 'D'.repeat(64) }
     expect(() => encodeEntry(entry)).toThrow(TlogError)
   })
 

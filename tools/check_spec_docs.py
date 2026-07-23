@@ -23,6 +23,7 @@ _SPEC_V01_PATH = _REPO_ROOT / "docs/spec/attest-v0.1.md"
 _SPEC_V02_PATH = _REPO_ROOT / "docs/spec/attest-v0.2.md"
 _SCHEMA_PATH = _REPO_ROOT / "docs/spec/schema/attest-receipt.schema.json"
 _VERSIONING_PATH = _REPO_ROOT / "docs/spec/attest-versioning.md"
+_VECTORS_PATH = _REPO_ROOT / "docs/spec/vectors"
 
 # The six normative sections attest-versioning.md's amendment procedure
 # requires (§5) every reader be able to find by exact heading.
@@ -43,8 +44,7 @@ _VERSIONING_REQUIRED_SUITES: tuple[str, ...] = ("`ed25519`", "`ed25519+ml-dsa-65
 # §4's algorithm lifecycle defines exactly these three states.
 _VERSIONING_LIFECYCLE_STATES: tuple[str, ...] = ("`active`", "`deprecated`", "`unsafe`")
 
-# §6.3 lists the existing `license.revocability` classes (v0.1 §5.5), plus the
-# separate reserved `transferred` row for the future transfer profile.
+# §6.3 lists the existing `license.revocability` classes (v0.1 §5.5).
 # `compromised` is NOT one of these: it is a key lifecycle STATUS (v0.1 §7.3),
 # not a revocation class, and does not belong in this registry (2026-07-23 fix).
 _VERSIONING_REQUIRED_REVOCATION_CLASSES: tuple[str, ...] = (
@@ -53,11 +53,18 @@ _VERSIONING_REQUIRED_REVOCATION_CLASSES: tuple[str, ...] = (
     "`policy`",
 )
 
+# `transferred` (v0.2 §17, rev 6) just moved from `reserved` to `active` --
+# checked separately from the tuple above, and for its exact state, not just
+# its presence: a regression back to `reserved` in this table would silently
+# undo the transfer profile's own registry activation, and mere row presence
+# (the check every other class above gets) would not catch that regression.
+_VERSIONING_ACTIVE_REVOCATION_CLASS = "`transferred`"
+
 # Required traceability-matrix coverage: every numbered section of the two
 # normative specs except each document's own §1 (conformance language) and
 # v0.2 §5 (a worked example carrying no mechanism of its own).
 REQUIRED_SECTIONS: tuple[str, ...] = tuple(f"v0.1 §{n}" for n in range(2, 16)) + tuple(
-    f"v0.2 §{n}" for n in range(2, 17) if n != 5
+    f"v0.2 §{n}" for n in range(2, 18) if n != 5
 )
 
 _VALID_CHECK_TYPES = frozenset({"schema", "corpus", "spec-text", "manual"})
@@ -362,6 +369,65 @@ def check_schema_pins(pc_rows: list[PcRow], schema: dict[str, object]) -> list[s
     return errors
 
 
+def check_pc08_corpus_claim(pc_rows: list[PcRow], vectors_path: Path) -> list[str]:
+    """PC-08's buyer-field claim covers filename-addressable payloads and
+    transfer-chain payloads embedded in ``chain.json``.
+
+    The former are found mechanically by filename; the latter deliberately are
+    not, so parse the three chain fixtures' ``payloads`` arrays as JSON.  Keep
+    the prose pin explicit about both the count and that distinction.
+    """
+    pc08_rows = [row for row in pc_rows if row.pc_id == 8]
+    if not pc08_rows:
+        return []
+
+    errors: list[str] = []
+    filename_payloads: list[dict[str, object]] = []
+    filename_counts: list[int] = []
+    for filename in ("payload.json", "envelope.json", "envelope.raw.json"):
+        files = sorted(vectors_path.rglob(filename))
+        filename_counts.append(len(files))
+        for path in files:
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
+            payload = data if filename == "payload.json" else data.get("payload")
+            if not isinstance(payload, dict):
+                errors.append(f"PC-08: {path.relative_to(_REPO_ROOT)} has no object payload")
+            else:
+                filename_payloads.append(payload)
+
+    chain_payloads: list[dict[str, object]] = []
+    chain_counts: list[int] = []
+    for path in sorted(vectors_path.rglob("chain.json")):
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+        payloads = data.get("payloads") if isinstance(data, dict) else None
+        if not isinstance(payloads, list) or not all(isinstance(item, dict) for item in payloads):
+            errors.append(f"PC-08: {path.relative_to(_REPO_ROOT)} has no object payloads array")
+            continue
+        chain_counts.append(len(payloads))
+        chain_payloads.extend(payloads)
+
+    payloads = filename_payloads + chain_payloads
+    expected_buyer_keys = {"commitment", "identifier_type", "pubkey"}
+    for index, payload in enumerate(payloads, start=1):
+        buyer = payload.get("buyer")
+        if not isinstance(buyer, dict) or set(buyer) != expected_buyer_keys:
+            errors.append(f"PC-08: payload object {index} has unexpected buyer member set")
+
+    counts = filename_counts + chain_counts
+    expected_detail = (
+        f"{len(payloads)} payload objects ({' + '.join(str(count) for count in counts)})"
+    )
+    required_note = "`chain.json` payloads are counted via JSON parse, not filename scan"
+    for row in pc08_rows:
+        if expected_detail not in row.detail:
+            errors.append(
+                f"PC-08: pinned corpus count must state {expected_detail}, found {row.detail!r}"
+            )
+        if required_note not in row.detail:
+            errors.append(f"PC-08: check detail must state that {required_note}")
+    return errors
+
+
 def check_versioning_sections(versioning: str) -> list[str]:
     """Every §1-§6 heading the amendment procedure (§5) requires is present."""
     errors: list[str] = []
@@ -399,11 +465,74 @@ def check_versioning_lifecycle_states(versioning: str) -> list[str]:
 
 
 def check_versioning_revocation_classes(versioning: str) -> list[str]:
-    """The §6.3 registry has a table row for every existing class."""
+    """The §6.3 registry has a table row for every existing class, and
+    `transferred` (v0.2 §17, rev 6) specifically carries state `active`.
+
+    Matching is scoped to the §6.3 section slice so a row that migrates into a
+    DIFFERENT registry's table cannot satisfy these checks (same discipline as
+    check_versioning_transfer_registries)."""
     errors: list[str] = []
+    revocation_classes_match = re.search(
+        r"^### 6\.3 Revocation classes$([\s\S]*?)(?=^### |^## |\Z)", versioning, re.MULTILINE
+    )
+    if revocation_classes_match is None:
+        errors.append("missing required heading '### 6.3 Revocation classes'")
+        revocation_classes = ""
+    else:
+        revocation_classes = revocation_classes_match.group(1)
     for revocation_class in _VERSIONING_REQUIRED_REVOCATION_CLASSES:
-        if re.search(rf"^\| {re.escape(revocation_class)} \|", versioning, re.MULTILINE) is None:
+        if (
+            re.search(rf"^\| {re.escape(revocation_class)} \|", revocation_classes, re.MULTILINE)
+            is None
+        ):
             errors.append(f"§6.3 registry missing revocation-class row {revocation_class}")
+    active_pattern = rf"^\| {re.escape(_VERSIONING_ACTIVE_REVOCATION_CLASS)} \| active \|"
+    if re.search(active_pattern, revocation_classes, re.MULTILINE) is None:
+        errors.append(
+            "§6.3 registry missing active-state row for revocation class "
+            f"{_VERSIONING_ACTIVE_REVOCATION_CLASS}"
+        )
+    return errors
+
+
+# Stage 3 (v0.2 §17, rev 6) registers two more active rows this document's
+# amendment procedure (§5) requires: the §6.4 log entry type `transfer-record`
+# and the §6.5 transfer type `issuer-mediated-v1` -- the latter registry was
+# empty before this revision, so getting a row there at all (not just the
+# right state) is exactly the fact worth guarding against regression.
+_VERSIONING_REQUIRED_ACTIVE_LOG_ENTRY_TYPES: tuple[str, ...] = ("`transfer-record`",)
+_VERSIONING_REQUIRED_ACTIVE_TRANSFER_TYPES: tuple[str, ...] = ("`issuer-mediated-v1`",)
+
+
+def check_versioning_transfer_registries(versioning: str) -> list[str]:
+    """§6.4 and §6.5 each carry their Stage 3 (v0.2 §17, rev 6) active row."""
+    errors: list[str] = []
+    log_entry_types_match = re.search(
+        r"^### 6\.4 Log entry types$([\s\S]*?)(?=^### |^## |\Z)", versioning, re.MULTILINE
+    )
+    if log_entry_types_match is None:
+        errors.append("missing required heading '### 6.4 Log entry types'")
+        log_entry_types = ""
+    else:
+        log_entry_types = log_entry_types_match.group(1)
+    for entry_type in _VERSIONING_REQUIRED_ACTIVE_LOG_ENTRY_TYPES:
+        pattern = rf"^\| {re.escape(entry_type)} \| active \|"
+        if re.search(pattern, log_entry_types, re.MULTILINE) is None:
+            errors.append(f"§6.4 registry missing active-state row for log entry type {entry_type}")
+    transfer_types_match = re.search(
+        r"^### 6\.5 Transfer types$([\s\S]*?)(?=^### |^## |\Z)", versioning, re.MULTILINE
+    )
+    if transfer_types_match is None:
+        errors.append("missing required heading '### 6.5 Transfer types'")
+        transfer_types = ""
+    else:
+        transfer_types = transfer_types_match.group(1)
+    for transfer_type in _VERSIONING_REQUIRED_ACTIVE_TRANSFER_TYPES:
+        pattern = rf"^\| {re.escape(transfer_type)} \| active \|"
+        if re.search(pattern, transfer_types, re.MULTILINE) is None:
+            errors.append(
+                f"§6.5 registry missing active-state row for transfer type {transfer_type}"
+            )
     return errors
 
 
@@ -411,6 +540,76 @@ def check_versioning_lifecycle_exception(versioning: str) -> list[str]:
     """§2 explicitly exempts lifecycle-driven classification downgrades."""
     if re.search(r"^One exception exists:.*$", versioning, re.MULTILINE) is None:
         return ["§2 missing required lifecycle exception paragraph 'One exception exists:'"]
+    return []
+
+
+_STAGE3_HEADING = "## 17. Stage 3: issuer-mediated transfer"
+_STAGE3_REQUIRED_LITERALS: tuple[str, ...] = (
+    "Attest-transfer-authorization-v1",
+    "transfer-record",
+    "transferred_revocation_unbacked",
+    "transfer_record_unlogged",
+    "transfer_not_yet_transferable",
+    "transfer_double_assignment_conflict",
+    'revocation: "transferred"',
+)
+
+_CHAIN_AUDIT_HEADING = "### 17.5 Chain of title (separate audit surface)"
+_CHAIN_AUDIT_REQUIRED_LITERALS: tuple[str, ...] = (
+    "chain link {i}: no transfer record",
+    "chain link {i}: issuer signature invalid",
+    "chain link {i}: holder authorization invalid",
+    "chain link {i}: transfer record not logged",
+    "chain link {i}: transferred before not_transferable_before",
+    "chain link {i}: losing branch of a double assignment",
+    "chain link {i}: new receipt buyer.pubkey != new_holder_pubkey",
+    "chain link {i}: previous receipt lacks a backed transferred-class revocation",
+)
+
+
+def check_v02_stage3_transfer_profile(spec_v02: str) -> list[str]:
+    """v0.2 §17 retains its heading and Stage 3 fixed vocabulary."""
+    errors: list[str] = []
+    stage3_match = re.search(
+        rf"^{re.escape(_STAGE3_HEADING)}$([\s\S]*?)(?=^## |\Z)", spec_v02, re.MULTILINE
+    )
+    if stage3_match is None:
+        errors.append(f"attest-v0.2.md: missing required heading {_STAGE3_HEADING!r}")
+        stage3_text = ""
+    else:
+        stage3_text = stage3_match.group(1)
+    for literal in _STAGE3_REQUIRED_LITERALS:
+        if literal not in stage3_text:
+            errors.append(f"attest-v0.2.md: §17 missing required literal {literal!r}")
+    return errors
+
+
+def check_v02_chain_audit_literals(spec_v02: str) -> list[str]:
+    """v0.2 §17.5 pins the cross-language chain-audit diagnostic contract."""
+    section_match = re.search(
+        rf"^{re.escape(_CHAIN_AUDIT_HEADING)}$([\s\S]*?)(?=^### |^## |\Z)",
+        spec_v02,
+        re.MULTILINE,
+    )
+    if section_match is None:
+        return [f"attest-v0.2.md: missing required heading {_CHAIN_AUDIT_HEADING!r}"]
+    section_text = section_match.group(1)
+    return [
+        f"attest-v0.2.md: §17.5 missing required chain-audit literal {literal!r}"
+        for literal in _CHAIN_AUDIT_REQUIRED_LITERALS
+        if literal not in section_text
+    ]
+
+
+def check_v01_not_transferable_before_row(spec_v01: str) -> list[str]:
+    """v0.1 §5.5 retains Stage 3's not_transferable_before field row."""
+    license_match = re.search(
+        r"^### 5\.5 `license`$([\s\S]*?)(?=^### |^## |\Z)", spec_v01, re.MULTILINE
+    )
+    if license_match is None:
+        return ["attest-v0.1.md: missing required heading '### 5.5 `license`'"]
+    if re.search(r"^\| `not_transferable_before` \|", license_match.group(1), re.MULTILINE) is None:
+        return ["attest-v0.1.md: §5.5 missing required not_transferable_before row"]
     return []
 
 
@@ -537,6 +736,9 @@ def collect_errors(
     errors += [f"attest-threat-model.md: {e}" for e in check_matrix(threat_model, set(tm_ids))]
     errors += [f"attest-privacy.md: {e}" for e in check_claims(pc_rows)]
     errors += [f"attest-privacy.md: {e}" for e in check_schema_pins(pc_rows, schema)]
+    errors += [
+        f"attest-privacy.md: {e}" for e in check_pc08_corpus_claim(pc_rows, _VECTORS_PATH)
+    ]
     errors += [f"attest-versioning.md: {e}" for e in check_versioning_sections(versioning)]
     errors += [f"attest-versioning.md: {e}" for e in check_versioning_suite_names(versioning)]
     errors += [f"attest-versioning.md: {e}" for e in check_versioning_lifecycle_states(versioning)]
@@ -546,6 +748,12 @@ def collect_errors(
     errors += [
         f"attest-versioning.md: {e}" for e in check_versioning_lifecycle_exception(versioning)
     ]
+    errors += [
+        f"attest-versioning.md: {e}" for e in check_versioning_transfer_registries(versioning)
+    ]
+    errors += check_v02_stage3_transfer_profile(spec_v02)
+    errors += check_v02_chain_audit_literals(spec_v02)
+    errors += check_v01_not_transferable_before_row(spec_v01)
     errors += check_revision_logs(spec_v01, spec_v02)
     errors += _check_revision_log(versioning, "attest-versioning.md")
     errors += check_receipt_id_pattern(spec_v01, schema)

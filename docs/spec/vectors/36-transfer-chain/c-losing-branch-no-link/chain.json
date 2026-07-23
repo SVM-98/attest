@@ -1,0 +1,147 @@
+{
+  "payloads": [
+    {
+      "attest_version": "0.2",
+      "buyer": {
+        "commitment": "o9ryRDRXrndWeZUJVoMEXlx-cdktlWY3jozvTCqnkhw",
+        "identifier_type": "issuer-account",
+        "pubkey": "dPhc2jTRwnxGIUhHMekVecPZxs_A2UsoGqEekWIFiqk"
+      },
+      "issued_at": "2025-07-02T13:50:00Z",
+      "issuer": {
+        "display_name": "Example Games Store",
+        "id": "store.example.com"
+      },
+      "license": {
+        "drm": "drm-free",
+        "grant": "perpetual",
+        "legal_text_sha256": "a9e875fe29704222a432410b0c160f5a2e5ef48effa8b51a5017c640e21c109c",
+        "revocability": "none",
+        "terms_uri": "https://store.example.com/attest/license-templates/standard-v1",
+        "transferable": true
+      },
+      "receipt_id": "01JZ5PDHT04CHJ68S34CHJ68S3",
+      "supersedes": null,
+      "survivability": {
+        "end_of_life": "artifacts-remain-redownloadable",
+        "eol_commitment_sha256": null,
+        "eol_commitment_uri": null,
+        "redownload_right": true
+      },
+      "work": {
+        "artifact_series": "store.example.com/works/EXG-001",
+        "identifiers": {
+          "issuer_sku": "EXG-001"
+        },
+        "publisher": "Example Publisher srl",
+        "title": "Example Game"
+      }
+    },
+    {
+      "attest_version": "0.2",
+      "buyer": {
+        "commitment": "o9ryRDRXrndWeZUJVoMEXlx-cdktlWY3jozvTCqnkhw",
+        "identifier_type": "issuer-account",
+        "pubkey": "WJNmBKvaESvJSTNWnIL40MwN35Kj-DKfL0SPf0hKWUw"
+      },
+      "issued_at": "2025-07-02T13:50:00Z",
+      "issuer": {
+        "display_name": "Example Games Store",
+        "id": "store.example.com"
+      },
+      "license": {
+        "drm": "drm-free",
+        "grant": "perpetual",
+        "legal_text_sha256": "a9e875fe29704222a432410b0c160f5a2e5ef48effa8b51a5017c640e21c109c",
+        "revocability": "none",
+        "terms_uri": "https://store.example.com/attest/license-templates/standard-v1",
+        "transferable": true
+      },
+      "receipt_id": "01JZ5PDHT04GJ289144GJ28914",
+      "supersedes": null,
+      "survivability": {
+        "end_of_life": "artifacts-remain-redownloadable",
+        "eol_commitment_sha256": null,
+        "eol_commitment_uri": null,
+        "redownload_right": true
+      },
+      "work": {
+        "artifact_series": "store.example.com/works/EXG-001",
+        "identifiers": {
+          "issuer_sku": "EXG-001"
+        },
+        "publisher": "Example Publisher srl",
+        "title": "Example Game"
+      }
+    }
+  ],
+  "revocation_view": [
+    {
+      "receipt_id": "01JZ5PDHT04CHJ68S34CHJ68S3",
+      "revoked_at": "2025-07-20T00:00:00Z",
+      "signature": {
+        "kid": "store.example.com/keys/2025-01#ed25519-1",
+        "sig": "9NN46V8aeTIfTZscAZA_99KeW4RuawMz3_5ST1T1jiMjKbHLCjqfOvnWeQOccZoDQJNHNUsd_SH5LmlpFmuhDg"
+      },
+      "status": "transferred"
+    }
+  ],
+  "transfer_view": [
+    {
+      "evidence": {
+        "checkpoint": "attest-transparency-log.example/2026\n2\nAvYXqF9R9YFfA7MZqZl8fj1K1FkwoLGdmnDBcyHUpIE=\n\n\u2014 attest-log-2026 dpWeB77bVl5dzPvQnWOvDAbUUhIgNxQNXYlpY4dMsPRf6wLOrJuNLs6uCsU1yEr5MMuKTsyVC5X1eHCP23hFd1ohigg=\n\u2014 attest-log-2026 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\n",
+        "entry": {
+          "issuer": "store.example.com",
+          "record_sha256": "87b45eabfec806c3366100ab09b2ca2b5fdba5f4433d650f226911d517a92ed9",
+          "type": "transfer-record"
+        },
+        "inclusion_proof": [
+          "358bafeab63d6b085b387180ba4b122a7034ced1cf6c2b4a6aacbda885383d27"
+        ],
+        "leaf_index": 0,
+        "tree_size": 2
+      },
+      "record": {
+        "holder_authorization": {
+          "sig": "xnnBIDoYa2f-umN9rWc8b_RuZpueAjBELrn_dtkIArvxNyJpOPiTfJUdL7v4uwM7z7KV5-4nwQ2jMDL9FTLvAw"
+        },
+        "new_holder_pubkey": "kQnbVfeXl6OWRi-4lcKtzqfoaDwvMFbAelR1FVU3tz4",
+        "new_receipt_id": "01JZ5PDHT050M2GA1850M2GA18",
+        "receipt_id": "01JZ5PDHT04CHJ68S34CHJ68S3",
+        "signature": {
+          "kid": "store.example.com/keys/2025-01#ed25519-1",
+          "sig": "CTWZwVg0ckVekTF30c1v_Ne6t-wxqQIwW24EttvoL_We9mRaXApgJromD03ApHv7XPrKY4TNk5CA1YAGsut2CQ"
+        },
+        "transferred_at": "2025-07-20T00:00:00Z"
+      }
+    },
+    {
+      "evidence": {
+        "checkpoint": "attest-transparency-log.example/2026\n2\nAvYXqF9R9YFfA7MZqZl8fj1K1FkwoLGdmnDBcyHUpIE=\n\n\u2014 attest-log-2026 dpWeB77bVl5dzPvQnWOvDAbUUhIgNxQNXYlpY4dMsPRf6wLOrJuNLs6uCsU1yEr5MMuKTsyVC5X1eHCP23hFd1ohigg=\n\u2014 attest-log-2026 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\n",
+        "entry": {
+          "issuer": "store.example.com",
+          "record_sha256": "5733a3327dbe65fd0f824f57a5c4fdce8ce2f78e5c642ca84765a955fc446d0c",
+          "type": "transfer-record"
+        },
+        "inclusion_proof": [
+          "58a6ca14520d425f54368721a8bba5c219ff110297908d9a0aa8757fcb015939"
+        ],
+        "leaf_index": 1,
+        "tree_size": 2
+      },
+      "record": {
+        "holder_authorization": {
+          "sig": "7eTCthgkPnlFMmELClTg0UV4v3jD2r23dUMNioGfgZ6Yk1OyXzI_dKTIw6_qBaGRrtoFPczqfdUjlGwVIpYOCA"
+        },
+        "new_holder_pubkey": "WJNmBKvaESvJSTNWnIL40MwN35Kj-DKfL0SPf0hKWUw",
+        "new_receipt_id": "01JZ5PDHT04GJ289144GJ28914",
+        "receipt_id": "01JZ5PDHT04CHJ68S34CHJ68S3",
+        "signature": {
+          "kid": "store.example.com/keys/2025-01#ed25519-1",
+          "sig": "BMDeYhtxL8qchtrCyxl89SnEjWrdfHclbZEFgeswPKZQd-rWmD9UBswQG25FfscXzaYDhKR-O6qpfoTD6mRnBQ"
+        },
+        "transferred_at": "2025-07-20T00:00:00Z"
+      }
+    }
+  ]
+}

@@ -9,8 +9,11 @@ from pathlib import Path
 import pytest
 
 from attest import canon, validate
+from attest.keys import b64u
 
 from .helpers import make_payload
+
+_PUBKEY = b64u(bytes(32))
 
 
 def test_valid_example_payload_passes() -> None:
@@ -74,6 +77,59 @@ def test_attest_version_unknown_rejected() -> None:
     errors = validate.validate_payload(payload)
 
     assert errors
+
+
+# --- D1 holder binding (v0.2 §17.8) ------------------------------------------
+
+
+def test_v02_transferable_true_requires_pubkey() -> None:
+    payload = make_payload(attest_version="0.2")
+    payload["license"]["transferable"] = True
+    payload["buyer"]["pubkey"] = None
+
+    errors = validate.validate_payload(payload)
+
+    assert any("pubkey" in e for e in errors)
+
+
+def test_v01_transferable_true_null_pubkey_still_valid() -> None:
+    payload = make_payload(attest_version="0.1")
+    payload["license"]["transferable"] = True
+    payload["buyer"]["pubkey"] = None
+
+    assert validate.validate_payload(payload) == []
+
+
+def test_v02_transferable_true_with_pubkey_present_is_valid() -> None:
+    payload = make_payload(attest_version="0.2")
+    payload["license"]["transferable"] = True
+    payload["buyer"]["pubkey"] = _PUBKEY
+
+    assert validate.validate_payload(payload) == []
+
+
+def test_v02_transferable_false_null_pubkey_still_valid() -> None:
+    payload = make_payload(attest_version="0.2")
+    payload["license"]["transferable"] = False
+    payload["buyer"]["pubkey"] = None
+
+    assert validate.validate_payload(payload) == []
+
+
+# --- not_transferable_before (v0.2 §17.7) ------------------------------------
+
+
+def test_not_transferable_before_accepts_iso_and_rejects_garbage() -> None:
+    payload = make_payload()
+    payload["license"]["not_transferable_before"] = "2026-07-23T00:00:00Z"
+
+    assert validate.validate_payload(payload) == []
+
+    payload["license"]["not_transferable_before"] = "not-a-date"
+
+    errors = validate.validate_payload(payload)
+
+    assert any("not_transferable_before" in e for e in errors)
 
 
 # --- G1 normative ceilings (attest-versioning.md §5 amendment) --------------
