@@ -465,6 +465,19 @@ def test_pc_01_absent_from_privacy_doc_is_an_error() -> None:
     assert any("PC-01" in e and "missing" in e.lower() for e in errors)
 
 
+def test_pc_08_corpus_pin_includes_json_parsed_chain_payloads() -> None:
+    privacy = (SPEC_DIR / "attest-privacy.md").read_text(encoding="utf-8")
+    rows = check_spec_docs.parse_pc_rows(privacy)
+
+    assert check_spec_docs.check_pc08_corpus_claim(rows, SPEC_DIR / "vectors") == []
+
+    drifted_privacy = privacy.replace("166 payload objects", "165 payload objects")
+    drifted_rows = check_spec_docs.parse_pc_rows(drifted_privacy)
+    errors = check_spec_docs.check_pc08_corpus_claim(drifted_rows, SPEC_DIR / "vectors")
+
+    assert any("PC-08" in error and "count" in error for error in errors)
+
+
 def test_pc_01_required_pin_diverging_from_schema_is_an_error() -> None:
     docs = _base_docs()
     docs["schema"] = _minimal_schema(buyer_required=["commitment"])

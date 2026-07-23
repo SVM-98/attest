@@ -60,6 +60,58 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and the 23 added since exercise v0.2 behaviour a v0.1-only verifier is required
   to reject.
 
+## [0.4.0] — 2026-07-23
+
+### Added
+
+- **v0.2 Stage 3 — issuer-mediated transfer** (`docs/spec/attest-v0.2.md` §17), giving
+  the reserved `license.transferable` field its first real meaning. A transfer record
+  is an issuer-signed side-document — `receipt_id`, `new_receipt_id`, `new_holder_pubkey`,
+  `transferred_at`, an outgoing-holder `holder_authorization` signature over a
+  domain-separated preimage, and the issuer's own hybrid-AND-ruled `signature` — that
+  moves a receipt from one holder to another. Old-receipt extinguishment reuses the
+  existing revocation feed (`status: "transferred"`, reported as the new reachable
+  value `revocation: "transferred"`, capping `ok` the same way `"revoked"` already
+  does) and is honored for every `license.revocability` class, including `none`, but
+  only when backed by an authenticated `holder_authorization` and a logged inclusion
+  proof (the consent gate). A transfer record that authenticates but is not logged is
+  ignored (`transfer_record_unlogged`); two records for the same receipt resolve
+  earliest-log-index-wins (`transfer_double_assignment_conflict`); `license.not_transferable_before`
+  gates transfer eligibility (`transfer_not_yet_transferable`); post-transfer revocation
+  matches by `receipt_id`, under the new receipt's own class and `issued_at` anchor. A
+  v0.2 receipt with `license.transferable: true` and a null/absent `buyer.pubkey` is now
+  a schema error — the chain of title is cryptographic from the first link — while v0.1
+  receipts are untouched. A separate `audit_chain`/`auditChain` surface walks a whole
+  chain of transfers and reports per-link validity, independent of single-receipt
+  `verify()`. New conformance leaf groups `35-transfer` (10 leaves) and
+  `36-transfer-chain` (3 leaves), bringing the corpus to 95 leaves across 36 groups,
+  reproduced by the Python reference, the TypeScript verifier, and the site adapter.
+- Python: `src/attest/transfer.py` (record build/sign/verify, holder authorization,
+  chain-of-title audit), `verify.py` integration (transferred-class backing,
+  `not_transferable_before` enforcement), and `attest transfer` CLI
+  subcommands.
+- TypeScript: `verifiers/ts/src/transfer.ts` and `revocation.ts`/`verify.ts` parity for
+  the full transfer profile, including Stage 3's stricter date validation (a
+  Python/TypeScript divergence closed during review).
+- Threat model (`docs/spec/attest-threat-model.md`): §6.1's five forthcoming-revision
+  requirements resolved into cross-references; new Group K adds TM-61 through TM-67
+  (transfer-record forgery, chain-of-title hijack, double assignment, post-transfer
+  revocation confusion, coerced transfer, post-CRQC holder-authorization forgery,
+  transfer-feed trade-graph observability); a declared, tracked gap records that the
+  Tamarin formal-verification model does not cover the transfer profile in this
+  revision (`formal/` and `tools/check_formal.py` are untouched by design).
+- Privacy considerations (`docs/spec/attest-privacy.md`): `not_transferable_before`
+  classified (§2.5); the `revocation-record` and `transfer-record` log-entry types
+  documented for the first time (§2.11, closing a pre-existing gap left open since
+  rev 5); new §2.17 analyzing transfer-record observability and its pseudonymity
+  bound; a §5 note that a `transfer-record` log entry reveals only that some transfer
+  happened, never the parties.
+- Non-normative annex `docs/spec/attest-transfer-economics.md`: the resale-velocity
+  problem, the issuer-royalty incentive (the Robot Cache precedent), the legal frame
+  (*UsedSoft* C-128/11, *Tom Kabinet* C-263/18, and the `eu_usedsoft_asserted`
+  relationship), and an explicit out-of-scope list (marketplaces, payments, escrow,
+  royalty mechanics).
+
 ## [0.1.2] — 2026-07-13
 
 First PyPI release built and published from the hardened OIDC pipeline
