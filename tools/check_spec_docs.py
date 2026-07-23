@@ -25,6 +25,8 @@ _SCHEMA_PATH = _REPO_ROOT / "docs/spec/schema/attest-receipt.schema.json"
 _VERSIONING_PATH = _REPO_ROOT / "docs/spec/attest-versioning.md"
 _VECTORS_PATH = _REPO_ROOT / "docs/spec/vectors"
 _STANDARDS_RELATIONSHIP_PATH = _REPO_ROOT / "docs/spec/attest-standards-relationship.md"
+_INTERNET_DRAFT_DIR = _REPO_ROOT / "ietf"
+_INTERNET_DRAFT_BASENAME = "draft-martinalli-open-purchase-receipts"
 
 # The six normative sections attest-versioning.md's amendment procedure
 # requires (§5) every reader be able to find by exact heading.
@@ -739,6 +741,125 @@ def check_standards_relationship() -> list[str]:
     return errors
 
 
+# The Internet-Draft (P1.6 T2) is a snapshot-profile mirror of the living
+# specs, never their replacement: its Introduction MUST declare, in one
+# physical line per spec, which attest-v0.1.md/attest-v0.2.md revision it
+# mirrors. Each regex is deliberately anchored to a single line (`[^\n]*`,
+# no DOTALL) so the two declarations can never bleed into each other when
+# both appear in the same paragraph -- a greedy `.*` spanning newlines could
+# otherwise let the v0.1 regex capture the v0.2 sentence's revision number.
+_DRAFT_V01_SNAPSHOT_RE = re.compile(r"attest-v0\.1\.md[^\n]*revision (\d+)")
+_DRAFT_V02_SNAPSHOT_RE = re.compile(r"attest-v0\.2\.md[^\n]*revision (\d+)")
+
+# RFC 9943 (SCITT) and RFC 9334 (RATS) are the terminology-defusal citations
+# (v0.1 §2/§3-equivalent Conventions and Terminology section); RFC 8785 is
+# the JCS base the Canonicalization section cites. Mirrors the annex's own
+# _STANDARDS_RELATIONSHIP_REQUIRED_LITERALS choice of exactly these three.
+_DRAFT_REQUIRED_LITERALS: tuple[str, ...] = ("9943", "9334", "8785")
+
+# Any `(rev N)` token, used to scan a spec's own "## Revision log" section
+# for declared-revision EXISTENCE (never latest-equality -- a later spec
+# bump must never redden this check, only make drift detectable to a reader
+# who compares the draft's declared revision against the living log).
+_REV_LOG_ENTRY_REV_RE = re.compile(r"\(rev (\d+)\)")
+
+
+def _internet_draft_source_path() -> Path | None:
+    """The single `ietf/draft-martinalli-open-purchase-receipts.{md,xml}`
+    source, or None if zero or more than one candidate exists."""
+    candidates = [
+        path
+        for path in (
+            _INTERNET_DRAFT_DIR / f"{_INTERNET_DRAFT_BASENAME}.md",
+            _INTERNET_DRAFT_DIR / f"{_INTERNET_DRAFT_BASENAME}.xml",
+        )
+        if path.exists()
+    ]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _internet_draft_source_text() -> str:
+    """Read the real committed draft source. Raises if it is missing or
+    ambiguous -- callers that need fail-closed behavior use
+    check_internet_draft_snapshot() instead."""
+    path = _internet_draft_source_path()
+    assert path is not None, "internet-draft source missing or ambiguous"
+    return path.read_text(encoding="utf-8")
+
+
+def _revisions_in_log(spec_text: str) -> set[int]:
+    """Every `(rev N)` integer inside a spec's own `## Revision log` section
+    (never body prose elsewhere, which may mention a revision in passing)."""
+    heading_match = _REVISION_LOG_HEADING_RE.search(spec_text)
+    if heading_match is None:
+        return set()
+    rest = spec_text[heading_match.end() :]
+    next_heading = re.search(r"^## ", rest, re.MULTILINE)
+    section = rest[: next_heading.start()] if next_heading is not None else rest
+    return {int(match.group(1)) for match in _REV_LOG_ENTRY_REV_RE.finditer(section)}
+
+
+def check_internet_draft_snapshot() -> list[str]:
+    """Fail-closed existence/shape guard for the Internet-Draft source.
+
+    Checks that exactly one of `ietf/draft-martinalli-open-purchase-receipts.md`
+    /`.xml` exists, that its text declares (via two pinned per-line regexes)
+    which attest-v0.1.md/attest-v0.2.md revision it mirrors, that each
+    declared revision integer EXISTS in the corresponding spec's own
+    revision log (existence, not latest-equality -- a later spec revision
+    bump alone must never turn this red; drift is instead detectable by a
+    reader comparing the declared revision against the living log), and that
+    the source cites the three RFCs the terminology defusals (RFC 9943,
+    RFC 9334) and the canonicalization section (RFC 8785) require by number.
+    Not wired into `collect_errors()`, same reasoning as
+    check_standards_relationship(): it does not cross-reference another
+    document's parsed structure, so it is called directly from `main()`.
+    """
+    source_path = _internet_draft_source_path()
+    if source_path is None:
+        candidate_count = sum(
+            1
+            for path in (
+                _INTERNET_DRAFT_DIR / f"{_INTERNET_DRAFT_BASENAME}.md",
+                _INTERNET_DRAFT_DIR / f"{_INTERNET_DRAFT_BASENAME}.xml",
+            )
+            if path.exists()
+        )
+        return [
+            "internet-draft: expected exactly one of "
+            f"{_INTERNET_DRAFT_BASENAME}.md/.xml under {_INTERNET_DRAFT_DIR}, "
+            f"found {candidate_count}"
+        ]
+
+    text = source_path.read_text(encoding="utf-8")
+    errors: list[str] = []
+
+    for spec_label, snapshot_re, spec_path in (
+        ("attest-v0.1.md", _DRAFT_V01_SNAPSHOT_RE, _SPEC_V01_PATH),
+        ("attest-v0.2.md", _DRAFT_V02_SNAPSHOT_RE, _SPEC_V02_PATH),
+    ):
+        match = snapshot_re.search(text)
+        if match is None:
+            errors.append(
+                f"internet-draft: missing {spec_label} snapshot-revision declaration "
+                f"(expected to match {snapshot_re.pattern!r})"
+            )
+            continue
+        declared = int(match.group(1))
+        spec_text = spec_path.read_text(encoding="utf-8")
+        if declared not in _revisions_in_log(spec_text):
+            errors.append(
+                f"internet-draft: declared {spec_label} revision {declared} does not exist "
+                f"as '(rev {declared})' in {spec_label}'s revision log"
+            )
+
+    for literal in _DRAFT_REQUIRED_LITERALS:
+        if literal not in text:
+            errors.append(f"internet-draft: missing required literal {literal!r}")
+
+    return errors
+
+
 def collect_errors(
     threat_model: str,
     privacy: str,
@@ -811,6 +932,7 @@ def main() -> int:
 
     errors = collect_errors(threat_model, privacy, spec_v01, spec_v02, schema, versioning)
     errors += check_standards_relationship()
+    errors += check_internet_draft_snapshot()
     for error in errors:
         print(f"ERROR {error}")
     return 1 if errors else 0
