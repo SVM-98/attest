@@ -76,6 +76,7 @@ from attest import (
     pq,
     revocation,
     tlog,
+    transfer,
     ulid,
     validate,
 )
@@ -204,6 +205,50 @@ WRONG_LOG_ORIGIN = "attest-transparency-log.example/rogue"  # vector 28d: origin
 VECTOR_28M_MLDSA_PK, VECTOR_28M_MLDSA_SK = ML_DSA_65.key_derive(bytes([30]) * 32)
 
 
+# --- vector 35/36 (v0.2 Stage 3, issuer-mediated transfer) additional fixed
+# inputs -----------------------------------------------------------------
+#
+# Continuing the seed numbering (26/28/29/30/31 already taken): every group
+# 35 OLD receipt is `attest_version: "0.2"`, so — exactly like group 26 —
+# its envelope/manifest MUST be hybrid (v0.2's own step-1 gate requires a
+# `pub_ml_dsa_65`-carrying key entry); every transfer/revocation side-document
+# that authenticates against that SAME manifest therefore needs the matching
+# hybrid signature shape too (`_hybrid_sign_record` below, group 26/33's own
+# oracle-sign-then-splice technique). Group 36's chain-of-title fixtures use a
+# PLAIN (non-hybrid) issuer manifest instead — chain-of-title is a payload-only
+# audit surface (`transfer.audit_chain` never touches an envelope's own
+# signature/schema/hybrid-ness at all), so a plain manifest keeps its
+# transfer/revocation records fully deterministic via `transfer.build_record`/
+# `revocation.build_record` directly, no oracle needed.
+
+TRANSFER_NEW_HOLDER_SEED = bytes([32]) * 32  # the winning incoming holder (35a/b/e/g/h, 36 R1)
+TRANSFER_NEW_HOLDER_KP = keys.from_seed(TRANSFER_NEW_HOLDER_SEED)
+TRANSFER_SECOND_HOLDER_SEED = bytes([33]) * 32  # 35f's second (losing) incoming holder
+TRANSFER_SECOND_HOLDER_KP = keys.from_seed(TRANSFER_SECOND_HOLDER_SEED)
+TRANSFER_FORGER_SEED = bytes([34]) * 32  # 35d: an unrelated key forging the holder authorization
+TRANSFER_FORGER_KP = keys.from_seed(TRANSFER_FORGER_SEED)
+
+CHAIN_HOLDER_0_SEED = bytes([35]) * 32  # group 36: R0's own buyer/holder keypair
+CHAIN_HOLDER_0_KP = keys.from_seed(CHAIN_HOLDER_0_SEED)
+CHAIN_HOLDER_1_SEED = bytes([36]) * 32  # R1's own buyer keypair — also signs link 2's auth
+CHAIN_HOLDER_1_KP = keys.from_seed(CHAIN_HOLDER_1_SEED)
+CHAIN_HOLDER_2_SEED = bytes([37]) * 32  # R2's own buyer keypair (final holder, never re-signs)
+CHAIN_HOLDER_2_KP = keys.from_seed(CHAIN_HOLDER_2_SEED)
+CHAIN_MISMATCH_HOLDER_SEED = bytes([38]) * 32  # 36b: a holder distinct from TR1's new_holder_pubkey
+CHAIN_MISMATCH_HOLDER_KP = keys.from_seed(CHAIN_MISMATCH_HOLDER_SEED)
+
+TRANSFERRED_AT = "2025-07-20T00:00:00Z"  # generic transferred_at, after ISSUED_AT (2025-07-02)
+NOT_TRANSFERABLE_BEFORE_AFTER = "2025-08-01T00:00:00Z"  # after TRANSFERRED_AT (35g)
+
+# ULID randomness bytes distinct from RECEIPT_ID's own (bytes(range(10))).
+NEW_RECEIPT_ID = ulid.generate(timestamp_ms=ULID_TIMESTAMP_MS, randomness=bytes([32] * 10))
+NEW_RECEIPT_ID_LOSING = ulid.generate(timestamp_ms=ULID_TIMESTAMP_MS, randomness=bytes([33] * 10))
+CHAIN_RECEIPT_0 = ulid.generate(timestamp_ms=ULID_TIMESTAMP_MS, randomness=bytes([35] * 10))
+CHAIN_RECEIPT_1 = ulid.generate(timestamp_ms=ULID_TIMESTAMP_MS, randomness=bytes([36] * 10))
+CHAIN_RECEIPT_2 = ulid.generate(timestamp_ms=ULID_TIMESTAMP_MS, randomness=bytes([37] * 10))
+CHAIN_PHANTOM_RECEIPT = ulid.generate(timestamp_ms=ULID_TIMESTAMP_MS, randomness=bytes([40] * 10))
+
+
 # --- generic helpers --------------------------------------------------------
 
 
@@ -321,6 +366,51 @@ def _flip_sig_byte(sig_b64u: str) -> str:
     raw = bytearray(keys.b64u_decode(sig_b64u))
     raw[0] ^= 0xFF
     return keys.b64u(bytes(raw))
+
+
+def _hybrid_sign_record(body: dict[str, Any], kid: str = ISSUER_KID) -> dict[str, Any]:
+    """Manually hybrid-sign a v0.2 side-document body (transfer/revocation
+    record) — the same oracle-sign-then-splice technique `_hybrid_manifest`
+    uses above (`ISSUER_KP`'s Ed25519 leg + the deterministic `_oracle_sign`
+    ML-DSA-65 dev oracle, `HYBRID_MLDSA_SK`/`HYBRID_MLDSA_PK`), needed because
+    `manifests.sign_signature_block`'s hybrid path would otherwise route the
+    ML-DSA-65 leg through non-deterministic `pq.sign`/pqcrypto (this module's
+    `gen_26_hybrid` docstring). Used by group 35, whose OLD receipts are
+    `attest_version: "0.2"` and therefore need a hybrid issuer manifest to
+    authenticate their own envelope signature (v0.2's step-1 hybrid gate) —
+    every transfer/revocation side-document that must authenticate against
+    that SAME manifest needs the matching hybrid signature shape."""
+    signable = canon.canonical_bytes(body)
+    record = dict(body)
+    record["signature"] = {
+        "kid": kid,
+        "sig": keys.b64u(keys.sign(signable, ISSUER_KP)),
+        "sig_ml_dsa_65": keys.b64u(_oracle_sign(signable)),
+    }
+    return record
+
+
+def _transfer_record_body(
+    receipt_id: str,
+    new_receipt_id: str,
+    new_holder_pubkey_b64u: str,
+    transferred_at: str,
+    holder_kp: keys.SigningKeyPair,
+) -> dict[str, Any]:
+    """The UNSIGNED transfer-record body (v0.2 §17.1) with a genuine holder
+    authorization from `holder_kp` — the shared shape every group 35/36
+    transfer record starts from, before `_hybrid_sign_record`/
+    `transfer.build_record`'s own issuer-side signing."""
+    auth_sig = transfer.sign_authorization(
+        receipt_id, new_holder_pubkey_b64u, transferred_at, holder_kp
+    )
+    return {
+        "receipt_id": receipt_id,
+        "new_receipt_id": new_receipt_id,
+        "new_holder_pubkey": new_holder_pubkey_b64u,
+        "transferred_at": transferred_at,
+        "holder_authorization": {"sig": keys.b64u(auth_sig)},
+    }
 
 
 # --- vector 28 helpers: transparency-log checkpoints ------------------------
@@ -498,6 +588,7 @@ def write_vector(
     log_keys: list[tlog.LogKey] | None = None,
     anchor_policy: anchor.AnchorPolicy | None = None,
     revocation_evidence: dict[str, Any] | None = None,
+    transfer_view: list[dict[str, Any]] | None = None,
 ) -> None:
     """`transparency`/`log_keys`/`anchor_policy` (group 28 only, design doc
     "transparency/corroboration layer") are the untrusted evidence bundle and
@@ -513,7 +604,15 @@ def write_vector(
     revocation record's `revocation-record` log entry, fed to `verify()` as
     `revocation_evidence=` and reusing the SAME `log_keys`/`anchor_policy`
     written above — see `verify.verify()`'s keyword-only argument of the
-    same name."""
+    same name.
+
+    `transfer_view` (group 35 only, v0.2 §17 Stage 3) is a list of untrusted
+    claims `{"record": <a transfer.py record>, "evidence": <§10.2 evidence
+    bundle>}`, fed to `verify()` as `transfer_view=` and reusing the SAME
+    `log_keys`/`anchor_policy` written above — a DIFFERENT evidence channel
+    from `transparency.json`/`revocation_evidence.json`: group 35's
+    `expected.json` carries none of `transparency`/`corroboration`/
+    `manifest_freshness` either, same discipline as group 33."""
     vector_dir = VECTORS_DIR / name
     if payload is not None:
         _write_json(vector_dir / "payload.json", payload)
@@ -539,6 +638,35 @@ def write_vector(
         _write_json(vector_dir / "anchor-policy.json", _anchor_policy_json(anchor_policy))
     if revocation_evidence is not None:
         _write_json(vector_dir / "revocation-evidence.json", revocation_evidence)
+    if transfer_view is not None:
+        _write_json(vector_dir / "transfer-view.json", transfer_view)
+
+
+def write_chain_vector(
+    name: str,
+    *,
+    chain: dict[str, Any],
+    trust: dict[str, Any],
+    expected: dict[str, Any],
+    log_keys: list[tlog.LogKey],
+    anchor_policy: anchor.AnchorPolicy,
+) -> None:
+    """Group 36 only (v0.2 §17.5, chain-of-title audit): a `chain.json` leaf
+    (`{"payloads", "transfer_view", "revocation_view"}`) is routed to
+    `transfer.audit_chain` instead of `verify()` by every harness — see
+    `tests/test_vectors.py`'s `test_chain_audit_vectors` and its TS/site
+    mirrors. `trust`/`log_keys`/`anchor_policy` are the same
+    `manifests.json`/`log-keys.json`/`anchor-policy.json` shapes every other
+    group already writes; the harness extracts the single trusted issuer
+    manifest `audit_chain` expects as its own `key_manifest` argument from
+    `trust["manifests"]`'s sole entry (every group 36 leaf trusts exactly one
+    issuer)."""
+    vector_dir = VECTORS_DIR / name
+    _write_json(vector_dir / "chain.json", chain)
+    _write_json(vector_dir / "manifests.json", trust)
+    _write_json(vector_dir / "expected.json", expected)
+    _write_json(vector_dir / "log-keys.json", [_log_key_json(k) for k in log_keys])
+    _write_json(vector_dir / "anchor-policy.json", _anchor_policy_json(anchor_policy))
 
 
 # --- vector 01: valid-minimal ------------------------------------------------
@@ -3565,6 +3693,634 @@ def gen_33_logged_revocation() -> None:
     )
 
 
+# --- vector 35: transfer (v0.2 §17 Stage 3, issuer-mediated transfer) -------
+
+
+def gen_35_transfer() -> None:
+    """v0.2 Stage 3 (§17): issuer-mediated transfer records. Every OLD receipt
+    below is `attest_version: "0.2"` with `license.transferable: true` and a
+    fixed `buyer.pubkey` (`BUYER_KP`, the OUTGOING holder) — the D1 holder-
+    binding precondition (§17.8) transfer backing needs. Since v0.2 always
+    requires a hybrid envelope/manifest (verify.py's own step-1 gate), the
+    issuer manifest here is `_hybrid_manifest` (26/28's own pattern) and every
+    transfer/revocation side-document that must authenticate against it is
+    built via `_hybrid_sign_record` (this module's oracle-sign-then-splice
+    technique — `manifests.sign_signature_block`'s hybrid path would
+    otherwise route the ML-DSA-65 leg through non-deterministic `pq.sign`).
+
+    One shared backing revocation record (`status: "transferred"`, RECEIPT_ID)
+    and one shared "fully valid" transfer record/log-evidence pair
+    (`record_valid`/`evidence_valid`, genuinely issuer-signed + holder-
+    authorized by `BUYER_KP` + logged at a single-entry tree's index 0) drive
+    leaves a/b/g; c-h each vary exactly one gate in isolation (see the
+    per-leaf comments below). i/j are the D1 (§17.8) schema-conditional
+    control pair, independent of everything else in this function.
+    """
+    hybrid_manifest = _hybrid_manifest(ISSUER_ID, ISSUER_KID, ISSUER_KP)
+    assert manifests.verify_key_manifest(hybrid_manifest) is True
+    hybrid_trust = _trust_material((ISSUER_ID, hybrid_manifest, "tls"))
+
+    payload_a = issue.build_payload(
+        **_base_payload_kwargs(
+            attest_version="0.2",
+            transferable=True,
+            buyer_pubkey=BUYER_KP.pub,
+            revocability="policy",
+        )
+    )
+    _assert_schema_valid(payload_a)
+    envelope_a = _hybrid_envelope(payload_a, ISSUER_KP, ISSUER_KID)
+
+    payload_b = issue.build_payload(
+        **_base_payload_kwargs(
+            attest_version="0.2",
+            transferable=True,
+            buyer_pubkey=BUYER_KP.pub,
+            revocability="none",
+        )
+    )
+    _assert_schema_valid(payload_b)
+    envelope_b = _hybrid_envelope(payload_b, ISSUER_KP, ISSUER_KID)
+
+    # The old receipt's own backing revocation, `status: "transferred"` —
+    # shared across every leaf below (a-h all reuse RECEIPT_ID; each leaf is
+    # an independent verify() call in its own vector directory, so reusing
+    # the exact same record bytes across several `revocation.json` files is
+    # safe, mirroring group 33's own reuse discipline).
+    rev_transferred = _hybrid_sign_record(
+        {"receipt_id": RECEIPT_ID, "status": "transferred", "revoked_at": TRANSFERRED_AT}
+    )
+    assert revocation.verify_record(rev_transferred, hybrid_manifest) is True
+
+    new_holder_pub_b64u = keys.b64u(TRANSFER_NEW_HOLDER_KP.pub)
+    record_valid = _hybrid_sign_record(
+        _transfer_record_body(
+            RECEIPT_ID, NEW_RECEIPT_ID, new_holder_pub_b64u, TRANSFERRED_AT, BUYER_KP
+        )
+    )
+    assert transfer.verify_record(record_valid, hybrid_manifest) is True
+    assert transfer.verify_authorization(record_valid, keys.b64u(BUYER_KP.pub)) is True
+
+    entry_valid = {
+        "type": "transfer-record",
+        "issuer": ISSUER_ID,
+        "record_sha256": transfer.record_hash(record_valid),
+    }
+    entry_valid_bytes = tlog.encode_entry(entry_valid)
+    root_valid = tlog.build_tree([entry_valid_bytes])
+    checkpoint_valid = _sign_checkpoint_oracle(LOG_ORIGIN, 1, root_valid)
+    inclusion_valid = _hex_proof(tlog.inclusion_proof([entry_valid_bytes], 0))
+    evidence_valid = {
+        "entry": entry_valid,
+        "leaf_index": 0,
+        "tree_size": 1,
+        "inclusion_proof": inclusion_valid,
+        "checkpoint": checkpoint_valid,
+    }
+
+    # --- (a) transferred-with-backing: fully valid claim (issuer sig + holder
+    # auth + logged) -> honored, `revocation: "transferred"`, `ok: false`. ---
+    write_vector(
+        "35-transfer/a-transferred-with-backing",
+        payload=payload_a,
+        envelope=envelope_a,
+        envelope_raw=None,
+        trust=hybrid_trust,
+        expected={
+            "signature": "valid",
+            "schema": "valid",
+            "revocation": "transferred",
+            "binding": "not_checked",
+            "trust": "verified",
+            "ok": False,
+            "errors": [],
+            "warnings": [],
+        },
+        revocation_record=rev_transferred,
+        transfer_view=[{"record": record_valid, "evidence": evidence_valid}],
+        log_keys=[_log_key()],
+        anchor_policy=_empty_anchor_policy(),
+    )
+
+    # --- (b) transferred-on-none-with-backing: same claim, `revocability:
+    # "none"` -> STILL honored — the consent gate (§17.3) applies to every
+    # revocability class, `none` included. ---
+    write_vector(
+        "35-transfer/b-transferred-on-none-with-backing",
+        payload=payload_b,
+        envelope=envelope_b,
+        envelope_raw=None,
+        trust=hybrid_trust,
+        expected={
+            "signature": "valid",
+            "schema": "valid",
+            "revocation": "transferred",
+            "binding": "not_checked",
+            "trust": "verified",
+            "ok": False,
+            "errors": [],
+            "warnings": [],
+        },
+        revocation_record=rev_transferred,
+        transfer_view=[{"record": record_valid, "evidence": evidence_valid}],
+        log_keys=[_log_key()],
+        anchor_policy=_empty_anchor_policy(),
+    )
+
+    # --- (c) transferred-on-none-unbacked: the SAME `none`-class receipt/
+    # revocation as (b), but NO transfer-view.json at all -> the resolver is
+    # never reached, unbacked directly. ---
+    write_vector(
+        "35-transfer/c-transferred-on-none-unbacked",
+        payload=None,
+        envelope=envelope_b,
+        envelope_raw=None,
+        trust=hybrid_trust,
+        expected={
+            "signature": "valid",
+            "schema": "valid",
+            "revocation": "invalid_revocation_ignored",
+            "binding": "not_checked",
+            "trust": "verified",
+            "ok": True,
+            "errors": [],
+            "warnings": ["transferred_revocation_unbacked"],
+        },
+        revocation_record=rev_transferred,
+    )
+
+    # --- (d) forged-holder-auth: issuer signature genuinely verifies, but
+    # `holder_authorization.sig` was made by an unrelated key
+    # (`TRANSFER_FORGER_KP`), not the old receipt's own `BUYER_KP` -> the
+    # consent gate itself fails, unbacked. ---
+    record_forged = _hybrid_sign_record(
+        _transfer_record_body(
+            RECEIPT_ID, NEW_RECEIPT_ID, new_holder_pub_b64u, TRANSFERRED_AT, TRANSFER_FORGER_KP
+        )
+    )
+    assert transfer.verify_record(record_forged, hybrid_manifest) is True  # issuer sig fine
+    assert transfer.verify_authorization(record_forged, keys.b64u(BUYER_KP.pub)) is False
+    write_vector(
+        "35-transfer/d-forged-holder-auth",
+        payload=None,
+        envelope=envelope_a,
+        envelope_raw=None,
+        trust=hybrid_trust,
+        expected={
+            "signature": "valid",
+            "schema": "valid",
+            "revocation": "invalid_revocation_ignored",
+            "binding": "not_checked",
+            "trust": "verified",
+            "ok": True,
+            "errors": [],
+            "warnings": ["transferred_revocation_unbacked"],
+        },
+        revocation_record=rev_transferred,
+        transfer_view=[{"record": record_forged}],
+    )
+
+    # --- (e) unlogged-transfer: the SAME fully-authenticating record as (a),
+    # but its claim carries NO `evidence` at all -> never proven logged. ---
+    write_vector(
+        "35-transfer/e-unlogged-transfer",
+        payload=None,
+        envelope=envelope_a,
+        envelope_raw=None,
+        trust=hybrid_trust,
+        expected={
+            "signature": "valid",
+            "schema": "valid",
+            "revocation": "invalid_revocation_ignored",
+            "binding": "not_checked",
+            "trust": "verified",
+            "ok": True,
+            "errors": [],
+            "warnings": ["transfer_record_unlogged"],
+        },
+        revocation_record=rev_transferred,
+        transfer_view=[{"record": record_valid}],
+        log_keys=[_log_key()],
+        anchor_policy=_empty_anchor_policy(),
+    )
+
+    # --- (f) double-assignment-earliest-wins: TWO fully valid claims for the
+    # SAME RECEIPT_ID, distinct new_receipt_id/new_holder_pubkey, logged at
+    # indices 0 (record_valid, earliest) and 1 (record_lose, later) in a
+    # SHARED 2-entry tree -> the later-logged one, listed FIRST in the array,
+    # must still lose to the earliest-logged one. ---
+    new_holder_2_pub_b64u = keys.b64u(TRANSFER_SECOND_HOLDER_KP.pub)
+    record_lose = _hybrid_sign_record(
+        _transfer_record_body(
+            RECEIPT_ID, NEW_RECEIPT_ID_LOSING, new_holder_2_pub_b64u, TRANSFERRED_AT, BUYER_KP
+        )
+    )
+    assert transfer.verify_record(record_lose, hybrid_manifest) is True
+    entry_lose = {
+        "type": "transfer-record",
+        "issuer": ISSUER_ID,
+        "record_sha256": transfer.record_hash(record_lose),
+    }
+    entry_lose_bytes = tlog.encode_entry(entry_lose)
+    leaves_f = [entry_valid_bytes, entry_lose_bytes]
+    root_f = tlog.build_tree(leaves_f)
+    checkpoint_f = _sign_checkpoint_oracle(LOG_ORIGIN, 2, root_f)
+    evidence_win_f = {
+        "entry": entry_valid,
+        "leaf_index": 0,
+        "tree_size": 2,
+        "inclusion_proof": _hex_proof(tlog.inclusion_proof(leaves_f, 0)),
+        "checkpoint": checkpoint_f,
+    }
+    evidence_lose_f = {
+        "entry": entry_lose,
+        "leaf_index": 1,
+        "tree_size": 2,
+        "inclusion_proof": _hex_proof(tlog.inclusion_proof(leaves_f, 1)),
+        "checkpoint": checkpoint_f,
+    }
+    write_vector(
+        "35-transfer/f-double-assignment-earliest-wins",
+        payload=None,
+        envelope=envelope_a,
+        envelope_raw=None,
+        trust=hybrid_trust,
+        expected={
+            "signature": "valid",
+            "schema": "valid",
+            "revocation": "transferred",
+            "binding": "not_checked",
+            "trust": "verified",
+            "ok": False,
+            "errors": [],
+            "warnings": ["transfer_double_assignment_conflict"],
+        },
+        revocation_record=rev_transferred,
+        # the later-logged claim (index 1) listed FIRST in the array —
+        # earliest-wins must not be an artifact of array order.
+        transfer_view=[
+            {"record": record_lose, "evidence": evidence_lose_f},
+            {"record": record_valid, "evidence": evidence_win_f},
+        ],
+        log_keys=[_log_key()],
+        anchor_policy=_empty_anchor_policy(),
+    )
+
+    # --- (g) not-transferable-before-violation: the old receipt's own
+    # `license.not_transferable_before` falls AFTER the (otherwise fully
+    # valid, reused) claim's `transferred_at` -> not yet transferable. ---
+    payload_g = issue.build_payload(
+        **_base_payload_kwargs(
+            attest_version="0.2",
+            transferable=True,
+            buyer_pubkey=BUYER_KP.pub,
+            revocability="policy",
+        )
+    )
+    payload_g["license"]["not_transferable_before"] = NOT_TRANSFERABLE_BEFORE_AFTER
+    _assert_schema_valid(payload_g)
+    envelope_g = _hybrid_envelope(payload_g, ISSUER_KP, ISSUER_KID)
+    write_vector(
+        "35-transfer/g-not-transferable-before-violation",
+        payload=payload_g,
+        envelope=envelope_g,
+        envelope_raw=None,
+        trust=hybrid_trust,
+        expected={
+            "signature": "valid",
+            "schema": "valid",
+            "revocation": "invalid_revocation_ignored",
+            "binding": "not_checked",
+            "trust": "verified",
+            "ok": True,
+            "errors": [],
+            "warnings": ["transfer_not_yet_transferable"],
+        },
+        revocation_record=rev_transferred,
+        transfer_view=[{"record": record_valid, "evidence": evidence_valid}],
+        log_keys=[_log_key()],
+        anchor_policy=_empty_anchor_policy(),
+    )
+
+    # --- (h) classical-only-record-hybrid-key: the transfer record's
+    # holder-authorization is genuine (BUYER_KP), but the ISSUER side is
+    # signed Ed25519-ONLY (`transfer.build_record` with a plain
+    # `keys.SigningKeyPair`, deterministic — no oracle needed) against the
+    # HYBRID manifest -> the §13 AND-rule fails closed, same shape as (c). ---
+    auth_h = transfer.sign_authorization(RECEIPT_ID, new_holder_pub_b64u, TRANSFERRED_AT, BUYER_KP)
+    record_ed_only = transfer.build_record(
+        RECEIPT_ID,
+        NEW_RECEIPT_ID,
+        new_holder_pub_b64u,
+        TRANSFERRED_AT,
+        auth_h,
+        ISSUER_KP,
+        ISSUER_KID,
+    )
+    assert transfer.verify_authorization(record_ed_only, keys.b64u(BUYER_KP.pub)) is True
+    assert transfer.verify_record_signature(record_ed_only, hybrid_manifest) is False
+    write_vector(
+        "35-transfer/h-classical-only-record-hybrid-key",
+        payload=None,
+        envelope=envelope_a,
+        envelope_raw=None,
+        trust=hybrid_trust,
+        expected={
+            "signature": "valid",
+            "schema": "valid",
+            "revocation": "invalid_revocation_ignored",
+            "binding": "not_checked",
+            "trust": "verified",
+            "ok": True,
+            "errors": [],
+            "warnings": ["transferred_revocation_unbacked"],
+        },
+        revocation_record=rev_transferred,
+        transfer_view=[{"record": record_ed_only}],
+    )
+
+    # --- (i) v01-transferable-null-pubkey-ok: D1's (§17.8) negative control —
+    # `attest_version: "0.1"` is untouched by the schema conditional (it only
+    # gates v0.2), so `transferable: true` with a null `buyer.pubkey` stays
+    # schema-valid, no transfer files involved at all. ---
+    payload_i = issue.build_payload(**_base_payload_kwargs(attest_version="0.1", transferable=True))
+    _assert_schema_valid(payload_i)
+    envelope_i = issue.issue(payload_i, ISSUER_KP, ISSUER_KID)
+    write_vector(
+        "35-transfer/i-v01-transferable-null-pubkey-ok",
+        payload=payload_i,
+        envelope=envelope_i,
+        envelope_raw=None,
+        trust=_issuer_only_trust(),
+        expected={
+            "signature": "valid",
+            "schema": "valid",
+            "revocation": "unknown",
+            "binding": "not_checked",
+            "trust": "verified",
+            "ok": True,
+            "errors": [],
+            "warnings": [],
+        },
+    )
+
+    # --- (j) v02-transferable-requires-pubkey: D1's positive gate — the SAME
+    # shape under `attest_version: "0.2"` IS a schema error (§17.8). Built
+    # like 25-schema-parity: mutated to schema-invalid before signing (via
+    # `_hybrid_envelope`, which bypasses `issue.issue`'s own schema gate), so
+    # the signature genuinely covers the invalid payload. ---
+    payload_j = issue.build_payload(**_base_payload_kwargs(attest_version="0.2", transferable=True))
+    violations_j = validate.validate_payload(payload_j)
+    assert any("pubkey" in v for v in violations_j), violations_j
+    envelope_j = _hybrid_envelope(payload_j, ISSUER_KP, ISSUER_KID)
+    write_vector(
+        "35-transfer/j-v02-transferable-requires-pubkey",
+        payload=payload_j,
+        envelope=envelope_j,
+        envelope_raw=None,
+        trust=hybrid_trust,
+        expected={
+            "signature": "valid",
+            "schema": "invalid",
+            "revocation": "unknown",
+            "binding": "not_checked",
+            "trust": "verified",
+            "ok": False,
+            "errors_contains": ["pubkey"],
+            "warnings": [],
+        },
+    )
+
+
+# --- vector 36: transfer-chain (v0.2 §17.5, chain-of-title audit) ----------
+
+
+def gen_36_transfer_chain() -> None:
+    """v0.2 §17.5: `transfer.audit_chain` is a SEPARATE audit surface over a
+    whole SEQUENCE of receipt PAYLOADS — it never touches an envelope's own
+    signature/schema/hybrid-ness (`audit_chain` only reads `receipt_id` and
+    `buyer.pubkey` off each payload), so a PLAIN (non-hybrid) issuer manifest
+    keeps every transfer/revocation record fully deterministic via
+    `transfer.build_record`/`revocation.build_record` directly — no ML-DSA-65
+    oracle needed, unlike group 35. The transparency log's OWN checkpoint
+    auth is unaffected by this and stays hybrid-mandatory (§9.2), via the
+    same `_sign_checkpoint_oracle` every other group uses.
+
+    Three receipts, R0 -> R1 -> R2 (`CHAIN_HOLDER_{0,1,2}_KP` their own
+    holder keypairs), drive all three leaves:
+
+    - (a) two fully valid links (issuer sig + holder auth + logged, backed
+      by a `transferred`-class revocation on each of R0/R1) -> `chain_valid:
+      true`, both links `"valid"`.
+    - (b) one link whose NEXT receipt's `buyer.pubkey` does not match the
+      transfer record's own `new_holder_pubkey` (loop closure, §17.1) ->
+      `chain_valid: false`.
+    - (c) R0 has TWO logged, fully-authenticating transfer records (to a
+      phantom receipt at log index 0 and to R1, the actual next receipt, at
+      log index 1) — the chain presents the LATER-logged (actual) branch,
+      which must lose (§17.4).
+    """
+    plain_manifest = _manifest_material(ISSUER_ID, ISSUER_KID, ISSUER_KP)
+    plain_trust = _trust_material((ISSUER_ID, plain_manifest, "tls"))
+
+    def _chain_payload(receipt_id: str, buyer_pub: bytes) -> dict[str, Any]:
+        payload = issue.build_payload(
+            **_base_payload_kwargs(
+                attest_version="0.2",
+                transferable=True,
+                buyer_pubkey=buyer_pub,
+                receipt_id=receipt_id,
+            )
+        )
+        _assert_schema_valid(payload)
+        return payload
+
+    r0 = _chain_payload(CHAIN_RECEIPT_0, CHAIN_HOLDER_0_KP.pub)
+    r1 = _chain_payload(CHAIN_RECEIPT_1, CHAIN_HOLDER_1_KP.pub)
+    r2 = _chain_payload(CHAIN_RECEIPT_2, CHAIN_HOLDER_2_KP.pub)
+
+    tr1_auth = transfer.sign_authorization(
+        CHAIN_RECEIPT_0, keys.b64u(CHAIN_HOLDER_1_KP.pub), TRANSFERRED_AT, CHAIN_HOLDER_0_KP
+    )
+    tr1 = transfer.build_record(
+        CHAIN_RECEIPT_0,
+        CHAIN_RECEIPT_1,
+        keys.b64u(CHAIN_HOLDER_1_KP.pub),
+        TRANSFERRED_AT,
+        tr1_auth,
+        ISSUER_KP,
+        ISSUER_KID,
+    )
+    assert transfer.verify_record(tr1, plain_manifest) is True
+
+    tr2_auth = transfer.sign_authorization(
+        CHAIN_RECEIPT_1, keys.b64u(CHAIN_HOLDER_2_KP.pub), TRANSFERRED_AT, CHAIN_HOLDER_1_KP
+    )
+    tr2 = transfer.build_record(
+        CHAIN_RECEIPT_1,
+        CHAIN_RECEIPT_2,
+        keys.b64u(CHAIN_HOLDER_2_KP.pub),
+        TRANSFERRED_AT,
+        tr2_auth,
+        ISSUER_KP,
+        ISSUER_KID,
+    )
+    assert transfer.verify_record(tr2, plain_manifest) is True
+
+    rev_r0 = revocation.build_record(
+        CHAIN_RECEIPT_0, "transferred", TRANSFERRED_AT, ISSUER_KP, ISSUER_KID
+    )
+    assert revocation.verify_record(rev_r0, plain_manifest) is True
+    rev_r1 = revocation.build_record(
+        CHAIN_RECEIPT_1, "transferred", TRANSFERRED_AT, ISSUER_KP, ISSUER_KID
+    )
+    assert revocation.verify_record(rev_r1, plain_manifest) is True
+
+    entry_tr1 = {
+        "type": "transfer-record",
+        "issuer": ISSUER_ID,
+        "record_sha256": transfer.record_hash(tr1),
+    }
+    entry_tr2 = {
+        "type": "transfer-record",
+        "issuer": ISSUER_ID,
+        "record_sha256": transfer.record_hash(tr2),
+    }
+
+    # --- (a) valid-chain: TR1 and TR2 logged together in one 2-entry tree. ---
+    leaves_a = [tlog.encode_entry(entry_tr1), tlog.encode_entry(entry_tr2)]
+    root_a = tlog.build_tree(leaves_a)
+    checkpoint_a = _sign_checkpoint_oracle(LOG_ORIGIN, 2, root_a)
+    ev_tr1_a = {
+        "entry": entry_tr1,
+        "leaf_index": 0,
+        "tree_size": 2,
+        "inclusion_proof": _hex_proof(tlog.inclusion_proof(leaves_a, 0)),
+        "checkpoint": checkpoint_a,
+    }
+    ev_tr2_a = {
+        "entry": entry_tr2,
+        "leaf_index": 1,
+        "tree_size": 2,
+        "inclusion_proof": _hex_proof(tlog.inclusion_proof(leaves_a, 1)),
+        "checkpoint": checkpoint_a,
+    }
+    write_chain_vector(
+        "36-transfer-chain/a-valid-chain",
+        chain={
+            "payloads": [r0, r1, r2],
+            "transfer_view": [
+                {"record": tr1, "evidence": ev_tr1_a},
+                {"record": tr2, "evidence": ev_tr2_a},
+            ],
+            "revocation_view": [rev_r0, rev_r1],
+        },
+        trust=plain_trust,
+        expected={
+            "chain_valid": True,
+            "link_status": ["valid", "valid"],
+            "errors_contains": [],
+            "warnings": [],
+        },
+        log_keys=[_log_key()],
+        anchor_policy=_empty_anchor_policy(),
+    )
+
+    # --- (b) pubkey-mismatch-no-link: R1's OWN buyer.pubkey does not match
+    # TR1's new_holder_pubkey — TR1 itself still fully authenticates and logs
+    # (its own receipt_id/new_receipt_id still select it), only the loop
+    # closure onto R1 fails. ---
+    r1_mismatch = _chain_payload(CHAIN_RECEIPT_1, CHAIN_MISMATCH_HOLDER_KP.pub)
+    leaves_b = [tlog.encode_entry(entry_tr1)]
+    root_b = tlog.build_tree(leaves_b)
+    checkpoint_b = _sign_checkpoint_oracle(LOG_ORIGIN, 1, root_b)
+    ev_tr1_b = {
+        "entry": entry_tr1,
+        "leaf_index": 0,
+        "tree_size": 1,
+        "inclusion_proof": _hex_proof(tlog.inclusion_proof(leaves_b, 0)),
+        "checkpoint": checkpoint_b,
+    }
+    write_chain_vector(
+        "36-transfer-chain/b-pubkey-mismatch-no-link",
+        chain={
+            "payloads": [r0, r1_mismatch],
+            "transfer_view": [{"record": tr1, "evidence": ev_tr1_b}],
+            "revocation_view": [rev_r0],
+        },
+        trust=plain_trust,
+        expected={
+            "chain_valid": False,
+            "link_status": ["invalid"],
+            "errors_contains": ["chain link 1: new receipt buyer.pubkey != new_holder_pubkey"],
+            "warnings": [],
+        },
+        log_keys=[_log_key()],
+        anchor_policy=_empty_anchor_policy(),
+    )
+
+    # --- (c) losing-branch-no-link: R0 double-assigned — a phantom transfer
+    # record (never continued by any payload here) logged FIRST (index 0),
+    # the actual R0->R1 record (tr1) logged SECOND (index 1) in the SAME
+    # tree — the chain presents the later-logged (actual) branch, which must
+    # lose even though it is the one continued by `payloads`. ---
+    phantom_auth = transfer.sign_authorization(
+        CHAIN_RECEIPT_0, keys.b64u(CHAIN_MISMATCH_HOLDER_KP.pub), TRANSFERRED_AT, CHAIN_HOLDER_0_KP
+    )
+    tr_phantom = transfer.build_record(
+        CHAIN_RECEIPT_0,
+        CHAIN_PHANTOM_RECEIPT,
+        keys.b64u(CHAIN_MISMATCH_HOLDER_KP.pub),
+        TRANSFERRED_AT,
+        phantom_auth,
+        ISSUER_KP,
+        ISSUER_KID,
+    )
+    assert transfer.verify_record(tr_phantom, plain_manifest) is True
+    entry_phantom = {
+        "type": "transfer-record",
+        "issuer": ISSUER_ID,
+        "record_sha256": transfer.record_hash(tr_phantom),
+    }
+    leaves_c = [tlog.encode_entry(entry_phantom), tlog.encode_entry(entry_tr1)]
+    root_c = tlog.build_tree(leaves_c)
+    checkpoint_c = _sign_checkpoint_oracle(LOG_ORIGIN, 2, root_c)
+    ev_phantom_c = {
+        "entry": entry_phantom,
+        "leaf_index": 0,
+        "tree_size": 2,
+        "inclusion_proof": _hex_proof(tlog.inclusion_proof(leaves_c, 0)),
+        "checkpoint": checkpoint_c,
+    }
+    ev_tr1_c = {
+        "entry": entry_tr1,
+        "leaf_index": 1,
+        "tree_size": 2,
+        "inclusion_proof": _hex_proof(tlog.inclusion_proof(leaves_c, 1)),
+        "checkpoint": checkpoint_c,
+    }
+    write_chain_vector(
+        "36-transfer-chain/c-losing-branch-no-link",
+        chain={
+            "payloads": [r0, r1],
+            "transfer_view": [
+                {"record": tr_phantom, "evidence": ev_phantom_c},
+                {"record": tr1, "evidence": ev_tr1_c},
+            ],
+            "revocation_view": [rev_r0],
+        },
+        trust=plain_trust,
+        expected={
+            "chain_valid": False,
+            "link_status": ["invalid"],
+            "errors_contains": ["chain link 1: losing branch of a double assignment"],
+            "warnings": [],
+        },
+        log_keys=[_log_key()],
+        anchor_policy=_empty_anchor_policy(),
+    )
+
+
 def main() -> None:
     _clear_leaf_dirs(VECTORS_DIR)
     VECTORS_DIR.mkdir(parents=True, exist_ok=True)
@@ -3602,6 +4358,8 @@ def main() -> None:
     gen_31_manifest_currency()
     gen_32_anchor_v2()
     gen_33_logged_revocation()
+    gen_35_transfer()
+    gen_36_transfer_chain()
     leaf_count = sum(1 for _ in VECTORS_DIR.rglob("expected.json"))
     print(f"generated {leaf_count} vector cases under {VECTORS_DIR}")
 
