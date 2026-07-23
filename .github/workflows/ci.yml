@@ -82,6 +82,17 @@ jobs:
           (cd verifiers/ts && npm pack --json > /tmp/pack.json)
           uv run --frozen python tools/assert_artifacts.py --npm-pack-json /tmp/pack.json
 
+      # --- Conformance dogfood: TS verifier through the PUBLIC runner ---
+      # `verifiers/ts/dist/` was already built above (npm run build, for the
+      # tarball assert); `python3` is on every hosted runner and the runner
+      # itself is stdlib-only. This is the same public path a third-party
+      # implementation's own CI would run — see docs/conformance.md.
+      - name: Conformance dogfood — TS verifier through the public runner
+        run: |
+          python3 tools/conformance_runner.py \
+            --adapter "node tools/conformance_adapter_ts.mjs {leaf}" \
+            --subset v0.2
+
       # --- SBOM (syft) for each ecosystem, runtime deps only ---
       - name: Generate SBOMs
         run: |

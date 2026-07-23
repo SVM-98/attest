@@ -27,6 +27,7 @@ _VECTORS_PATH = _REPO_ROOT / "docs/spec/vectors"
 _STANDARDS_RELATIONSHIP_PATH = _REPO_ROOT / "docs/spec/attest-standards-relationship.md"
 _INTERNET_DRAFT_DIR = _REPO_ROOT / "ietf"
 _INTERNET_DRAFT_BASENAME = "draft-martinalli-open-purchase-receipts"
+_CONFORMANCE_DOC_PATH = _REPO_ROOT / "docs/conformance.md"
 
 # The six normative sections attest-versioning.md's amendment procedure
 # requires (§5) every reader be able to find by exact heading.
@@ -860,6 +861,39 @@ def check_internet_draft_snapshot() -> list[str]:
     return errors
 
 
+# The four anchors the public conformance-program doc must carry: the
+# runner's own path (so a reader can find and run it), the adapter
+# template's placeholder literal, the fixed phrase the claim-sentence
+# template (docs/conformance.md §5) uses, and the self-certification
+# process by name (P1.6 plan Task 4).
+_CONFORMANCE_DOC_REQUIRED_LITERALS: tuple[str, ...] = (
+    "tools/conformance_runner.py",
+    "{leaf}",
+    "attest conformant",
+    "self-certification",
+)
+
+
+def check_conformance_doc() -> list[str]:
+    """Fail-closed existence/content guard for `docs/conformance.md`.
+
+    Checks the file exists and mentions the runner's path, the adapter
+    template placeholder, the claim-sentence's fixed phrase, and the
+    self-certification process by name. Not wired into `collect_errors()`,
+    same reasoning as `check_standards_relationship()`/
+    `check_internet_draft_snapshot()`: it does not cross-reference another
+    document's parsed structure, so it is called directly from `main()`.
+    """
+    if not _CONFORMANCE_DOC_PATH.exists():
+        return ["conformance.md: file is missing"]
+    text = _CONFORMANCE_DOC_PATH.read_text(encoding="utf-8")
+    return [
+        f"conformance.md: missing required literal {literal!r}"
+        for literal in _CONFORMANCE_DOC_REQUIRED_LITERALS
+        if literal not in text
+    ]
+
+
 def collect_errors(
     threat_model: str,
     privacy: str,
@@ -933,6 +967,7 @@ def main() -> int:
     errors = collect_errors(threat_model, privacy, spec_v01, spec_v02, schema, versioning)
     errors += check_standards_relationship()
     errors += check_internet_draft_snapshot()
+    errors += check_conformance_doc()
     for error in errors:
         print(f"ERROR {error}")
     return 1 if errors else 0
