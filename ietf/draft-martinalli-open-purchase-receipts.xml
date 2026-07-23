@@ -90,9 +90,11 @@
         specification is resolved in the living specification's favor.
         Within this document specifically, a payload <bcp14>MUST</bcp14>
         satisfy the structural constraints of the core receipt schema:
-        those constraints are precisely the ones expressed by
-        <tt>attest-receipt.schema.json</tt> in the attest source
-        repository, EXCEPT its Stage 3 (v0.2 §17.8) holder-binding
+        those constraints are precisely the ones expressed by the
+        revision-pinned attest receipt JSON Schema
+        (<xref target="ATTEST-SCHEMA"/>, <tt>attest-receipt.schema.json</tt>
+        pinned at tag <tt>v0.4.0</tt>, the mirrored v0.1 revision 5 / v0.2
+        revision 6 state), EXCEPT its Stage 3 (v0.2 §17.8) holder-binding
         conditional on <tt>license.transferable</tt> and
         <tt>buyer.pubkey</tt>, which belongs to the Stage 3 extension
         (<xref target="extensions"/>) and is outside this profile's
@@ -745,8 +747,9 @@ buyer signs: UTF8("Attest-binding-challenge-v1") || 0x00
         selected profile (<xref target="sigprofiles"/>).</li>
         <li><strong>Step 5 (schema validation):</strong> the parsed
         payload <bcp14>MUST</bcp14> satisfy the structural constraints of
-        the core receipt schema, <tt>attest-receipt.schema.json</tt> in
-        the attest source repository, EXCEPT its Stage 3 (v0.2 §17.8)
+        the core receipt schema (<xref target="ATTEST-SCHEMA"/>,
+        <tt>attest-receipt.schema.json</tt> revision-pinned at tag
+        <tt>v0.4.0</tt>), EXCEPT its Stage 3 (v0.2 §17.8)
         holder-binding conditional on <tt>license.transferable</tt> and
         <tt>buyer.pubkey</tt>, which belongs to the Stage 3 extension
         (<xref target="extensions"/>) and is OUTSIDE this profile's
@@ -1160,6 +1163,21 @@ buyer signs: UTF8("Attest-binding-challenge-v1") || 0x00
         </front>
         <seriesInfo name="FIPS" value="204"/>
       </reference>
+      <reference anchor="ATTEST-SCHEMA" target="https://github.com/SVM-98/attest/blob/v0.4.0/docs/spec/schema/attest-receipt.schema.json">
+        <front>
+          <title>attest receipt JSON Schema (attest-receipt.schema.json), revision-pinned</title>
+          <author initials="S." surname="Martinalli" fullname="S. Martinalli"/>
+          <date year="2026"/>
+        </front>
+        <annotation>The machine-readable structural authority this profile's
+        Step 5 (<xref target="verify"/>) validates against, pinned at tag
+        <tt>v0.4.0</tt> — the released specification state carrying the
+        mirrored v0.1 revision 5 / v0.2 revision 6 (<xref target="snapshot"/>).
+        The tag is an immutable target, so a later change to the repository's
+        working schema cannot silently alter this document's normative payload
+        constraints. Its Stage 3 (v0.2 §17.8) holder-binding conditional is
+        outside this profile's normative surface (see Step 5).</annotation>
+      </reference>
     </references>
     <references>
       <name>Informative References</name>
@@ -1236,7 +1254,8 @@ buyer signs: UTF8("Attest-binding-challenge-v1") || 0x00
         </front>
         <annotation>The living, normative specification
         (<tt>docs/spec/attest-v0.1.md</tt>, <tt>docs/spec/attest-v0.2.md</tt>),
-        the normative JSON Schema, the standards-relationship annex
+        the JSON Schema (referenced normatively and revision-pinned as
+        <xref target="ATTEST-SCHEMA"/>), the standards-relationship annex
         (<tt>docs/spec/attest-standards-relationship.md</tt>), the maintained
         threat model and privacy considerations, and the cross-language
         conformance vector corpus this document distills all live in this
