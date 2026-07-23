@@ -1,4 +1,4 @@
-// The conformance merge gate (34 vector groups / 82 leaves): this suite discovers every leaf under
+// The conformance merge gate (36 vector groups / 95 leaves): this suite discovers every leaf under
 // `docs/spec/vectors/` and asserts the produced VerificationResult matches
 // its `expected.json`, using the exact same match rules as the Python
 // reference's `tests/test_vectors.py`. Passing this suite in full IS the
@@ -6,17 +6,22 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, it, expect } from 'vitest'
-import { verify, isOk } from '../src/index.js'
+import { verify, isOk, auditChain } from '../src/index.js'
 import { canonicalBytes, loadsStrict } from '../src/canon.js'
 import type { JsonObject } from '../src/canon.js'
 import * as V from './helpers/vectors.js'
 
-const leaves = V.findLeafDirs()
+const allLeaves = V.findLeafDirs()
+// Group 36 (chain-of-title audit, v0.2 §17.5) leaves are a SEPARATE surface
+// (auditChain, never verify()) — excluded here and driven by their own
+// describe block below.
+const chainLeaves = allLeaves.filter((d) => V.chainInput(d) !== null)
+const leaves = allLeaves.filter((d) => V.chainInput(d) === null)
 const canonicalLeaves = leaves.filter((d) => existsSync(join(d, 'canonical.json')))
 
 describe('attest conformance vectors', () => {
-  it('discovers the full vector suite (>= 82 leaves)', () => {
-    expect(leaves.length).toBeGreaterThanOrEqual(82)
+  it('discovers the full vector suite (>= 95 leaves)', () => {
+    expect(allLeaves.length).toBeGreaterThanOrEqual(95)
   })
 
   it.each(leaves.map((d) => [V.vectorId(d), d] as const))('%s', (_id, dir) => {
@@ -26,6 +31,7 @@ describe('attest conformance vectors', () => {
       logKeys: V.logKeys(dir),
       anchorPolicy: V.anchorPolicy(dir),
       revocationEvidence: V.revocationEvidence(dir),
+      transferView: V.transferView(dir),
     })
 
     // always-exact
@@ -45,6 +51,33 @@ describe('attest conformance vectors', () => {
     // substring-contains
     for (const s of exp.errors_contains ?? []) expect(r.errors.some((e) => e.includes(s)), `error containing ${s}; got ${JSON.stringify(r.errors)}`).toBe(true)
     for (const s of exp.warnings_contains ?? []) expect(r.warnings.some((w) => w.includes(s)), `warning containing ${s}; got ${JSON.stringify(r.warnings)}`).toBe(true)
+  })
+})
+
+describe('attest conformance vectors: chain-of-title audit (group 36)', () => {
+  it.each(chainLeaves.map((d) => [V.vectorId(d), d] as const))('%s', (_id, dir) => {
+    const exp = V.expected(dir)
+    const chain = V.chainInput(dir)!
+    const logKeys = V.logKeys(dir)
+    const anchorPolicy = V.anchorPolicy(dir)
+    expect(logKeys).not.toBeNull()
+    expect(anchorPolicy).not.toBeNull()
+
+    const result = auditChain(
+      chain.payloads,
+      chain.transferView,
+      chain.revocationView,
+      V.soleKeyManifest(dir),
+      logKeys!,
+      anchorPolicy!,
+    )
+
+    expect(result.valid).toBe(exp.chain_valid)
+    expect([...result.linkStatus]).toEqual(exp.link_status)
+    for (const s of exp.errors_contains ?? []) {
+      expect(result.errors.some((e) => e.includes(s)), `chain error containing ${s}; got ${JSON.stringify(result.errors)}`).toBe(true)
+    }
+    expect([...result.warnings]).toEqual(exp.warnings)
   })
 })
 
