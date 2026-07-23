@@ -932,8 +932,11 @@ buyer signs: UTF8("Attest-binding-challenge-v1") || 0x00
       identifier.</strong> The <tt>buyer</tt> object's specified properties
       are <tt>commitment</tt>, <tt>identifier_type</tt>, and
       <tt>pubkey</tt> (<xref target="payload-registry"/>); none of the
-      three is a plaintext identifier, only the salted commitment or the
-      pseudonymous public key. This is a bounded property, scoped to that
+      three is a plaintext identifier — <tt>commitment</tt> is a salted
+      commitment, <tt>pubkey</tt> a pseudonymous public key, and
+      <tt>identifier_type</tt> a non-personal enum
+      (<tt>issuer-account</tt> or <tt>email</tt>). This is a bounded
+      property, scoped to that
       specified set, not a guarantee about the <tt>buyer</tt> object as a
       whole: <xref target="payload-registry"/> permits every payload
       object, <tt>buyer</tt> included, to carry additional, unlisted
