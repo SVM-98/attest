@@ -161,6 +161,15 @@ function validateLicense(v: JsonValue | undefined, errors: string[]): void {
   if (license['revocability'] === 'refund_window') {
     check(errors, 'revocation_window_days' in license, 'license.revocation_window_days: required when license.revocability is refund_window')
   }
+  // v0.2 §17.7 (Stage 3): not_transferable_before, when present, must be an
+  // RFC3339 UTC date-time — same shape as issued_at (ISSUED_AT_RE).
+  if ('not_transferable_before' in license) {
+    check(
+      errors,
+      typeof license['not_transferable_before'] === 'string' && ISSUED_AT_RE.test(license['not_transferable_before']),
+      'license.not_transferable_before: must be an RFC3339 UTC date-time (YYYY-MM-DDTHH:MM:SSZ)',
+    )
+  }
 }
 
 function validateSurvivability(v: JsonValue | undefined, errors: string[]): void {
@@ -206,6 +215,24 @@ function validateRevocabilityNoneConditional(payload: JsonObject, errors: string
   check(errors, hasArtifactSeries || hasArtifacts, 'work: must have artifact_series or a non-empty artifacts array when license.revocability is none')
 }
 
+// D1 (v0.2 §17 schema amendment): if attest_version === "0.2" AND
+// license.transferable === true then buyer.pubkey must be a non-null 43-char
+// base64url string — tighter than validateBuyer's general "null or..." check
+// above. Mirrors the JSON-Schema allOf/if/then in
+// docs/spec/schema/attest-receipt.schema.json (D1 conditional).
+function validateTransferableConditional(payload: JsonObject, errors: string[]): void {
+  const license = payload['license']
+  if (payload['attest_version'] !== '0.2' || !isObject(license) || license['transferable'] !== true) return
+
+  const buyer = payload['buyer']
+  const pubkey = isObject(buyer) ? buyer['pubkey'] : undefined
+  check(
+    errors,
+    typeof pubkey === 'string' && COMMITMENT_RE.test(pubkey),
+    'buyer.pubkey: must be a non-null 43-char base64url string when license.transferable is true (attest_version 0.2)',
+  )
+}
+
 export function validatePayload(payload: JsonObject): string[] {
   const errors: string[] = []
 
@@ -231,6 +258,9 @@ export function validatePayload(payload: JsonObject): string[] {
 
   if ('license' in payload && 'survivability' in payload && 'work' in payload) {
     validateRevocabilityNoneConditional(payload, errors)
+  }
+  if ('license' in payload && 'buyer' in payload) {
+    validateTransferableConditional(payload, errors)
   }
 
   return errors
