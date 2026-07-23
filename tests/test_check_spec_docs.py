@@ -730,6 +730,48 @@ class TestVersioningDoc:
         assert check_spec_docs.check_versioning_lifecycle_states(text) == []
 
 
+class TestStandardsRelationship:
+    def test_annex_has_all_seven_entries(self) -> None:
+        text = (SPEC_DIR / "attest-standards-relationship.md").read_text(encoding="utf-8")
+        for needle in (
+            "## 1. W3C Verifiable Credentials",
+            "## 2. eIDAS 2.0 and the EUDI Wallet",
+            "## 3. JOSE/JWS and COSE",
+            "## 4. RFC 8785 (JCS)",
+            "## 5. C2PA",
+            "## 6. SCITT and RFC 9943",
+            "## 7. RATS (RFC 9334): a terminology note",
+        ):
+            assert needle in text
+
+    def test_scitt_entry_defuses_the_receipt_collision(self) -> None:
+        text = (SPEC_DIR / "attest-standards-relationship.md").read_text(encoding="utf-8")
+        assert "RFC 9943" in text
+        assert "inclusion" in text  # their receipt = proof of inclusion
+        assert "RFC 9334" in text  # RATS note present
+
+    def test_checker_reports_missing_file(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            check_spec_docs, "_STANDARDS_RELATIONSHIP_PATH", SPEC_DIR / "does-not-exist.md"
+        )
+        errors = check_spec_docs.check_standards_relationship()
+        assert any("missing" in e.lower() for e in errors)
+
+    def test_checker_is_clean_on_the_real_annex(self) -> None:
+        assert check_spec_docs.check_standards_relationship() == []
+
+    def test_checker_flags_a_renamed_heading(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        text = (SPEC_DIR / "attest-standards-relationship.md").read_text(encoding="utf-8")
+        drifted = text.replace("## 6. SCITT and RFC 9943", "## 6. SCITT")
+        monkeypatch.setattr(
+            check_spec_docs, "_STANDARDS_RELATIONSHIP_PATH", _write(tmp_path, "d.md", drifted)
+        )
+        errors = check_spec_docs.check_standards_relationship()
+        assert any("SCITT and RFC 9943" in e for e in errors)
+
+
 def test_versioning_doc_missing_heading_is_flagged_by_collect_errors() -> None:
     docs = _base_docs()
     docs["versioning"] = _minimal_versioning().replace("## 4. Algorithm lifecycle\n\n", "")

@@ -24,6 +24,7 @@ _SPEC_V02_PATH = _REPO_ROOT / "docs/spec/attest-v0.2.md"
 _SCHEMA_PATH = _REPO_ROOT / "docs/spec/schema/attest-receipt.schema.json"
 _VERSIONING_PATH = _REPO_ROOT / "docs/spec/attest-versioning.md"
 _VECTORS_PATH = _REPO_ROOT / "docs/spec/vectors"
+_STANDARDS_RELATIONSHIP_PATH = _REPO_ROOT / "docs/spec/attest-standards-relationship.md"
 
 # The six normative sections attest-versioning.md's amendment procedure
 # requires (§5) every reader be able to find by exact heading.
@@ -696,6 +697,48 @@ def check_revision_logs(spec_v01: str, spec_v02: str) -> list[str]:
     )
 
 
+# The seven H2 headings docs/spec/attest-standards-relationship.md pins verbatim.
+# The Internet-Draft appendix (a later phase task) distills this same list, so a
+# heading rename here would silently orphan that appendix's pointer.
+_STANDARDS_RELATIONSHIP_REQUIRED_HEADINGS: tuple[str, ...] = (
+    "## 1. W3C Verifiable Credentials",
+    "## 2. eIDAS 2.0 and the EUDI Wallet",
+    "## 3. JOSE/JWS and COSE",
+    "## 4. RFC 8785 (JCS)",
+    "## 5. C2PA",
+    "## 6. SCITT and RFC 9943",
+    "## 7. RATS (RFC 9334): a terminology note",
+)
+
+# RFC 9943 (SCITT) and RFC 9334 (RATS) are the two vocabulary-collision entries
+# the annex exists to defuse; RFC 8785 is the JCS base entry 4 builds on. All
+# three must be citable by number, not just implied in prose.
+_STANDARDS_RELATIONSHIP_REQUIRED_LITERALS: tuple[str, ...] = ("RFC 9943", "RFC 9334", "RFC 8785")
+
+
+def check_standards_relationship() -> list[str]:
+    """Fail-closed existence/shape guard for the standards-relationship annex.
+
+    Checks the file exists, carries its seven pinned H2 headings verbatim (the
+    Internet-Draft appendix and this checker both depend on them), and cites
+    the three RFCs the SCITT/RATS defusal and the JCS entry require by number.
+    Not wired into `collect_errors()`: unlike the threat-model/privacy/spec
+    quintet it does not cross-reference another document's parsed structure,
+    so it is called directly from `main()`.
+    """
+    if not _STANDARDS_RELATIONSHIP_PATH.exists():
+        return ["attest-standards-relationship.md: file is missing"]
+    text = _STANDARDS_RELATIONSHIP_PATH.read_text(encoding="utf-8")
+    errors: list[str] = []
+    for heading in _STANDARDS_RELATIONSHIP_REQUIRED_HEADINGS:
+        if re.search(rf"^{re.escape(heading)}$", text, re.MULTILINE) is None:
+            errors.append(f"attest-standards-relationship.md: missing required heading {heading!r}")
+    for literal in _STANDARDS_RELATIONSHIP_REQUIRED_LITERALS:
+        if literal not in text:
+            errors.append(f"attest-standards-relationship.md: missing required literal {literal!r}")
+    return errors
+
+
 def collect_errors(
     threat_model: str,
     privacy: str,
@@ -736,9 +779,7 @@ def collect_errors(
     errors += [f"attest-threat-model.md: {e}" for e in check_matrix(threat_model, set(tm_ids))]
     errors += [f"attest-privacy.md: {e}" for e in check_claims(pc_rows)]
     errors += [f"attest-privacy.md: {e}" for e in check_schema_pins(pc_rows, schema)]
-    errors += [
-        f"attest-privacy.md: {e}" for e in check_pc08_corpus_claim(pc_rows, _VECTORS_PATH)
-    ]
+    errors += [f"attest-privacy.md: {e}" for e in check_pc08_corpus_claim(pc_rows, _VECTORS_PATH)]
     errors += [f"attest-versioning.md: {e}" for e in check_versioning_sections(versioning)]
     errors += [f"attest-versioning.md: {e}" for e in check_versioning_suite_names(versioning)]
     errors += [f"attest-versioning.md: {e}" for e in check_versioning_lifecycle_states(versioning)]
@@ -769,6 +810,7 @@ def main() -> int:
     versioning = _VERSIONING_PATH.read_text(encoding="utf-8")
 
     errors = collect_errors(threat_model, privacy, spec_v01, spec_v02, schema, versioning)
+    errors += check_standards_relationship()
     for error in errors:
         print(f"ERROR {error}")
     return 1 if errors else 0
