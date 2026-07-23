@@ -11,15 +11,30 @@ non-conforming envelope came to exist.
 
 from __future__ import annotations
 
+import hashlib
 import json
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 
-from attest import canon, commitment, issue, keys, manifests, revocation, verify
+from attest import (
+    anchor,
+    canon,
+    commitment,
+    issue,
+    keys,
+    manifests,
+    pq,
+    revocation,
+    tlog,
+    validate,
+    verify,
+)
 from tests.helpers import make_payload
 
 ISSUER = "store.example.com"
+SERIES = "store.example.com/works/EXG-001"  # matches make_payload()'s default work.artifact_series
 EVIL_ISSUER = "evil.example.com"
 KID = f"{ISSUER}/keys/test#ed25519-1"
 EVIL_KID = f"{EVIL_ISSUER}/keys/test#ed25519-1"
@@ -540,6 +555,342 @@ def test_valid_record_with_non_revoked_status_is_not_a_revocation() -> None:
     assert result.ok is True
 
 
+# --- G5 (TM-47): revocation-record log entries + deadline effectiveness ----------
+#
+# `refund_window` revocation records are effective only if a matching
+# `revocation-record` log entry proves they were anchored no later than the
+# receipt's own refund-window deadline (issued_at + revocation_window_days) —
+# closing the backdating gap where a revocation with no contradicting
+# evidence could be asserted after the fact. The rule engages only once the
+# verifier is Stage-2 capable (log_keys/anchor_policy supplied, exactly the
+# existing zero-behavior-change gate for transparency/corroboration); a
+# caller that never supplies them keeps v0.1 semantics unchanged.
+# `policy`/`compromised`/`none` classes are unaffected: logging remains
+# optional corroboration for them.
+
+_REVOCATION_LOG_ORIGIN = "revocation-log.attest.example/2026"
+_REVOCATION_LOG_NAME = "attest-revocation-log-1"
+
+
+def _revocation_log_key(hk: pq.HybridSigningKeys) -> tlog.LogKey:
+    return tlog.LogKey(
+        origin=_REVOCATION_LOG_ORIGIN,
+        name=_REVOCATION_LOG_NAME,
+        ed25519_pub=hk.ed.pub,
+        mldsa_pub=hk.mldsa.pub,
+    )
+
+
+def _revocation_log_evidence(
+    record: dict[str, Any],
+    hk: pq.HybridSigningKeys,
+    header_time: int,
+    anchor_profile: str | None = None,
+) -> tuple[dict[str, Any], anchor.AnchorPolicy]:
+    """Build a genuine, single-leaf transparency-log entry for `record`,
+    hybrid-signed and OTS-anchored to a pinned header at `header_time`
+    (mirrors `tools/gen_vectors.py`'s `28-transparency`/`j-ots-anchor` shape:
+    a single `["sha256"]` op over `SHA-256(checkpoint.note_bytes)`).
+
+    `anchor_profile=None` (the default) builds a legacy note-v1 commitment
+    (`SHA-256(checkpoint.note_bytes)`, no `anchor_profile` declared) —
+    genuinely verifiable (eternal verifiability) but flagged
+    `anchor_note_only` by the shared evaluator (G4). Pass
+    `anchor_profile="signed-note-v2"` to instead commit over
+    `checkpoint.signed_note_bytes` (mirrors `32-anchor-v2/a-v2-valid`) —
+    what newly produced anchors MUST use per the spec, and what
+    `tools/gen_vectors.py`'s group 33 now generates."""
+    entry = {
+        "type": "revocation-record",
+        "issuer": ISSUER,
+        "record_sha256": revocation.record_hash(record),
+    }
+    entry_bytes = tlog.encode_entry(entry)
+    root = tlog.build_tree([entry_bytes])
+    checkpoint_text = tlog.sign_checkpoint(
+        _REVOCATION_LOG_ORIGIN, 1, root, hk, _REVOCATION_LOG_NAME
+    )
+    checkpoint = tlog.parse_checkpoint(checkpoint_text)
+    commitment_bytes = (
+        checkpoint.signed_note_bytes
+        if anchor_profile == "signed-note-v2"
+        else checkpoint.note_bytes
+    )
+    accumulator_start = hashlib.sha256(commitment_bytes).digest()
+    header_merkle_root = hashlib.sha256(accumulator_start).digest().hex()
+    header_hash = "ab" * 32
+    policy = anchor.AnchorPolicy(
+        pinned_headers={
+            header_hash: anchor.PinnedHeader(
+                header_hash=header_hash, merkle_root=header_merkle_root, time=header_time
+            )
+        },
+        crqc_horizon=None,
+    )
+    anchors: dict[str, Any] = {
+        "checkpoint": checkpoint_text,
+        "proofs": [
+            {
+                "kind": "ots",
+                "ops": [["sha256"]],
+                "header_merkle_root": header_merkle_root,
+                "header_time": header_time,
+                "header_hash": header_hash,
+            }
+        ],
+    }
+    if anchor_profile is not None:
+        anchors["anchor_profile"] = anchor_profile
+    evidence = {
+        "entry": entry,
+        "leaf_index": 0,
+        "tree_size": 1,
+        "inclusion_proof": [],
+        "checkpoint": checkpoint_text,
+        "anchors": anchors,
+    }
+    return evidence, policy
+
+
+def _unix_seconds(iso: str) -> int:
+    return int(datetime.strptime(iso, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC).timestamp())
+
+
+def _refund_window_payload() -> dict[str, Any]:
+    return make_payload(
+        license={"revocability": "refund_window", "revocation_window_days": 14},
+        issued_at="2026-07-02T14:30:00Z",
+    )
+
+
+def test_refund_window_revocation_with_timely_logged_entry_honored() -> None:
+    hk = pq.HybridSigningKeys(ed=keys.generate(), mldsa=pq.generate())
+    payload = _refund_window_payload()
+    envelope = issue.issue(payload, KP, KID)
+    record = revocation.build_record(
+        payload["receipt_id"], "revoked", "2026-07-10T00:00:00Z", KP, KID
+    )
+    # header_time inside the refund window (deadline: 2026-07-16T14:30:00Z).
+    # Default (legacy note-v1) evidence — asserts the revocation-evidence
+    # path surfaces the shared evaluator's `anchor_note_only` diagnostic
+    # (I1: verify() must not discard `result.warnings` on this path).
+    evidence, policy = _revocation_log_evidence(record, hk, _unix_seconds("2026-07-10T00:00:00Z"))
+    result = verify.verify(
+        _to_bytes(envelope),
+        _trust_store(_key_manifest()),
+        revocation_view=[record],
+        revocation_evidence=evidence,
+        log_keys=[_revocation_log_key(hk)],
+        anchor_policy=policy,
+    )
+    assert result.revocation == "revoked"
+    assert result.ok is False
+    assert "anchor_note_only" in result.warnings
+
+
+def test_refund_window_revocation_unlogged_is_ignored_with_warning() -> None:
+    """Stage-2-capable verifier (log_keys/anchor_policy set), but NO log
+    evidence at all for this record -> the record was never proven logged,
+    so the deadline rule cannot honor it — ignored, not silently revoked."""
+    hk = pq.HybridSigningKeys(ed=keys.generate(), mldsa=pq.generate())
+    payload = _refund_window_payload()
+    envelope = issue.issue(payload, KP, KID)
+    record = revocation.build_record(
+        payload["receipt_id"], "revoked", "2026-07-10T00:00:00Z", KP, KID
+    )
+    result = verify.verify(
+        _to_bytes(envelope),
+        _trust_store(_key_manifest()),
+        revocation_view=[record],
+        revocation_evidence=None,
+        log_keys=[_revocation_log_key(hk)],
+        anchor_policy=anchor.AnchorPolicy(pinned_headers={}, crqc_horizon=None),
+    )
+    assert result.revocation == "invalid_revocation_ignored"
+    assert result.ok is True
+    assert "revocation_unlogged_deadline" in result.warnings
+
+
+def test_refund_window_revocation_anchored_late_is_ignored() -> None:
+    hk = pq.HybridSigningKeys(ed=keys.generate(), mldsa=pq.generate())
+    payload = _refund_window_payload()
+    envelope = issue.issue(payload, KP, KID)
+    record = revocation.build_record(
+        payload["receipt_id"], "revoked", "2026-07-10T00:00:00Z", KP, KID
+    )
+    # header_time AFTER the refund window deadline (2026-07-16T14:30:00Z).
+    evidence, policy = _revocation_log_evidence(record, hk, _unix_seconds("2026-08-01T00:00:00Z"))
+    result = verify.verify(
+        _to_bytes(envelope),
+        _trust_store(_key_manifest()),
+        revocation_view=[record],
+        revocation_evidence=evidence,
+        log_keys=[_revocation_log_key(hk)],
+        anchor_policy=policy,
+    )
+    assert result.revocation == "invalid_revocation_ignored"
+    assert result.ok is True
+    assert "revocation_unlogged_deadline" in result.warnings
+
+
+def test_policy_class_revocation_unchanged_without_log() -> None:
+    """`policy`/`compromised`/`none` classes are UNAFFECTED by the deadline
+    rule — logging remains optional corroboration for them, even under a
+    Stage-2-capable verifier with no log evidence supplied."""
+    hk = pq.HybridSigningKeys(ed=keys.generate(), mldsa=pq.generate())
+    payload = make_payload(license={"revocability": "policy"})
+    envelope = issue.issue(payload, KP, KID)
+    record = revocation.build_record(
+        payload["receipt_id"], "revoked", "2026-07-03T00:00:00Z", KP, KID
+    )
+    result = verify.verify(
+        _to_bytes(envelope),
+        _trust_store(_key_manifest()),
+        revocation_view=[record],
+        revocation_evidence=None,
+        log_keys=[_revocation_log_key(hk)],
+        anchor_policy=anchor.AnchorPolicy(pinned_headers={}, crqc_horizon=None),
+    )
+    assert result.revocation == "revoked"
+    assert result.ok is False
+    assert "revocation_unlogged_deadline" not in result.warnings
+
+
+def test_refund_window_revocation_without_stage2_config_keeps_v01_semantics() -> None:
+    """The true bare-v0.1 case: no log_keys/anchor_policy at all (verifier not
+    Stage-2 capable) -> the deadline rule never engages, so an otherwise
+    window-valid record is honored exactly as it was before G5."""
+    payload = _refund_window_payload()
+    envelope = issue.issue(payload, KP, KID)
+    record = revocation.build_record(
+        payload["receipt_id"], "revoked", "2026-07-10T00:00:00Z", KP, KID
+    )
+    result = verify.verify(
+        _to_bytes(envelope), _trust_store(_key_manifest()), revocation_view=[record]
+    )
+    assert result.revocation == "revoked"
+    assert result.ok is False
+
+
+# --- I1(c): revocation-evidence path dispatches through the shared
+# transparency evaluator exactly like the direct transparency path
+# (T4-dispatch tests) --------------------------------------------------------
+
+
+def test_refund_window_revocation_v2_profiled_evidence_honored_without_note_only_warning() -> None:
+    """v2-profiled revocation evidence (the shape `gen_vectors.py` group 33
+    now produces) verifies under the v2 seed — honored, and crucially does
+    NOT carry `anchor_note_only` (that warning is specific to the legacy
+    note-v1 commitment)."""
+    hk = pq.HybridSigningKeys(ed=keys.generate(), mldsa=pq.generate())
+    payload = _refund_window_payload()
+    envelope = issue.issue(payload, KP, KID)
+    record = revocation.build_record(
+        payload["receipt_id"], "revoked", "2026-07-10T00:00:00Z", KP, KID
+    )
+    evidence, policy = _revocation_log_evidence(
+        record, hk, _unix_seconds("2026-07-10T00:00:00Z"), anchor_profile="signed-note-v2"
+    )
+    result = verify.verify(
+        _to_bytes(envelope),
+        _trust_store(_key_manifest()),
+        revocation_view=[record],
+        revocation_evidence=evidence,
+        log_keys=[_revocation_log_key(hk)],
+        anchor_policy=policy,
+    )
+    assert result.revocation == "revoked"
+    assert result.ok is False
+    assert "anchor_note_only" not in result.warnings
+
+
+def test_refund_window_revocation_legacy_profiled_evidence_yields_anchor_note_only() -> None:
+    """A legacy-profiled bundle on the revocation-evidence path yields
+    `anchor_note_only` (the RED test from I1(a)) — still honored (eternal
+    verifiability), but flagged as the weaker profile, exactly like the
+    direct transparency path's own G4 behavior."""
+    hk = pq.HybridSigningKeys(ed=keys.generate(), mldsa=pq.generate())
+    payload = _refund_window_payload()
+    envelope = issue.issue(payload, KP, KID)
+    record = revocation.build_record(
+        payload["receipt_id"], "revoked", "2026-07-10T00:00:00Z", KP, KID
+    )
+    evidence, policy = _revocation_log_evidence(record, hk, _unix_seconds("2026-07-10T00:00:00Z"))
+    result = verify.verify(
+        _to_bytes(envelope),
+        _trust_store(_key_manifest()),
+        revocation_view=[record],
+        revocation_evidence=evidence,
+        log_keys=[_revocation_log_key(hk)],
+        anchor_policy=policy,
+    )
+    assert result.revocation == "revoked"
+    assert result.ok is False
+    assert "anchor_note_only" in result.warnings
+
+
+# --- M1: deadline equality boundary is pinned at `<=`, not `<` -------------
+
+
+def test_refund_window_revocation_anchored_exactly_at_deadline_is_timely() -> None:
+    """`anchored_before == deadline` EXACTLY is timely (honored). A
+    regression from `<=` to `<` in `_revocation_deadline_satisfied` must
+    turn this test red."""
+    hk = pq.HybridSigningKeys(ed=keys.generate(), mldsa=pq.generate())
+    payload = _refund_window_payload()
+    envelope = issue.issue(payload, KP, KID)
+    record = revocation.build_record(
+        payload["receipt_id"], "revoked", "2026-07-10T00:00:00Z", KP, KID
+    )
+    # Deadline is issued_at (2026-07-02T14:30:00Z) + 14 days == 2026-07-16T14:30:00Z.
+    evidence, policy = _revocation_log_evidence(
+        record,
+        hk,
+        _unix_seconds("2026-07-16T14:30:00Z"),
+        anchor_profile="signed-note-v2",
+    )
+    result = verify.verify(
+        _to_bytes(envelope),
+        _trust_store(_key_manifest()),
+        revocation_view=[record],
+        revocation_evidence=evidence,
+        log_keys=[_revocation_log_key(hk)],
+        anchor_policy=policy,
+    )
+    assert result.revocation == "revoked"
+    assert result.ok is False
+    assert "revocation_unlogged_deadline" not in result.warnings
+
+
+def test_refund_window_revocation_anchored_one_second_after_deadline_is_late() -> None:
+    """`deadline + 1s` is late (ignored+warning) — the boundary's other side,
+    pinning the equality is inclusive on the `<=` side only."""
+    hk = pq.HybridSigningKeys(ed=keys.generate(), mldsa=pq.generate())
+    payload = _refund_window_payload()
+    envelope = issue.issue(payload, KP, KID)
+    record = revocation.build_record(
+        payload["receipt_id"], "revoked", "2026-07-10T00:00:00Z", KP, KID
+    )
+    # Deadline is 2026-07-16T14:30:00Z; one second late.
+    evidence, policy = _revocation_log_evidence(
+        record,
+        hk,
+        _unix_seconds("2026-07-16T14:30:00Z") + 1,
+        anchor_profile="signed-note-v2",
+    )
+    result = verify.verify(
+        _to_bytes(envelope),
+        _trust_store(_key_manifest()),
+        revocation_view=[record],
+        revocation_evidence=evidence,
+        log_keys=[_revocation_log_key(hk)],
+        anchor_policy=policy,
+    )
+    assert result.revocation == "invalid_revocation_ignored"
+    assert result.ok is True
+    assert "revocation_unlogged_deadline" in result.warnings
+
+
 # --- step 7: buyer binding (design §3.2) ------------------------------------------
 
 
@@ -731,3 +1082,314 @@ def test_no_chain_recorded_is_backward_compatible() -> None:
     envelope = issue.issue(make_payload(), KP, KID)
     result = verify.verify(_to_bytes(envelope), trust_store)
     assert result.trust == "verified"
+
+
+# --- trust: artifact manifest currency (G2/G3, attest-versioning.md rev 4) -------
+
+
+def _artifact_manifest(version: int, manifest_version: int | None) -> dict[str, Any]:
+    return manifests.build_artifact_manifest(
+        ISSUER,
+        SERIES,
+        version,
+        "2026-03-01T00:00:00Z",
+        [],
+        KP,
+        KID,
+        manifest_version=manifest_version,
+    )
+
+
+def test_artifact_manifest_no_trust_store_entry_is_zero_behavior_change() -> None:
+    """A TrustStore with no `artifact_manifests` entry for the receipt's series
+    (Task-8-shaped construction, no new kwargs at all) must keep working exactly
+    as before this task."""
+    trust_store = verify.TrustStore(manifests={ISSUER: _key_manifest()}, provenance={ISSUER: "tls"})
+    envelope = issue.issue(make_payload(), KP, KID)
+    result = verify.verify(_to_bytes(envelope), trust_store)
+    assert result.trust == "verified"
+    assert result.warnings == ()
+
+
+def test_artifact_manifest_monotone_chain_keeps_normal_trust() -> None:
+    am1 = _artifact_manifest(1, 1)
+    am2 = _artifact_manifest(2, 2)
+    trust_store = verify.TrustStore(
+        manifests={ISSUER: _key_manifest()},
+        provenance={ISSUER: "tls"},
+        artifact_manifests={ISSUER: {SERIES: am2}},
+        artifact_manifest_chains={ISSUER: {SERIES: [am1, am2]}},
+    )
+    envelope = issue.issue(make_payload(), KP, KID)
+    result = verify.verify(_to_bytes(envelope), trust_store)
+    assert result.trust == "verified"
+    assert result.ok is True
+    assert "artifact_manifest_unversioned" not in result.warnings
+
+
+def test_artifact_manifest_rollback_yields_unverified_rotation() -> None:
+    """The trust store's own artifact-manifest chain history ends at `am2`, but
+    the "currently pinned" manifest handed to `verify()` is the OLDER `am1` — a
+    rollback attempt (or a stale re-import) the verifier already has evidence
+    against. Mirrors `test_rotation_discontinuous_chain_yields_unverified_rotation`
+    for key manifests."""
+    am1 = _artifact_manifest(1, 1)
+    am2 = _artifact_manifest(2, 2)
+    trust_store = verify.TrustStore(
+        manifests={ISSUER: _key_manifest()},
+        provenance={ISSUER: "tls"},
+        artifact_manifests={ISSUER: {SERIES: am1}},
+        artifact_manifest_chains={ISSUER: {SERIES: [am1, am2]}},
+    )
+    envelope = issue.issue(make_payload(), KP, KID)
+    result = verify.verify(_to_bytes(envelope), trust_store)
+    assert result.signature == "valid"
+    assert result.trust == "unverified_rotation"
+
+
+def test_artifact_manifest_missing_manifest_version_warns_legacy() -> None:
+    legacy = _artifact_manifest(1, None)
+    trust_store = verify.TrustStore(
+        manifests={ISSUER: _key_manifest()},
+        provenance={ISSUER: "tls"},
+        artifact_manifests={ISSUER: {SERIES: legacy}},
+    )
+    envelope = issue.issue(make_payload(), KP, KID)
+    result = verify.verify(_to_bytes(envelope), trust_store)
+    assert "artifact_manifest_unversioned" in result.warnings
+    assert result.trust == "verified"
+    assert result.ok is True
+
+
+def test_unauthenticated_artifact_manifest_is_ignored_before_currency() -> None:
+    am1 = _artifact_manifest(1, 1)
+    am2 = _artifact_manifest(2, 2)
+    del am2["manifest_signature"]
+    trust_store = verify.TrustStore(
+        manifests={ISSUER: _key_manifest()},
+        provenance={ISSUER: "tls"},
+        artifact_manifests={ISSUER: {SERIES: am2}},
+        artifact_manifest_chains={ISSUER: {SERIES: [am1, am2]}},
+    )
+    result = verify.verify(_to_bytes(issue.issue(make_payload(), KP, KID)), trust_store)
+    assert result.trust == "verified"
+    assert result.warnings == ("artifact_manifest_unauthenticated",)
+
+
+def test_legacy_chain_transitions_are_warn_only() -> None:
+    versioned = _artifact_manifest(2, 1)
+    legacy = _artifact_manifest(1, None)
+    trust_store = verify.TrustStore(
+        manifests={ISSUER: _key_manifest()},
+        provenance={ISSUER: "tls"},
+        artifact_manifests={ISSUER: {SERIES: versioned}},
+        artifact_manifest_chains={ISSUER: {SERIES: [legacy, versioned]}},
+    )
+    result = verify.verify(_to_bytes(issue.issue(make_payload(), KP, KID)), trust_store)
+    assert result.trust == "verified"
+    assert result.warnings == ("artifact_manifest_unversioned",)
+
+
+def test_legacy_pinned_after_versioned_history_is_warn_only() -> None:
+    # Round-2 residual (review): a LEGACY pinned candidate after versioned
+    # history used to hit the chain-tail-mismatch branch and get the
+    # forbidden currency downgrade. Currency (continuity AND tail compare)
+    # must be skipped entirely when any authenticated member is legacy.
+    versioned = _artifact_manifest(1, 1)
+    legacy = _artifact_manifest(2, None)
+    trust_store = verify.TrustStore(
+        manifests={ISSUER: _key_manifest()},
+        provenance={ISSUER: "tls"},
+        artifact_manifests={ISSUER: {SERIES: legacy}},
+        artifact_manifest_chains={ISSUER: {SERIES: [versioned]}},
+    )
+    result = verify.verify(_to_bytes(issue.issue(make_payload(), KP, KID)), trust_store)
+    assert result.trust == "verified"
+    assert result.warnings == ("artifact_manifest_unversioned",)
+
+
+def test_artifact_currency_is_scoped_to_receipt_issuer_and_series() -> None:
+    am1 = _artifact_manifest(1, 1)
+    am2 = _artifact_manifest(2, 2)
+    other_issuer = "other.example.com"
+    trust_store = verify.TrustStore(
+        manifests={ISSUER: _key_manifest()},
+        provenance={ISSUER: "tls"},
+        artifact_manifests={ISSUER: {SERIES: am2}, other_issuer: {SERIES: am1}},
+        artifact_manifest_chains={ISSUER: {SERIES: [am1, am2]}, other_issuer: {SERIES: [am1, am2]}},
+    )
+    result = verify.verify(_to_bytes(issue.issue(make_payload(), KP, KID)), trust_store)
+    assert result.trust == "verified"
+    assert result.warnings == ()
+
+
+def test_artifact_manifest_issuer_mismatch_is_ignored_with_distinct_warning() -> None:
+    mismatched = _artifact_manifest(1, 1)
+    mismatched["issuer"] = "other.example.com"
+    trust_store = verify.TrustStore(
+        manifests={ISSUER: _key_manifest()},
+        provenance={ISSUER: "tls"},
+        artifact_manifests={ISSUER: {SERIES: mismatched}},
+    )
+    result = verify.verify(_to_bytes(issue.issue(make_payload(), KP, KID)), trust_store)
+    assert result.trust == "verified"
+    assert result.warnings == ("artifact_manifest_issuer_mismatch",)
+
+
+# --- G1 normative ceilings (attest-versioning.md §5 amendment) --------------
+
+
+def test_envelope_over_byte_ceiling_rejected() -> None:
+    padding = validate.MAX_ENVELOPE_BYTES + 4096
+    payload = make_payload(work={"title": "x" * padding})
+    envelope = issue.issue(payload, KP, KID)
+    raw = json.dumps(envelope).encode("utf-8")
+    assert len(raw) > validate.MAX_ENVELOPE_BYTES  # sanity: genuinely over the ceiling
+
+    result = verify.verify(raw, _trust_store(_key_manifest()))
+
+    assert result.schema == "invalid"
+    assert any("envelope exceeds" in e for e in result.errors)
+    assert result.ok is False
+
+
+def test_envelope_at_byte_ceiling_not_rejected_for_size() -> None:
+    """The boundary is strict `>`: at exactly the ceiling, the size check
+    does not fire (the receipt may still fail schema validation for other
+    reasons, e.g. `work.title` is required to be non-empty but has no upper
+    length bound — so this only asserts the size-specific error is absent)."""
+    payload = make_payload()
+    envelope = issue.issue(payload, KP, KID)
+    raw = json.dumps(envelope).encode("utf-8")
+    assert len(raw) < validate.MAX_ENVELOPE_BYTES  # sanity: a real receipt is tiny
+
+    result = verify.verify(raw, _trust_store(_key_manifest()))
+
+    assert not any("envelope exceeds" in e for e in result.errors)
+
+
+def test_envelope_nesting_depth_over_ceiling_rejected() -> None:
+    """The nesting-depth ceiling (`validate.MAX_JSON_DEPTH`, an alias of
+    `canon.MAX_DEPTH` since the 2026-07-22 fix wave — see `validate.py`'s
+    docstring) is enforced entirely by `canon.loads_strict` during parsing:
+    an over-ceiling envelope never produces a parsed object, so it is
+    reported the same way any other malformed envelope is, `schema:
+    "not_checked"` (never the `"invalid"` conformance-surface tag the
+    byte-size/manifest-array ceilings use, since those run AFTER a
+    successful parse)."""
+    nested: Any = "leaf"
+    for _ in range(validate.MAX_JSON_DEPTH + 1):
+        nested = {"n": nested}
+    payload = make_payload()
+    payload["_depth_probe"] = nested  # unrecognized top-level field, schema-legal (§11.2)
+    envelope = issue.issue(payload, KP, KID)
+
+    result = verify.verify(_to_bytes(envelope), _trust_store(_key_manifest()))
+
+    assert result.schema == "not_checked"
+    assert any("maximum nesting depth exceeded" in e for e in result.errors)
+    assert result.ok is False
+
+
+def test_envelope_shallow_nesting_not_rejected_for_depth() -> None:
+    envelope = issue.issue(make_payload(), KP, KID)
+
+    result = verify.verify(_to_bytes(envelope), _trust_store(_key_manifest()))
+
+    assert not any("maximum nesting depth exceeded" in e for e in result.errors)
+
+
+def test_issuer_manifest_over_key_ceiling_rejected() -> None:
+    entries = [manifests.key_entry(KID, KP.pub, "2026-01-01T00:00:00Z", None, "active")]
+    for i in range(manifests.MAX_MANIFEST_KEYS):
+        filler_kp = keys.from_seed(
+            hashlib.sha256(f"test-verify-ceiling-filler-{i}".encode()).digest()
+        )
+        entries.append(
+            manifests.key_entry(
+                f"{ISSUER}/keys/test#filler-{i}",
+                filler_kp.pub,
+                "2026-01-01T00:00:00Z",
+                None,
+                "active",
+            )
+        )
+    oversized_manifest = manifests.build_key_manifest(
+        ISSUER, 1, "2026-01-01T00:00:00Z", entries, KP, KID
+    )
+    envelope = issue.issue(make_payload(), KP, KID)
+
+    result = verify.verify(_to_bytes(envelope), _trust_store(oversized_manifest))
+
+    assert result.schema == "invalid"
+    assert any("issuer manifest exceeds" in e for e in result.errors)
+    assert result.ok is False
+
+
+def test_issuer_manifest_at_key_ceiling_not_rejected_for_size() -> None:
+    result = verify.verify(
+        _to_bytes(issue.issue(make_payload(), KP, KID)), _trust_store(_key_manifest())
+    )
+    assert not any("issuer manifest exceeds" in e for e in result.errors)
+
+
+def test_issuer_manifest_over_key_ceiling_rejected_before_canonicalization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """I1 (2026-07-22 fix wave 2): the G1 key-manifest ceiling must bound work
+    BEFORE any cryptographic or schema work on the hostile manifest (spec
+    v0.1 §11.3) — an oversized manifest must be rejected without ever being
+    passed to `canon.canonical_bytes` (the entrypoint transparency-claim
+    hashing and signature verification both use on manifest/payload data)."""
+    entries = [manifests.key_entry(KID, KP.pub, "2026-01-01T00:00:00Z", None, "active")]
+    for i in range(manifests.MAX_MANIFEST_KEYS):
+        filler_kp = keys.from_seed(
+            hashlib.sha256(f"test-verify-ceiling-precanon-filler-{i}".encode()).digest()
+        )
+        entries.append(
+            manifests.key_entry(
+                f"{ISSUER}/keys/test#precanon-filler-{i}",
+                filler_kp.pub,
+                "2026-01-01T00:00:00Z",
+                None,
+                "active",
+            )
+        )
+    oversized_manifest = manifests.build_key_manifest(
+        ISSUER, 1, "2026-01-01T00:00:00Z", entries, KP, KID
+    )
+    envelope = issue.issue(make_payload(), KP, KID)
+
+    canonicalized: list[object] = []
+    original_canonical_bytes = canon.canonical_bytes
+
+    def _counting_canonical_bytes(obj: object) -> bytes:
+        canonicalized.append(obj)
+        return original_canonical_bytes(obj)
+
+    monkeypatch.setattr(canon, "canonical_bytes", _counting_canonical_bytes)
+
+    # A key-manifest transparency claim is the concrete path (Stage 2) that
+    # canonicalizes/hashes the issuer manifest — `_resolve_transparency_claim`
+    # runs `canon.canonical_bytes(issuer_manifest)` unconditionally once it
+    # sees `entry.type == "key-manifest"`, regardless of whether the rest of
+    # the evidence is otherwise valid. Feeding one in makes the pre-fix
+    # ordering (transparency resolved before the ceiling) observable.
+    hk = pq.HybridSigningKeys(ed=keys.generate(), mldsa=pq.generate())
+    log_key = tlog.LogKey(
+        origin="log.attest.example/2026",
+        name="attest-log-1",
+        ed25519_pub=hk.ed.pub,
+        mldsa_pub=hk.mldsa.pub,
+    )
+    result = verify.verify(
+        _to_bytes(envelope),
+        _trust_store(oversized_manifest),
+        transparency={"entry": {"type": "key-manifest"}},
+        log_keys=[log_key],
+        anchor_policy=anchor.AnchorPolicy(pinned_headers={}, crqc_horizon=None),
+    )
+
+    assert result.schema == "invalid"
+    assert result.ok is False
+    assert not any(obj is oversized_manifest for obj in canonicalized)

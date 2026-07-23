@@ -48,6 +48,11 @@ export function trustStore(dir: string) {
     manifests: d.manifests as Record<string, JsonObject>,
     provenance: d.provenance as Record<string, string>,
     chains: (d.chains ?? {}) as Record<string, JsonObject[]>,
+    // G2/G3 (attest-versioning.md rev 4, group 31 only) — keyed by issuer
+    // and then work.artifact_series; every other leaf keeps these at the
+    // empty-object default, same convention as chains.
+    artifact_manifests: (d.artifact_manifests ?? {}) as Record<string, Record<string, JsonObject>>,
+    artifact_manifest_chains: (d.artifact_manifest_chains ?? {}) as Record<string, Record<string, JsonObject[]>>,
   }
 }
 export function revocationView(dir: string): unknown[] | null {
@@ -85,6 +90,14 @@ export function logKeys(dir: string): LogKey[] | null {
     ed25519Pub: b64uDecode(entry.ed25519_pub_b64u),
     mldsaPub: b64uDecode(entry.mldsa_pub_b64u),
   }))
+}
+// group 33 (logged-revocation conformance corpus, G5/TM-47) only — see
+// tools/gen_vectors.py's gen_33_logged_revocation docstring for the on-disk
+// shape. A DIFFERENT evidence channel from transparency.json: fed to
+// verify() as revocationEvidence, reusing the SAME logKeys/anchorPolicy.
+export function revocationEvidence(dir: string): JsonValue | null {
+  const p = join(dir, 'revocation-evidence.json')
+  return existsSync(p) ? loadJsonStrict(p) : null
 }
 export function anchorPolicy(dir: string): AnchorPolicy | null {
   const p = join(dir, 'anchor-policy.json')

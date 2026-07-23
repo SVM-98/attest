@@ -28,7 +28,13 @@ const HEADER_HASH = '3a'.repeat(32) // deliberately contains a hex letter, not j
 const DUMMY_SIGNATURE_LINE = '— test-key AA==\n'
 
 function checkpoint(noteBytes: Uint8Array = NOTE_BYTES): Checkpoint {
-  return { origin: 'log.example/1', treeSize: 1n, root: new Uint8Array(32), noteBytes }
+  return {
+    origin: 'log.example/1',
+    treeSize: 1n,
+    root: new Uint8Array(32),
+    noteBytes,
+    signedNoteBytes: enc.encode(checkpointText(noteBytes)),
+  }
 }
 
 // `parseCheckpoint` requires a signature line but does not verify it; the
@@ -106,6 +112,9 @@ describe('verifyAnchor: positive round trip', () => {
     expect(verdict.anchoredBefore).toBe(HEADER_TIME)
     expect(verdict.pqSurviving).toBe(true)
     expect(verdict.warnings).toEqual([])
+    // No anchor_profile in the evidence -> legacy note-bytes-only
+    // commitment (G4): noteOnly flags it for transparency.ts's warning.
+    expect(verdict.noteOnly).toBe(true)
   })
 
   it('requires evidence.checkpoint field', () => {
@@ -214,6 +223,94 @@ describe('verifyAnchor: ots proof negatives', () => {
 })
 
 // --------------------------------------------------------------------------
+// Anchor profile v2 (G4): commitment over the FULL signed checkpoint, not
+// just its unsigned noteBytes header. Mirrors test_anchor.py's own section.
+// --------------------------------------------------------------------------
+
+function workingChainV2(
+  signedNoteBytes: Uint8Array = enc.encode(checkpointText()),
+): { ops: unknown[][]; headerMerkleRoot: string } {
+  const sibling = h('ab'.repeat(32))
+  const prefix = h('cd'.repeat(16))
+  let acc = sha256(signedNoteBytes)
+  acc = sha256(new Uint8Array([...acc, ...sibling]))
+  acc = sha256(new Uint8Array([...prefix, ...acc]))
+  const ops = [
+    ['append', bytesToHexStr(sibling)],
+    ['sha256'],
+    ['prepend', bytesToHexStr(prefix)],
+    ['sha256'],
+  ]
+  return { ops, headerMerkleRoot: bytesToHexStr(acc) }
+}
+
+describe('verifyAnchor: anchor profile v2 (G4)', () => {
+  it('commits over the full signed note', () => {
+    const { ops, headerMerkleRoot } = workingChainV2()
+    const proof = otsProof({ ops, headerMerkleRoot })
+    const ev = { ...evidence([proof]), anchor_profile: 'signed-note-v2' }
+    const verdict = verifyAnchor(ev, checkpoint(), policy({ merkleRoot: headerMerkleRoot }))
+    expect(verdict.anchored).toBe(true)
+    expect(verdict.anchoredBefore).toBe(HEADER_TIME)
+    expect(verdict.pqSurviving).toBe(true)
+    expect(verdict.noteOnly).toBe(false)
+    expect(verdict.warnings).toEqual([])
+  })
+
+  it('fails when the op-chain only commits over note_bytes', () => {
+    // The op-chain was built from sha256(noteBytes) alone (the v1 seed) —
+    // under a declared v2 profile the verifier starts from
+    // sha256(signedNoteBytes) instead, so the replayed chain lands on a
+    // different root than the one pinned, and the anchor does not verify.
+    const { ops, headerMerkleRoot } = workingChain()
+    const proof = otsProof({ ops, headerMerkleRoot })
+    const ev = { ...evidence([proof]), anchor_profile: 'signed-note-v2' }
+    const verdict = verifyAnchor(ev, checkpoint(), policy({ merkleRoot: headerMerkleRoot }))
+    expect(verdict.anchored).toBe(false)
+    expect(verdict.pqSurviving).toBe(false)
+    expect(verdict.warnings).toEqual([
+      'proof[0]: ots op-chain result does not match header_merkle_root; anchor_profile ' +
+        'signed-note-v2 requires the accumulator to start from ' +
+        'SHA256(checkpoint.signed_note_bytes) — this evidence looks like a note-v1 ' +
+        'commitment presented as signed-note-v2',
+    ])
+  })
+
+  it('an explicit note-v1 profile behaves like absent', () => {
+    const ev = { ...evidence([otsProof()]), anchor_profile: 'note-v1' }
+    const verdict = verifyAnchor(ev, checkpoint(), policy())
+    expect(verdict.anchored).toBe(true)
+    expect(verdict.anchoredBefore).toBe(HEADER_TIME)
+    expect(verdict.noteOnly).toBe(true)
+    expect(verdict.warnings).toEqual([])
+  })
+
+  it('an explicit null profile behaves like absent', () => {
+    const ev = { ...evidence([otsProof()]), anchor_profile: null }
+    const verdict = verifyAnchor(ev, checkpoint(), policy())
+    expect(verdict.anchored).toBe(true)
+    expect(verdict.noteOnly).toBe(true)
+    expect(verdict.warnings).toEqual([])
+  })
+
+  it('rejects an unrecognized anchor_profile', () => {
+    const ev = { ...evidence([otsProof()]), anchor_profile: 'signed-note-v3' }
+    const verdict = verifyAnchor(ev, checkpoint(), policy())
+    expect(verdict.anchored).toBe(false)
+    expect(verdict.warnings).toEqual([
+      "evidence.anchor_profile must be 'note-v1' or 'signed-note-v2', got 'signed-note-v3'",
+    ])
+  })
+
+  it('rejects a non-string anchor_profile', () => {
+    const ev = { ...evidence([otsProof()]), anchor_profile: 2 }
+    const verdict = verifyAnchor(ev, checkpoint(), policy())
+    expect(verdict.anchored).toBe(false)
+    expect(verdict.warnings).toEqual(["evidence.anchor_profile must be 'note-v1' or 'signed-note-v2', got 2"])
+  })
+})
+
+// --------------------------------------------------------------------------
 // passesHorizon.
 // --------------------------------------------------------------------------
 
@@ -240,7 +337,13 @@ describe('passesHorizon', () => {
   })
 
   it('throws AnchorError on a non-AnchorPolicy', () => {
-    const verdict: AnchorVerdict = { anchored: false, anchoredBefore: null, pqSurviving: false, warnings: [] }
+    const verdict: AnchorVerdict = {
+      anchored: false,
+      anchoredBefore: null,
+      pqSurviving: false,
+      warnings: [],
+      noteOnly: false,
+    }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     expect(() => passesHorizon(verdict, 'not-a-policy' as any)).toThrow(AnchorError)
   })
@@ -267,12 +370,24 @@ describe('passesHorizon', () => {
     [HEADER_TIME + 1, true, null, false],
     [HEADER_TIME + 1, true, HEADER_TIME, true],
   ])('all input combinations: crqcHorizon=%s pqSurviving=%s anchoredBefore=%s -> %s', (crqcHorizon, pqSurviving, anchoredBefore, expected) => {
-    const verdict: AnchorVerdict = { anchored: false, anchoredBefore, pqSurviving, warnings: [] }
+    const verdict: AnchorVerdict = {
+      anchored: false,
+      anchoredBefore,
+      pqSurviving,
+      warnings: [],
+      noteOnly: false,
+    }
     expect(passesHorizon(verdict, policy({ crqcHorizon }))).toBe(expected)
   })
 
   it('rejects an anchor exactly at the horizon (strict <)', () => {
-    const verdict: AnchorVerdict = { anchored: true, anchoredBefore: HEADER_TIME, pqSurviving: true, warnings: [] }
+    const verdict: AnchorVerdict = {
+      anchored: true,
+      anchoredBefore: HEADER_TIME,
+      pqSurviving: true,
+      warnings: [],
+      noteOnly: false,
+    }
     expect(passesHorizon(verdict, policy({ crqcHorizon: HEADER_TIME }))).toBe(false)
   })
 })
