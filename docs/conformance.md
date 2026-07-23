@@ -23,9 +23,12 @@ public runner below against your own implementation and reporting the result.
 python3 tools/conformance_runner.py --adapter '<command with {leaf}>' --subset v0.1|v0.2 [--report FILE]
 ```
 
-`tools/conformance_runner.py` is stdlib-only Python 3 (no `attest` import, no
-third-party dependency) — any machine with a bare `python3` can run it,
-regardless of what language the implementation under test is written in.
+`tools/conformance_runner.py` is stdlib-only **Python 3.12+** (no `attest`
+import, no third-party dependency) — any machine with a bare Python 3.12-or-newer
+interpreter can run it, regardless of what language the implementation under
+test is written in. (The runner uses `datetime.UTC`, which requires Python
+3.11+, and the project standardizes on 3.12; an older interpreter fails at
+import, before any leaf is checked.)
 
 - `--adapter` is a command **template** containing the literal placeholder
   `{leaf}`. For each corpus leaf directory, the runner substitutes `{leaf}`
@@ -130,7 +133,35 @@ it changes if and only if a leaf's own input/expected files change, so a
 claim naming a specific `corpus_revision` is falsifiable: re-run the exact
 command against the corpus at that revision and compare.
 
-## 6. Self-certification table
+## 6. The machine report (`--report`)
+
+With `--report FILE`, the runner writes a machine-readable JSON object with
+exactly these members:
+
+```
+{
+  "runner":         "attest-conformance-runner",
+  "corpus_revision": "<64-hex SHA-256 over every file inside every leaf dir>",
+  "subset":         "v0.1" | "v0.2",
+  "generated_at":   "<YYYY-MM-DDTHH:MM:SSZ, UTC>",
+  "adapter":        "<the --adapter template, verbatim>",
+  "total":          <leaves in the selected subset>,
+  "passed":         <leaves that matched expected>,
+  "failed":         <total - passed>,
+  "conformant":     <true iff every leaf passed>,
+  "leaves": [
+    { "id": "<group/leaf>", "status": "pass" | "fail" | "error",
+      "mismatches": ["<field>: expected <x>, got <y>", "..."] }
+  ]
+}
+```
+
+`conformant` is `true` only when every leaf of the subset is `pass`; a single
+`fail` (a diff mismatch) or `error` (adapter crash, non-JSON stdout, or
+timeout) sets it `false`. `corpus_revision` is the same digest the claim
+sentence (§5) names.
+
+## 7. Self-certification table
 
 The first two entries are attest's own reference implementations,
 self-certified through this exact public path (never a special internal
