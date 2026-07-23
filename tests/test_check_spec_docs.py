@@ -808,6 +808,110 @@ class TestStandardsRelationship:
         assert main() == 1
 
 
+# Minimal well-formed draft-source fixture text: carries both snapshot-
+# declaration lines (one revision integer per physical line, each existing in
+# the REAL attest-v0.1.md/attest-v0.2.md revision logs) and the three
+# required RFC-number literals the terminology defusals and JCS entry cite.
+_MINIMAL_DRAFT_TEXT = (
+    "<rfc><middle><section><name>Introduction</name>\n"
+    "<t>Relationship to the living specification: this document mirrors "
+    "attest-v0.1.md at revision 5.</t>\n"
+    "<t>It also mirrors attest-v0.2.md at revision 6 as the source of its "
+    "Extensions pointers.</t>\n"
+    "<t>See RFC 9943, RFC 9334, and RFC 8785.</t>\n"
+    "</section></middle></rfc>\n"
+)
+
+
+class TestInternetDraftSnapshot:
+    def test_draft_source_exists_and_declares_snapshot(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(check_spec_docs, "_INTERNET_DRAFT_DIR", tmp_path)
+        _write(tmp_path, f"{check_spec_docs._INTERNET_DRAFT_BASENAME}.xml", _MINIMAL_DRAFT_TEXT)
+        assert check_spec_docs.check_internet_draft_snapshot() == []
+
+    def test_draft_carries_the_terminology_defusals(self) -> None:
+        # Exercises the REAL committed draft source under ietf/.
+        text = check_spec_docs._internet_draft_source_text()
+        for needle in ("9943", "9334", "8785"):
+            assert needle in text
+
+    def test_checker_reports_missing_source(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(check_spec_docs, "_INTERNET_DRAFT_DIR", tmp_path)
+        errors = check_spec_docs.check_internet_draft_snapshot()
+        assert any("exactly one" in e.lower() for e in errors)
+
+    def test_checker_reports_more_than_one_source(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(check_spec_docs, "_INTERNET_DRAFT_DIR", tmp_path)
+        _write(tmp_path, f"{check_spec_docs._INTERNET_DRAFT_BASENAME}.md", _MINIMAL_DRAFT_TEXT)
+        _write(tmp_path, f"{check_spec_docs._INTERNET_DRAFT_BASENAME}.xml", _MINIMAL_DRAFT_TEXT)
+        errors = check_spec_docs.check_internet_draft_snapshot()
+        assert any("exactly one" in e.lower() for e in errors)
+
+    def test_checker_is_clean_on_the_real_draft(self) -> None:
+        assert check_spec_docs.check_internet_draft_snapshot() == []
+
+    def test_checker_flags_a_v01_revision_absent_from_the_log(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(check_spec_docs, "_INTERNET_DRAFT_DIR", tmp_path)
+        drifted = _MINIMAL_DRAFT_TEXT.replace("revision 5", "revision 999")
+        _write(tmp_path, f"{check_spec_docs._INTERNET_DRAFT_BASENAME}.xml", drifted)
+        errors = check_spec_docs.check_internet_draft_snapshot()
+        assert any("999" in e and "attest-v0.1.md" in e for e in errors)
+
+    def test_checker_flags_a_v02_revision_absent_from_the_log(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(check_spec_docs, "_INTERNET_DRAFT_DIR", tmp_path)
+        drifted = _MINIMAL_DRAFT_TEXT.replace("revision 6", "revision 999")
+        _write(tmp_path, f"{check_spec_docs._INTERNET_DRAFT_BASENAME}.xml", drifted)
+        errors = check_spec_docs.check_internet_draft_snapshot()
+        assert any("999" in e and "attest-v0.2.md" in e for e in errors)
+
+    def test_checker_flags_a_removed_required_literal(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(check_spec_docs, "_INTERNET_DRAFT_DIR", tmp_path)
+        drifted = _MINIMAL_DRAFT_TEXT.replace("RFC 9943", "the SCITT architecture document")
+        assert "9943" not in drifted
+        _write(tmp_path, f"{check_spec_docs._INTERNET_DRAFT_BASENAME}.xml", drifted)
+        errors = check_spec_docs.check_internet_draft_snapshot()
+        assert any("9943" in e for e in errors)
+
+    def test_main_exits_nonzero_when_draft_source_is_missing(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # Pins the main() wiring: check_internet_draft_snapshot() is called
+        # directly from main() (not through collect_errors()), so a test that
+        # only calls the checker function directly would stay green even if
+        # main() stopped calling it.
+        monkeypatch.setattr(check_spec_docs, "_INTERNET_DRAFT_DIR", tmp_path)
+        assert main() == 1
+
+    def test_main_exits_nonzero_when_snapshot_revision_is_absent_from_the_log(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(check_spec_docs, "_INTERNET_DRAFT_DIR", tmp_path)
+        drifted = _MINIMAL_DRAFT_TEXT.replace("revision 5", "revision 999")
+        _write(tmp_path, f"{check_spec_docs._INTERNET_DRAFT_BASENAME}.xml", drifted)
+        assert main() == 1
+
+    def test_main_exits_nonzero_when_required_literal_is_removed(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(check_spec_docs, "_INTERNET_DRAFT_DIR", tmp_path)
+        drifted = _MINIMAL_DRAFT_TEXT.replace("RFC 9334", "the RATS architecture document")
+        assert "9334" not in drifted
+        _write(tmp_path, f"{check_spec_docs._INTERNET_DRAFT_BASENAME}.xml", drifted)
+        assert main() == 1
+
+
 def test_versioning_doc_missing_heading_is_flagged_by_collect_errors() -> None:
     docs = _base_docs()
     docs["versioning"] = _minimal_versioning().replace("## 4. Algorithm lifecycle\n\n", "")
