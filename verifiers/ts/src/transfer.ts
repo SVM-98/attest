@@ -411,10 +411,10 @@ function asObject(v: JsonValue | undefined): JsonObject | null {
  * 5. When the previous receipt has `license.not_transferable_before`: both
  *    it and `record.transferred_at` must be strict Stage-3 UTC timestamps,
  *    and the transfer time must not be earlier than the floor.
- * 6. Only once 2-4 all succeeded: among every OTHER transfer-view claim
- *    that is ALSO established (issuer sig + holder auth + logged) for the
- *    SAME previous receipt_id, the selected record must hold the smallest
- *    log index -> losing branch of a double assignment.
+ * 6. Only once 2-5 all succeeded: among every OTHER transfer-view claim
+ *    that is ALSO established (issuer sig + holder auth + logged + floor)
+ *    for the SAME previous receipt_id, the selected record must hold the
+ *    smallest log index -> losing branch of a double assignment.
  * 7. `record.new_holder_pubkey == payloads[i].buyer.pubkey` -> pubkey loop
  *    closure on the NEXT receipt.
  * 8. (independent of the transfer record) an authenticated `status ==
@@ -497,16 +497,19 @@ export function auditChain(
 
       const prevLicense = asObject(prevPayload['license'])
       const notTransferableBefore = prevLicense ? prevLicense['not_transferable_before'] : undefined
-      if (notTransferableBefore !== undefined && notTransferableBefore !== null) {
-        const transferredAt = validStage3UtcTimestamp(record['transferred_at']) ? parseStrictUtc(record['transferred_at']) : null
+      const honorsFloor = (candidate: JsonObject): boolean => {
+        if (notTransferableBefore === undefined || notTransferableBefore === null) return true
+        const transferredAt = validStage3UtcTimestamp(candidate['transferred_at']) ? parseStrictUtc(candidate['transferred_at']) : null
         const floor = validStage3UtcTimestamp(notTransferableBefore) ? parseStrictUtc(notTransferableBefore) : null
-        if (transferredAt === null || floor === null || transferredAt < floor) {
-          errors.push(errNotTransferableBefore(i))
-          linkOk = false
-        }
+        return transferredAt !== null && floor !== null && transferredAt >= floor
+      }
+      const floorOk = honorsFloor(record)
+      if (!floorOk) {
+        errors.push(errNotTransferableBefore(i))
+        linkOk = false
       }
 
-      if (sigOk && authOk && leafIndex !== null) {
+      if (sigOk && authOk && leafIndex !== null && floorOk) {
         const establishedLeafIndices = [leafIndex]
         for (const claim of transferView) {
           const c = asObject(claim)
@@ -517,7 +520,7 @@ export function auditChain(
           if (!(typeof prevPubkey === 'string' && verifyAuthorization(candidate, prevPubkey))) continue
           const candidateEvidence = (c['evidence'] ?? null) as JsonValue | null
           const candidateLeafIndex = recordLoggedStanding(candidate, candidateEvidence, issuerIdForLog, logKeys, anchorPolicy, warnings)
-          if (candidateLeafIndex !== null) establishedLeafIndices.push(candidateLeafIndex)
+          if (candidateLeafIndex !== null && honorsFloor(candidate)) establishedLeafIndices.push(candidateLeafIndex)
         }
         if (leafIndex !== Math.min(...establishedLeafIndices)) {
           errors.push(errLosingBranch(i))

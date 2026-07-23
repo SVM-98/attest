@@ -83,8 +83,8 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a schema error — the chain of title is cryptographic from the first link — while v0.1
   receipts are untouched. A separate `audit_chain`/`auditChain` surface walks a whole
   chain of transfers and reports per-link validity, independent of single-receipt
-  `verify()`. New conformance leaf groups `35-transfer` (10 leaves) and
-  `36-transfer-chain` (3 leaves), bringing the corpus to 95 leaves across 36 groups,
+  `verify()`. New conformance leaf groups `35-transfer` (11 leaves) and
+  `36-transfer-chain` (4 leaves), bringing the corpus to 97 leaves across 36 groups,
   reproduced by the Python reference, the TypeScript verifier, and the site adapter.
 - Python: `src/attest/transfer.py` (record build/sign/verify, holder authorization,
   chain-of-title audit), `verify.py` integration (transferred-class backing,

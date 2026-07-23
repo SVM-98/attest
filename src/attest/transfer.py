@@ -461,6 +461,25 @@ _ERR_MISSING_BACKED_REVOCATION = (
 )
 
 
+def _honors_not_transferable_before(
+    not_transferable_before: object, transferred_at: object
+) -> bool:
+    """Whether a transfer time honors an optional prior-receipt floor."""
+    if not_transferable_before is None:
+        return True
+    if not (
+        _valid_utc_timestamp(not_transferable_before)
+        and _valid_utc_timestamp(transferred_at)
+        and isinstance(not_transferable_before, str)
+        and isinstance(transferred_at, str)
+    ):
+        return False
+    try:
+        return _parse_date(transferred_at) >= _parse_date(not_transferable_before)
+    except ValueError:
+        return False
+
+
 @dataclass(frozen=True)
 class ChainAuditResult:
     """v0.2 §17.5: chain-of-title audit — a SEPARATE surface from standard
@@ -502,7 +521,7 @@ def audit_chain(
     1. select the transfer-view claim whose `record["receipt_id"] ==
        payloads[i - 1]["receipt_id"]` and `record["new_receipt_id"] ==
        payloads[i]["receipt_id"]` — none found -> `_ERR_NO_TRANSFER_RECORD`,
-       and checks 2-6 below are skipped entirely (nothing to check them
+       and checks 2-7 below are skipped entirely (nothing to check them
        against); check 8 still runs independently.
     2. `verify_record_signature(record, key_manifest)` -> issuer signature.
     3. `verify_authorization(record, payloads[i - 1]["buyer"]["pubkey"])` ->
@@ -511,8 +530,8 @@ def audit_chain(
     5. When the previous receipt has `license.not_transferable_before`: both
        it and `record["transferred_at"]` must be strict Stage-3 UTC
        timestamps, and the transfer time must not be earlier than the floor.
-    6. Only once 2-4 all succeeded: among every OTHER transfer-view claim
-       that is ALSO established (issuer sig + holder auth + logged) for the
+    6. Only once 2-5 all succeeded: among every OTHER transfer-view claim
+       that is ALSO established (issuer sig + holder auth + logged + floor) for the
        SAME previous `receipt_id` (regardless of ITS OWN `new_receipt_id` —
        this is what makes a double assignment detectable at all, §17.4),
        the selected record must hold the smallest log index -> losing
@@ -601,28 +620,14 @@ def audit_chain(
                 if isinstance(prev_license, dict)
                 else None
             )
-            if not_transferable_before is not None:
-                transferred_at = record.get("transferred_at")
-                floor_ok = _valid_utc_timestamp(not_transferable_before)
-                transferred_at_ok = _valid_utc_timestamp(transferred_at)
-                honored = False
-                if (
-                    floor_ok
-                    and transferred_at_ok
-                    and isinstance(transferred_at, str)
-                    and isinstance(not_transferable_before, str)
-                ):
-                    try:
-                        honored = _parse_date(transferred_at) >= _parse_date(
-                            not_transferable_before
-                        )
-                    except ValueError:
-                        honored = False
-                if not honored:
-                    errors.append(_ERR_NOT_TRANSFERABLE_BEFORE.format(i=i))
-                    link_ok = False
+            floor_ok = _honors_not_transferable_before(
+                not_transferable_before, record.get("transferred_at")
+            )
+            if not floor_ok:
+                errors.append(_ERR_NOT_TRANSFERABLE_BEFORE.format(i=i))
+                link_ok = False
 
-            if sig_ok and auth_ok and leaf_index is not None:
+            if sig_ok and auth_ok and leaf_index is not None and floor_ok:
                 established_leaf_indices = [leaf_index]
                 for claim in transfer_view:
                     if not isinstance(claim, dict):
@@ -649,7 +654,9 @@ def audit_chain(
                         anchor_policy,
                         warnings,
                     )
-                    if candidate_leaf_index is not None:
+                    if candidate_leaf_index is not None and _honors_not_transferable_before(
+                        not_transferable_before, candidate.get("transferred_at")
+                    ):
                         established_leaf_indices.append(candidate_leaf_index)
                 if leaf_index != min(established_leaf_indices):
                     errors.append(_ERR_LOSING_BRANCH.format(i=i))
