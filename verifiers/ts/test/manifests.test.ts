@@ -10,6 +10,8 @@ import {
   checkContinuity,
   chainContinuous,
   verifyArtifactManifest,
+  checkArtifactContinuity,
+  MAX_ARTIFACT_ENTRIES,
 } from '../src/manifests.js'
 
 const enc = (s: string) => new TextEncoder().encode(s)
@@ -429,6 +431,198 @@ describe('manifests', () => {
       const t = JSON.parse(JSON.stringify(am))
       t.version = 2
       expect(verifyArtifactManifest(parse(t), parse(v1))).toBe(false)
+    })
+
+    // --- I3(b) (2026-07-22 fix wave 2): G1 artifact-entries ceiling boundary —
+    // mirrors Python's test_manifests.py test_verify_artifact_manifest_true_at_entries_ceiling
+    // / test_verify_artifact_manifest_false_over_entries_ceiling pair.
+    const _fillerArtifacts = (count: number) =>
+      Array.from({ length: count }, (_, i) => ({
+        role: 'installer',
+        platform: 'windows-x86_64',
+        filename: `example-game-1.0-setup-${i}.exe`,
+        size_bytes: 734003200,
+        sha256: '0'.repeat(64),
+      }))
+
+    it('accepts an artifact manifest at MAX_ARTIFACT_ENTRIES', () => {
+      const atCeiling = signManifest(
+        {
+          issuer: ISSUER,
+          series: `${ISSUER}/works/EXG-001`,
+          version: 1,
+          released_at: '2025-03-01T00:00:00Z',
+          artifacts: _fillerArtifacts(MAX_ARTIFACT_ENTRIES),
+        },
+        kid1,
+        seed1,
+      )
+      expect(verifyArtifactManifest(parse(atCeiling), parse(v1))).toBe(true)
+    })
+
+    it('rejects an artifact manifest one entry over MAX_ARTIFACT_ENTRIES', () => {
+      const overCeiling = signManifest(
+        {
+          issuer: ISSUER,
+          series: `${ISSUER}/works/EXG-001`,
+          version: 1,
+          released_at: '2025-03-01T00:00:00Z',
+          artifacts: _fillerArtifacts(MAX_ARTIFACT_ENTRIES + 1),
+        },
+        kid1,
+        seed1,
+      )
+      expect(verifyArtifactManifest(parse(overCeiling), parse(v1))).toBe(false)
+    })
+
+    it('rejects a signed artifact manifest with manifest_version zero', () => {
+      const zero = signManifest(
+        {
+          issuer: ISSUER,
+          series: `${ISSUER}/works/EXG-001`,
+          version: 1,
+          manifest_version: 0,
+          released_at: '2025-03-01T00:00:00Z',
+          artifacts: [],
+        },
+        kid1,
+        seed1,
+      )
+      expect(verifyArtifactManifest(parse(zero), parse(v1))).toBe(false)
+    })
+  })
+
+  // G2/G3 manifest currency (attest-versioning.md rev 4; v0.1 §7.2/§7.3
+  // amendment) — mirrors tests/test_manifests.py's check_artifact_continuity
+  // cases one-for-one.
+  describe('checkArtifactContinuity', () => {
+    const SERIES = `${ISSUER}/works/EXG-001`
+    const artifactEntry = () => ({
+      role: 'installer',
+      platform: 'windows-x86_64',
+      filename: 'example-game-1.0-setup.exe',
+      size_bytes: 734003200,
+      sha256: '0'.repeat(64),
+    })
+    const am1 = signManifest(
+      {
+        issuer: ISSUER,
+        series: SERIES,
+        version: 1,
+        manifest_version: 1,
+        released_at: '2025-03-01T00:00:00Z',
+        artifacts: [artifactEntry()],
+      },
+      kid1,
+      seed1,
+    )
+    const am2 = signManifest(
+      {
+        issuer: ISSUER,
+        series: SERIES,
+        version: 2,
+        manifest_version: 2,
+        released_at: '2025-04-01T00:00:00Z',
+        artifacts: [artifactEntry()],
+      },
+      kid1,
+      seed1,
+    )
+    const am3 = signManifest(
+      {
+        issuer: ISSUER,
+        series: SERIES,
+        version: 3,
+        manifest_version: 3,
+        released_at: '2025-05-01T00:00:00Z',
+        artifacts: [artifactEntry()],
+      },
+      kid1,
+      seed1,
+    )
+    const amLegacy = signManifest(
+      {
+        issuer: ISSUER,
+        series: SERIES,
+        version: 1,
+        released_at: '2025-03-01T00:00:00Z',
+        artifacts: [artifactEntry()],
+      },
+      kid1,
+      seed1,
+    )
+
+    it('true for manifest_version N -> N+1', () => {
+      expect(checkArtifactContinuity(parse(am1), parse(am2))).toBe(true)
+    })
+
+    it('false on regression (rollback)', () => {
+      expect(checkArtifactContinuity(parse(am2), parse(am1))).toBe(false)
+    })
+
+    it('false on a version gap', () => {
+      expect(checkArtifactContinuity(parse(am1), parse(am3))).toBe(false)
+    })
+
+    it('false on issuer mismatch', () => {
+      const evil = signManifest(
+        {
+          issuer: 'evil.example.com',
+          series: SERIES,
+          version: 2,
+          manifest_version: 2,
+          released_at: '2025-04-01T00:00:00Z',
+          artifacts: [artifactEntry()],
+        },
+        kid1,
+        seed1,
+      )
+      expect(checkArtifactContinuity(parse(am1), parse(evil))).toBe(false)
+    })
+
+    it('false on series mismatch', () => {
+      const other = signManifest(
+        {
+          issuer: ISSUER,
+          series: `${ISSUER}/works/OTHER-002`,
+          version: 2,
+          manifest_version: 2,
+          released_at: '2025-04-01T00:00:00Z',
+          artifacts: [artifactEntry()],
+        },
+        kid1,
+        seed1,
+      )
+      expect(checkArtifactContinuity(parse(am1), parse(other))).toBe(false)
+    })
+
+    it('true when trusted is legacy (no manifest_version)', () => {
+      expect(checkArtifactContinuity(parse(amLegacy), parse(am2))).toBe(true)
+    })
+
+    it('true when candidate is legacy (no manifest_version)', () => {
+      expect(checkArtifactContinuity(parse(am1), parse(amLegacy))).toBe(true)
+    })
+
+    it('true for a same-version re-delivery of the value-identical manifest', () => {
+      // Re-fetching the same trusted manifest it already holds must stay continuous.
+      expect(checkArtifactContinuity(parse(am1), parse(am1))).toBe(true)
+    })
+
+    it('false for two DIFFERENT manifests at the SAME manifest_version (equivocation)', () => {
+      const am1Variant = signManifest(
+        {
+          issuer: ISSUER,
+          series: SERIES,
+          version: 1,
+          manifest_version: 1,
+          released_at: '2025-03-02T00:00:00Z',
+          artifacts: [artifactEntry()],
+        },
+        kid1,
+        seed1,
+      )
+      expect(checkArtifactContinuity(parse(am1), parse(am1Variant))).toBe(false)
     })
   })
 })

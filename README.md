@@ -89,10 +89,12 @@ won't adopt voluntarily, the lever is regulation and market pressure, not forger
 
 Spec v0.1 is complete and v0.2 is specified and implemented on `main`, with two
 independent implementations — a Python reference implementation and a TypeScript
-verifier — that agree on all 66 conformance vector leaves across 29 groups: 43 of
-them the v0.1 corpus, the rest exercising v0.2's hybrid signature profile and
-transparency behaviour. (A v0.1-only verifier is required to reject v0.2
-envelopes, so it is measured against the 43-leaf subset.) There is also an
+verifier — that agree on all 82 conformance vector leaves across 34 groups: 50 of
+them the v0.1 corpus, the rest exercising v0.2's hybrid signature profile,
+transparency/anchoring behaviour, and the upgrade-policy hardening (mixed-keyset
+prohibition, artifact-manifest currency, anchor profile v2, logged revocation
+deadlines). (A v0.1-only verifier is required to reject v0.2 envelopes, so it is
+measured against the 50-leaf subset.) There is also an
 end-to-end demo that deletes a store's entire infrastructure mid-lifecycle and
 proves the receipt still verifies.
 
@@ -175,6 +177,13 @@ key transparency and timestamp anchoring, where a log corroborates a receipt's
 existence without ever being able to make an unsigned receipt look authentic —
 is specified in the same document. Transfer records are the remaining stage.
 
+[docs/spec/attest-versioning.md](docs/spec/attest-versioning.md) is the
+normative upgrade policy governing both specifications above: the additive
+pattern new extensions must follow, the eternal-verifiability guarantee, the
+three-state algorithm lifecycle (`active` / `deprecated` / `unsafe`), the
+amendment procedure, and the signature-suite, payload-field, revocation-class,
+log-entry-type, and transfer-type registries.
+
 [docs/spec/attest-threat-model.md](docs/spec/attest-threat-model.md) is the
 maintained threat model behind the two specifications above — a living
 normative companion that analyzes their mechanisms rather than imposing
@@ -222,7 +231,7 @@ registration — real trademark enforcement would require actually registering t
 mark, which has not happened.
 
 **Contributing.** See [`CONTRIBUTING.md`](CONTRIBUTING.md). Implementation pull
-requests must pass all 66 conformance vector leaves and keep both the Python and
+requests must pass all 82 conformance vector leaves and keep both the Python and
 TypeScript suites green.
 
 **Contact.** Use GitHub Issues for technical bugs, GitHub Discussions for

@@ -73,7 +73,7 @@ A receipt is transmitted as a JSON envelope with exactly three top-level members
 | Field | Type | Required | Semantics |
 | --- | --- | --- | --- |
 | `attest_version` | string, const `"0.1"` | REQUIRED | Fixes the payload shape and the crypto suite (§8–§10) for this receipt. |
-| `receipt_id` | string, ULID (`^[0-9A-HJKMNP-TV-Z]{26}$`) | REQUIRED | ULID: sortable and coordination-free; its randomness provides practical collision-resistance. |
+| `receipt_id` | string, ULID (`^[0-7][0-9A-HJKMNP-TV-Z]{25}$`) | REQUIRED | ULID: sortable and coordination-free; its randomness provides practical collision-resistance. The leading character is bounded to `[0-7]` — a 26-char Crockford base32 ULID otherwise overflows the 128-bit value space (the same constraint [`attest-receipt.schema.json`](schema/attest-receipt.schema.json)'s `receipt_id` pattern already enforced; this row previously omitted it, a prose-only drift fixed 2026-07-22, no behavior change). |
 | `issued_at` | string, `YYYY-MM-DDTHH:MM:SSZ` (UTC) | REQUIRED | Issuance timestamp; anchors key-validity checks (§11 step 3) and `refund_window` revocation (§12). |
 | `supersedes` | string (ULID) or `null` | Schema-optional; the reference issuer always emits it (defaulting to `null`) | Informational lineage pointer to a prior `receipt_id` this one replaces. A superseding re-issue does **not** invalidate the superseded receipt absent buyer consent; a verifier MUST treat it as lineage metadata only, never as an implicit revocation. |
 | `issuer` | object | REQUIRED | See §5.2. |
@@ -194,22 +194,25 @@ Key-entry object (`keys[]`):
 
 ### 7.2 Artifact manifests
 
-Artifact manifests are separate signed documents, same signing discipline as key manifests, that let fast-changing artifact state live outside the immutable receipt. `work.artifact_series` names the series; a verifier MUST accept any issuer-signed artifact manifest for that series.
+Artifact manifests are separate signed documents, same signing discipline as key manifests, that let fast-changing artifact state live outside the immutable receipt. `work.artifact_series` names the series; acceptance is NOT unconditional on being issuer-signed for that series — a verifier MUST authenticate an artifact manifest (its `manifest_signature`, §7.2) AND MUST additionally satisfy the currency rule of §7.3 below before accepting it as the newest-seen state: rollback and equivocation (two distinct manifests at the same `manifest_version`) are rejected, not silently accepted. An unauthenticated manifest contributes nothing to currency and MUST be ignored with a warning.
 
 | Field | Type | Required | Semantics |
 | --- | --- | --- | --- |
 | `issuer` | string, DNS domain | REQUIRED | MUST equal the resolving key manifest's `issuer`. |
 | `series` | string | REQUIRED | Matches `work.artifact_series`. |
-| `version` | integer | REQUIRED | |
+| `version` | integer | REQUIRED | The series' own release number — unrelated to currency/rollback protection, see `manifest_version` below. |
+| `manifest_version` | integer ≥ 1, monotonically increasing per issuer/series (2026-07-22 amendment) | REQUIRED on manifests produced after this revision | Currency/newest-seen ordering (§7.3) — distinct from `version` above, and from key manifests' own `manifest_version` (§7.1), which this field parallels but does not share a namespace with. Absent on a manifest produced before this revision (a legacy manifest): still VALID, never rejected (attest-versioning.md §3, eternal verifiability) — a conforming verifier MUST report warning `artifact_manifest_unversioned` (§11.2) instead. |
 | `released_at` | string, UTC `Z` timestamp | REQUIRED | Checked against the signer key's `[valid_from, valid_to]` window. |
 | `artifacts` | array of artifact objects (§5.4 shape) | REQUIRED | Current artifact set for the series. |
 | `manifest_signature` | object `{kid, sig}` | REQUIRED | Ed25519 over `JCS(manifest)` with this member removed. |
 
-An artifact manifest is valid only if: its resolving key manifest is self-consistent (§7.1); the signer's `kid` resolves to a key-entry with `status == "active"` in that key manifest; `released_at` falls within that key's `[valid_from, valid_to]`; `issuer` matches between the two manifests; and the Ed25519 signature verifies.
+An artifact manifest is valid only if: its resolving key manifest is self-consistent (§7.1); the signer's `kid` resolves to a key-entry with `status == "active"` in that key manifest; `released_at` falls within that key's `[valid_from, valid_to]`; `issuer` matches between the two manifests; and the Ed25519 signature verifies. `manifest_version`'s presence or absence never affects this self-consistency verdict — it is signed-and-carried like any other member, checked only by the currency rule below.
 
 ### 7.3 Rotation continuity and key compromise
 
 **Rotation continuity is normative, not best-effort.** A manifest with `manifest_version` N+1 is auto-trusted by a verifier only if it was signed by a key that was `active` in the version-N manifest the verifier already trusts. Version gaps are bridgeable only by validating every intermediate manifest in sequence; if intermediates are unavailable, the manifest MUST be treated as reached via a **discontinuous** rotation. On a discontinuous manifest, or on conflicting manifests for the same issuer, a verifier MUST report `trust: "unverified_rotation"` (§11.1) and MUST NOT auto-accept the manifest. Receipts signed while a key was `active` remain valid after that key is later `retired`.
+
+**Artifact manifest currency is normative too (2026-07-22 amendment).** Currency state is scoped per (issuer, `artifact_series`) pair. A verifier holding persistent trust state MUST NOT accept, for that pair, a manifest with `manifest_version` lower than the newest it has already accepted; on regression it MUST report `trust: "unverified_rotation"` (§11.1) — the same value, and the same rollback-detection posture, §7.3's key-manifest rotation-continuity rule above already uses; no new `trust` value is introduced. Currency comparison applies only between manifests that both carry `manifest_version`: a manifest missing the field (§7.2, a legacy manifest predating this amendment) has no currency ordering to violate, so it is never rejected on these grounds, only warned (§11.2, `artifact_manifest_unversioned`) — eternal verifiability (attest-versioning.md §3) applies here exactly as it does everywhere else this specification is amended. The Stage 2 `manifest_freshness` result component (v0.2 §10) is the recency evidence a verifier MAY additionally consult when transparency-log corroboration is configured; it is informational only and does not itself drive this currency check.
 
 **Key compromise fails closed.** A key marked `compromised` invalidates **all** signatures ever made with it, regardless of `issued_at` — because `issued_at` lives inside the signed payload and is controlled by whoever holds the key, a back-dated forgery is undetectable without an external trusted timestamp. A verifier MUST reject any receipt signature resolving to a `compromised` key (§11 step 3) unconditionally. The same fail-closed rule governs revocation records: a revocation record signed by a key that is not `status == "active"` in its resolving key manifest — including `compromised` and `retired` keys — MUST be treated as failing authentication and MUST be ignored (with a warning), never treated as effective (§12.2). Issuers SHOULD use one signing key per period (e.g. quarterly `kid`s) to bound the blast radius of a compromise, and SHOULD re-issue affected receipts after one.
 
@@ -349,6 +352,24 @@ A conforming verifier MUST emit a warning for each of the following conditions w
 
 Offline verifiers with no `revocation_view` report `revocation: "unknown"` honestly rather than failing closed on the whole receipt — a receipt's evidentiary value degrades gracefully, the way a paper receipt's does.
 
+### 11.3 Structural ceilings (normative, 2026-07-22 amendment)
+
+A conforming verifier MUST bound the resource a hostile envelope, key manifest, or artifact manifest can force it to spend before any cryptographic or schema work runs, per the amendment procedure (attest-versioning.md §5). Two distinct classes of ceiling are named below, and they are worded differently on purpose:
+
+- **Newly-introduced ceilings** (raw envelope size; issuer key manifest `keys[]` length; artifact manifest `artifacts[]` length) did not exist as a conformance requirement before this amendment. For these, a conforming verifier MUST accept inputs within the ceiling and MAY reject inputs beyond it as a resource-exhaustion guard. The reference implementations reject inputs beyond the ceiling; the conformance leaves in vector group [`29-limits`](vectors/29-limits/) pin that reference-profile behavior, not a universal MUST-reject.
+- **Pre-existing, already-enforced bounds** (parsed-tree nesting depth; the revocation-view record count, §12.4) were already unconditionally enforced before this amendment. This section only formalizes them as conformance-surface requirements; it changes no behavior, and they keep their unconditional MUST-reject wording.
+
+| Ceiling | Value | Checked | Rejects with | Class |
+| --- | --- | --- | --- | --- |
+| Raw envelope size | 1,048,576 bytes (2²⁰) | Step 0, on the undecoded bytes, before any parsing | `schema: "invalid"` | New — acceptance floor |
+| Parsed envelope tree nesting depth | 256 | During strict parsing (§10, `canon.loads_strict`) — this is `canon.py`'s own pre-existing parser structural safety cap, not a second, smaller conformance ceiling layered on top of it | `schema: "not_checked"` — a parse failure, reported the same way any other malformed input is (no parsed object is ever produced) | Pre-existing — unconditional |
+| Issuer key manifest `keys[]` length | 256 entries | Step 2, once the manifest is resolved from the trust store, before any key lookup | `schema: "invalid"` | New — acceptance floor |
+| Artifact manifest `artifacts[]` length | 4,096 entries | Wherever an artifact manifest's own self-consistency is checked (§7.2) | Manifest treated as self-inconsistent | New — acceptance floor |
+
+The nesting-depth ceiling is `canon.py`'s own long-standing parser structural safety cap (256), which has never rejected a receipt nesting a handful of levels deep, exercised at its exact boundary by [`docs/spec/vectors/21-canon-strict`](vectors/21-canon-strict/) leaves `b`/`c`/`d`: this amendment states that pre-existing bound normatively and introduces nothing smaller on top of it, so leaves `b-depth-255` and `c-depth-256` keep their original accepted expectations, per attest-versioning.md §2's additive-pattern rule. Vector group [`29-limits`](vectors/29-limits/) exercises the two newly-introduced ceilings that sit on `verify()`'s own wire surface (envelope size, key-manifest array length); the artifact-manifest ceiling is exercised directly against `verify_artifact_manifest`/`verifyArtifactManifest`, outside `verify()`'s own wire surface, so it carries no dedicated vector leaf — see §15.
+
+A byte-length, key-manifest-array, or artifact-manifest-array ceiling failure is reported as `schema: "invalid"` (not the `"not_checked"` value most other step-0 failures use, §11.1): these are conformance-surface structural requirements on the envelope's/manifest's own shape, not parse-format failures in the RFC 8785 sense. The nesting-depth ceiling is the one exception to this: because it is enforced by the parser itself, an over-ceiling receipt never produces a parsed object at all, so it is reported the same way any other malformed input is, `schema: "not_checked"` — unchanged, pre-existing behavior.
+
 ## 12. Revocation records
 
 A revocation record is a minimal, issuer-signed side-document:
@@ -385,6 +406,12 @@ What an authenticated, matching record (`status == "revoked"`) then *means* depe
 
 `T`, used in `not_revoked_as_of:<T>` (§11.1), MUST be computed as the maximum `revoked_at` across **all authenticated records** the verifier consulted in the supplied revocation view — regardless of which `receipt_id` they target. It describes how current the verifier's authenticated revocation feed is, not this one receipt's own history. Restricting the computation to authenticated records is a required security property: an unauthenticated record with a forged far-future `revoked_at` MUST NOT be able to inflate the reported freshness of the verifier's data. With zero authenticated records available, `T` has no trustworthy value and the result MUST be the bare literal `unknown`.
 
+### 12.4 Revocation-view record ceiling (normed, 2026-07-22 amendment)
+
+A conforming verifier MUST bound the number of records it will evaluate from an untrusted `revocation_view`: 10,000 records (the reference implementations' pre-existing `verify._MAX_REVOCATION_RECORDS` default, a 2026-07-13 hardening that predates this amendment; unchanged in value here). This is a pre-existing, already-enforced bound in the §11.3 sense — this amendment only states it normatively, it does not introduce a new ceiling or change behavior.
+
+An oversized view (more than 10,000 records) is not evaluated — never truncated (a truncated subset could misreport a genuine revocation as absent), never raised as an exception. It fails closed for revocable receipts (`license.revocability` of `refund_window` or `policy`): an untrusted view too large to evaluate cannot rule out a revocation, so it MUST NOT certify the receipt, and the failure is recorded as an error (`ok` becomes `false`). For `license.revocability: "none"` (irrevocable), a revocation record can never affect `ok` regardless of the view's size, so an oversized view is a non-fatal warning instead. In both cases `revocation` is reported as `unknown`. This bound exists independent of §11.3's structural ceilings — it is a per-call record-count cap on trusted-input-shaped-as-untrusted data (§6's `revocation_view` parameter), not a wire-format or manifest-shape structural bound.
+
 ## 13. Delivery member and single-receipt sharing
 
 A bare `.attest.json` envelope — payload, signatures, and an optional `delivery` block (§4.2) — is self-contained: when `delivery.salt` and/or `delivery.issuer_manifest` are populated, the envelope carries everything a verifier needs without any account page or bundle machinery, which is what makes an ordinary order-confirmation email a valid integration point.
@@ -411,7 +438,7 @@ MUST contain `salts.json` (`receipt_id → salt`) and, if used, `keys/` (per-rec
 
 ## 15. Test vectors and conformance
 
-The conformance vectors under [`docs/spec/vectors/`](vectors/) are the attest conformance suite. Since v0.2 it is no longer a v0.1-only corpus: groups `01`–`25` (43 leaves, the corpus as of the `v0.1.2` release) define **v0.1** conformance, while `26-hybrid`, `27-valid-to-absent` and `28-transparency` exercise v0.2 behaviour. A v0.1-only verifier is REQUIRED to reject v0.2 envelopes, so it cannot reproduce the v0.2 expectations and is measured against the 43-leaf v0.1 subset; an implementation claiming v0.2 must reproduce all 66. **An implementation is attest-conformant if and only if it produces the expected `VerificationResult` — every component listed in a vector's `expected.json`, matched exactly — for every vector present under `docs/spec/vectors/`.**
+The conformance vectors under [`docs/spec/vectors/`](vectors/) are the attest conformance suite. Since v0.2 it is no longer a v0.1-only corpus: groups `01`–`25`, `29-limits`, and `31-manifest-currency` (50 leaves) define **v0.1** conformance, while `26-hybrid`, `27-valid-to-absent`, `28-transparency`, `30-mixed-keyset`, `32-anchor-v2` and `33-logged-revocation` exercise v0.2 behaviour. `29-limits` (§11.3's structural ceilings) binds v0.1 as well as v0.2 — the two newly-introduced acceptance-floor ceilings it exercises (raw envelope size, issuer key manifest `keys[]` length) added by the amendment that introduced it (2026-07-22, attest-versioning.md §5); the pre-existing `21-canon-strict` leaves `b-depth-255`/`c-depth-256` are unaffected by it and keep their original `ok: true` expectations, since the nesting-depth ceiling §11.3 documents is `canon.py`'s own pre-existing 256 parser cap, not a new, smaller one. `31-manifest-currency` (§7.2/§7.3's manifest-currency amendment, rev 4) likewise binds v0.1 as well as v0.2 — artifact-manifest `manifest_version` and the newest-seen rule are not gated by `attest_version`. A v0.1-only verifier is REQUIRED to reject v0.2 envelopes, so it cannot reproduce the v0.2-only expectations and is measured against the 50-leaf v0.1 subset; an implementation claiming v0.2 must reproduce all 82. **An implementation is attest-conformant if and only if it produces the expected `VerificationResult` — every component listed in a vector's `expected.json`, matched exactly — for every vector present under `docs/spec/vectors/`.**
 
 | Vector | Directory | Exercises |
 | --- | --- | --- |
@@ -459,6 +486,13 @@ The conformance vectors under [`docs/spec/vectors/`](vectors/) are the attest co
 ## Appendix B — Registry layer and future work (non-normative, out of v0.1 conformance scope)
 
 This appendix outlines, but v0.1 does not build, a registry layer: independent nodes replicating key/artifact manifests, license/policy texts, and revocation records, plus optional receipt-existence proofs anchored via Merkle roots. Nothing in this specification's conformance requirement (§15) depends on a registry node existing. A future revision of this specification will normatize the registry-node wire format if and when it ships.
+
+## Revision log
+
+- **2026-07-22 (rev 4)**: §7.2 amended — artifact manifests gain `manifest_version` (integer ≥ 1, monotonically increasing per issuer/series), REQUIRED on manifests produced after this revision; absent on a legacy manifest, which stays valid with warning `artifact_manifest_unversioned` (eternal verifiability, attest-versioning.md §3); manifests MUST authenticate before currency evaluation, otherwise they are ignored with `artifact_manifest_unauthenticated`; issuer mismatches are ignored with `artifact_manifest_issuer_mismatch`. §7.3 amended — currency state is scoped per (issuer, `artifact_series`) pair; currency comparison applies only where both manifests carry `manifest_version`, and regression reports `trust: "unverified_rotation"` (no new `trust` value). §15 leaf counts updated for the five-leaf `31-manifest-currency` vector group. — vectors: 31-manifest-currency
+- **2026-07-22 (rev 3)**: §11.3 added — normative structural ceilings: three newly-introduced acceptance floors (raw envelope size, issuer manifest `keys[]` length, artifact manifest `artifacts[]` length; the last of these carries no dedicated vector) that a verifier MUST accept within and MAY reject beyond, and the pre-existing parsed-tree nesting-depth cap (256, `canon.py`'s own parser bound — not a new, smaller ceiling) and revocation-view record cap (10,000, §12.4) formalized with their unconditional wording unchanged; §15 leaf counts updated for the new `29-limits` vector group (envelope size, key-manifest length). — vectors: 29-limits
+- **2026-07-22 (rev 2)**: §5.1 `receipt_id` prose regex corrected to `^[0-7][0-9A-HJKMNP-TV-Z]{25}$`, matching the schema's pre-existing pattern (editorial drift fix, no behavior change). — vectors: none
+- **2026-07-22 (rev 1)**: revision log introduced by attest-versioning.md §5; no normative change. — vectors: none
 
 ## References
 

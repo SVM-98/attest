@@ -421,6 +421,8 @@ def _hex_proof(proof: list[bytes]) -> list[str]:
 def _trust_material(
     *issuer_manifest_provenance: tuple[str, dict[str, Any], str],
     chains: dict[str, list[dict[str, Any]]] | None = None,
+    artifact_manifests: dict[str, dict[str, dict[str, Any]]] | None = None,
+    artifact_manifest_chains: dict[str, dict[str, list[dict[str, Any]]]] | None = None,
 ) -> dict[str, Any]:
     """Assemble a `manifests.json` payload from `(issuer_id, manifest, provenance)` triples.
 
@@ -430,11 +432,22 @@ def _trust_material(
     ...]}`, oldest first, ending with the same manifest passed under
     `manifests` for that issuer. Only vectors 14/14b populate it; every other
     vector keeps the Task-10 default of an empty `chains` object.
+
+    `artifact_manifests`/`artifact_manifest_chains` (G2/G3, attest-versioning.md
+    rev 4) are the artifact-manifest analog, keyed by issuer and then
+    `work.artifact_series` — the same shape
+    `verify.TrustStore.artifact_manifests`/`.artifact_manifest_chains` expect.
+    Only vector group 31 populates them;
+    every other vector keeps the empty-object default.
     """
     return {
         "manifests": {issuer: manifest for issuer, manifest, _ in issuer_manifest_provenance},
         "provenance": {issuer: prov for issuer, _, prov in issuer_manifest_provenance},
         "chains": chains if chains is not None else {},
+        "artifact_manifests": artifact_manifests if artifact_manifests is not None else {},
+        "artifact_manifest_chains": (
+            artifact_manifest_chains if artifact_manifest_chains is not None else {}
+        ),
     }
 
 
@@ -484,6 +497,7 @@ def write_vector(
     transparency: dict[str, Any] | None = None,
     log_keys: list[tlog.LogKey] | None = None,
     anchor_policy: anchor.AnchorPolicy | None = None,
+    revocation_evidence: dict[str, Any] | None = None,
 ) -> None:
     """`transparency`/`log_keys`/`anchor_policy` (group 28 only, design doc
     "transparency/corroboration layer") are the untrusted evidence bundle and
@@ -492,7 +506,14 @@ def write_vector(
     existing leaf (groups 01-27) omits all three, so `expected.json` gains no
     new members there; only group 28 leaves carry `transparency`/
     `corroboration`/`manifest_freshness` in `expected.json`, fed by the new
-    `transparency.json`/`log-keys.json`/`anchor-policy.json` files below."""
+    `transparency.json`/`log-keys.json`/`anchor-policy.json` files below.
+
+    `revocation_evidence` (group 33 only, v0.2 §8/§15 amendment, G5/TM-47) is
+    the untrusted transparency evidence bundle for a SPECIFIC `refund_window`
+    revocation record's `revocation-record` log entry, fed to `verify()` as
+    `revocation_evidence=` and reusing the SAME `log_keys`/`anchor_policy`
+    written above — see `verify.verify()`'s keyword-only argument of the
+    same name."""
     vector_dir = VECTORS_DIR / name
     if payload is not None:
         _write_json(vector_dir / "payload.json", payload)
@@ -516,6 +537,8 @@ def write_vector(
         _write_json(vector_dir / "log-keys.json", [_log_key_json(k) for k in log_keys])
     if anchor_policy is not None:
         _write_json(vector_dir / "anchor-policy.json", _anchor_policy_json(anchor_policy))
+    if revocation_evidence is not None:
+        _write_json(vector_dir / "revocation-evidence.json", revocation_evidence)
 
 
 # --- vector 01: valid-minimal ------------------------------------------------
@@ -1564,9 +1587,15 @@ def gen_21_canon_strict() -> None:
         expected=dict(parse_reject_base),
     )
 
-    # (b)(c)(d) depth boundary triple: whole-text nesting 255 / 256 / 257.
-    # The deep structure lives in an unknown top-level payload field "x"
-    # (vector 10 pins unknown-field tolerance: schema stays valid + warning).
+    # (b)(c)(d) depth boundary triple: whole-text nesting 255 / 256 / 257,
+    # against canon.py's own parse-time structural safety cap (256,
+    # `canon.MAX_DEPTH` — exists only to keep the parser itself safe from
+    # stack exhaustion; also the single normative nesting-depth ceiling,
+    # `validate.MAX_JSON_DEPTH` aliases it, 2026-07-22 fix wave — see
+    # `validate.py`'s `MAX_JSON_DEPTH` docstring). The deep structure lives
+    # in an unknown top-level payload field "x" (vector 10 pins
+    # unknown-field tolerance: schema stays valid + warning), so 255/256 are
+    # genuinely, cleanly signed and accepted; only 257 trips the cap.
     for depth_target, subname in ((255, "b-depth-255"), (256, "c-depth-256"), (257, "d-depth-257")):
         deep_payload = issue.build_payload(**_base_payload_kwargs())
         # envelope text depth at "x" = {envelope {payload [x nesting...]}} = 2 + levels
@@ -2526,7 +2555,11 @@ def gen_28_transparency() -> None:
     # from SHA-256(checkpoint.note_bytes) to a pinned Bitcoin header ->
     # transparency upgrades to anchored_before:<ISO-8601 UTC>. header_time
     # 1700000000 is transparency.py's own documented KAT
-    # (_iso8601: 1700000000 -> "2023-11-14T22:13:20Z"). ---
+    # (_iso8601: 1700000000 -> "2023-11-14T22:13:20Z"). No `anchor_profile`
+    # on the anchors evidence -> legacy note-bytes-only commitment (G4,
+    # attest-v0.2.md §11.1), still fully verifiable but classified with
+    # warning `anchor_note_only` (32-anchor-v2's `c-v1-note-only-warn`
+    # exercises the same classification directly against `verify_anchor`). ---
     header_hash_j = hashlib.sha256(b"attest-vectors-28j-anchor-header-v1").hexdigest()
     accumulator_start_j = hashlib.sha256(tlog.parse_checkpoint(checkpoint_a).note_bytes).digest()
     header_merkle_root_j = hashlib.sha256(accumulator_start_j).digest().hex()
@@ -2563,7 +2596,7 @@ def gen_28_transparency() -> None:
             "manifest_freshness": "not_checked",
             "ok": True,
             "errors": [],
-            "warnings": [],
+            "warnings": ["anchor_note_only"],
         },
         transparency=_evidence_a(anchors={"checkpoint": checkpoint_a, "proofs": [ots_proof_j]}),
         log_keys=[_log_key()],
@@ -2757,6 +2790,781 @@ def gen_28_transparency() -> None:
     )
 
 
+# --- vector 29 (G1 normative ceilings, attest-versioning.md §5 amendment) ---
+#
+# Three leaves, each a genuinely-signed envelope rejected purely because it
+# crosses one of the new structural ceilings (validate.py/manifests.py) —
+# never because of a schema-shape or signature problem otherwise.
+
+_LIMITS_FILLER_SEED_PREFIX = "attest-vector-29c-filler"
+
+
+def gen_29_limits() -> None:
+    # No _gen_29b_nesting_depth() (2026-07-22 fix wave): the nesting-depth
+    # ceiling is not a distinct, newly-introduced conformance-surface bound
+    # (it aliases canon.py's own pre-existing 256 parse-time cap, see
+    # validate.py's MAX_JSON_DEPTH docstring) — its boundary is already
+    # exercised by the 21-canon-strict b/c/d triple, so a dedicated leaf
+    # here would be redundant with that group.
+    _gen_29a_envelope_oversize()
+    _gen_29c_manifest_array_overflow()
+
+
+def _gen_29a_envelope_oversize() -> None:
+    """`validate.MAX_ENVELOPE_BYTES` bounds the raw envelope before any
+    parsing work — a genuinely signed receipt whose serialized size exceeds
+    it is rejected with `schema: "invalid"` at the parse boundary, never
+    reaching signature verification. The overage is comfortably over the
+    ceiling (no exact-boundary claim): the two conformance runners
+    re-serialize `envelope.json` differently (Python's replay test
+    re-dumps with `json.dumps` default separators; the TS replay test reads
+    the generator's indented file bytes directly) — always BIGGER than the
+    Python form, never smaller, so "over" stays "over" in both runners
+    regardless of which serialization is measured.
+    """
+    padding = validate.MAX_ENVELOPE_BYTES + 4096
+    payload = issue.build_payload(**_base_payload_kwargs(title="x" * padding))
+    _assert_schema_valid(payload)
+    envelope = issue.issue(payload, ISSUER_KP, ISSUER_KID)
+    envelope_len = len(json.dumps(envelope).encode("utf-8"))
+    assert envelope_len > validate.MAX_ENVELOPE_BYTES, envelope_len
+    trust = _issuer_only_trust()
+    expected = {
+        "signature": "invalid",
+        "schema": "invalid",
+        "revocation": "unknown",
+        "binding": "not_checked",
+        # The byte-ceiling check runs BEFORE any parsing, so trust is never
+        # resolved from the (never-read) payload.issuer.id — it stays at its
+        # TOFU default, same as every other precondition failure in step 0.
+        "trust": "unauthenticated_tofu",
+        "ok": False,
+        "errors_contains": [f"envelope exceeds {validate.MAX_ENVELOPE_BYTES} bytes"],
+        "warnings": [],
+    }
+    write_vector(
+        "29-limits/a-envelope-oversize",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected,
+    )
+
+
+def _gen_29c_manifest_array_overflow() -> None:
+    """`manifests.MAX_MANIFEST_KEYS` bounds the issuer key manifest's
+    `keys[]` array — checked in `verify.py` right after the manifest is
+    resolved from the trust store, before any specific key is looked up in
+    it. The receipt itself is genuinely, cleanly signed by a key that IS
+    listed in the oversized manifest; only the manifest's own size trips
+    rejection."""
+    filler_entries = [
+        manifests.key_entry(
+            f"{ISSUER_ID}/keys/2025-01#ed25519-filler-{i}",
+            keys.from_seed(
+                hashlib.sha256(f"{_LIMITS_FILLER_SEED_PREFIX}-{i}".encode()).digest()
+            ).pub,
+            KEY_VALID_FROM,
+            None,
+            "active",
+        )
+        for i in range(manifests.MAX_MANIFEST_KEYS)
+    ]
+    entries = [
+        manifests.key_entry(ISSUER_KID, ISSUER_KP.pub, KEY_VALID_FROM, None, "active"),
+        *filler_entries,
+    ]
+    assert len(entries) == manifests.MAX_MANIFEST_KEYS + 1
+    oversized_manifest = manifests.build_key_manifest(
+        ISSUER_ID, 1, MANIFEST_ISSUED_AT, entries, ISSUER_KP, ISSUER_KID
+    )
+    payload = issue.build_payload(**_base_payload_kwargs())
+    _assert_schema_valid(payload)
+    envelope = issue.issue(payload, ISSUER_KP, ISSUER_KID)
+    trust = _trust_material((ISSUER_ID, oversized_manifest, "tls"))
+    expected = {
+        "signature": "invalid",
+        "schema": "invalid",
+        "revocation": "unknown",
+        "binding": "not_checked",
+        "trust": "verified",
+        "ok": False,
+        "errors_contains": [f"issuer manifest exceeds {manifests.MAX_MANIFEST_KEYS} keys"],
+        "warnings": [],
+    }
+    write_vector(
+        "29-limits/c-manifest-array-overflow",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected=expected,
+    )
+
+
+# --- vector 30 (G6 mixed-keyset prohibition, v0.2 §2.3/§13 amendment) ------
+
+_LEGACY_ED_SEED = bytes([31]) * 32  # Ed25519-only sibling key, continuing the numbering scheme
+_LEGACY_ED_KP = keys.from_seed(_LEGACY_ED_SEED)
+_LEGACY_KID = f"{ISSUER_ID}/keys/2025-01#ed25519-legacy-1"
+
+
+def _mixed_keyset_manifest(legacy_status: str) -> dict[str, Any]:
+    """A v0.2 key manifest declaring the hybrid suite (`ISSUER_KID`, hybrid,
+    always active) alongside an Ed25519-only sibling key (`_LEGACY_KID`)
+    whose status is the caller's choice — `"active"` reproduces the
+    mixed-keyset condition v0.2 §2.3/§13 prohibits; `"retired"` is the
+    clean, completed migration (§13's ceremony: the same
+    `manifest_version` bump that introduces the hybrid key retires every
+    Ed25519-only key)."""
+    entries = [
+        _hybrid_key_entry(ISSUER_KID, ISSUER_KP, status="active"),
+        manifests.key_entry(_LEGACY_KID, _LEGACY_ED_KP.pub, KEY_VALID_FROM, None, legacy_status),
+    ]
+    body: dict[str, Any] = {
+        "issuer": ISSUER_ID,
+        "manifest_version": 1,
+        "issued_at": MANIFEST_ISSUED_AT,
+        "keys": entries,
+    }
+    signable = manifests._signable(body)
+    body["manifest_signature"] = {
+        "kid": ISSUER_KID,
+        "sig": keys.b64u(keys.sign(signable, ISSUER_KP)),
+        "sig_ml_dsa_65": keys.b64u(_oracle_sign(signable)),
+    }
+    return body
+
+
+def gen_30_mixed_keyset() -> None:
+    # (a) sibling still active: the mixed-keyset condition is present ->
+    # warning, receipt otherwise verifies clean (the warning is the whole
+    # contract, v0.2 §2.3/§13 — no result field caps "hybrid strength").
+    manifest_a = _mixed_keyset_manifest("active")
+    assert manifests.has_active_ed_only_sibling(manifest_a) is True
+    payload_a = issue.build_payload(**_base_payload_kwargs(attest_version="0.2"))
+    _assert_schema_valid(payload_a)
+    envelope_a = _hybrid_envelope(payload_a, ISSUER_KP, ISSUER_KID)
+    trust_a = _trust_material((ISSUER_ID, manifest_a, "tls"))
+    expected_a = {
+        "signature": "valid",
+        "schema": "valid",
+        "revocation": "unknown",
+        "binding": "not_checked",
+        "trust": "verified",
+        "ok": True,
+        "errors": [],
+        "warnings_contains": ["mixed_keyset_active_ed_only_sibling"],
+    }
+    write_vector(
+        "30-mixed-keyset/a-active-ed-sibling-warn",
+        payload=payload_a,
+        envelope=envelope_a,
+        envelope_raw=None,
+        trust=trust_a,
+        expected=expected_a,
+    )
+
+    # (b) sibling retired: the migration ceremony completed correctly -> no
+    # mixed-keyset condition, no warning.
+    manifest_b = _mixed_keyset_manifest("retired")
+    assert manifests.has_active_ed_only_sibling(manifest_b) is False
+    payload_b = issue.build_payload(**_base_payload_kwargs(attest_version="0.2"))
+    _assert_schema_valid(payload_b)
+    envelope_b = _hybrid_envelope(payload_b, ISSUER_KP, ISSUER_KID)
+    trust_b = _trust_material((ISSUER_ID, manifest_b, "tls"))
+    expected_b = {
+        "signature": "valid",
+        "schema": "valid",
+        "revocation": "unknown",
+        "binding": "not_checked",
+        "trust": "verified",
+        "ok": True,
+        "errors": [],
+        "warnings": [],
+    }
+    write_vector(
+        "30-mixed-keyset/b-migrated-clean",
+        payload=payload_b,
+        envelope=envelope_b,
+        envelope_raw=None,
+        trust=trust_b,
+        expected=expected_b,
+    )
+
+
+# --- vector 31: manifest currency (G2/G3, attest-versioning.md rev 4) ------
+
+# `_base_payload_kwargs`'s own default `artifact_series` — reused verbatim so
+# the receipt's `work.artifact_series` matches the artifact manifests' own
+# `series` field below (v0.1 §7.2: "series ... Matches work.artifact_series").
+_CURRENCY_SERIES = f"{ISSUER_ID}/works/EXG-001"
+_CURRENCY_RELEASED_AT_1 = "2025-02-01T00:00:00Z"
+_CURRENCY_RELEASED_AT_2 = "2025-03-01T00:00:00Z"
+
+
+def _currency_artifact_manifest(
+    version: int, manifest_version: int | None, released_at: str
+) -> dict[str, Any]:
+    artifact_entry = {
+        "role": "installer",
+        "platform": "windows-x86_64",
+        "filename": "example-game-1.0-setup.exe",
+        "size_bytes": 734003200,
+        "sha256": ARTIFACT_SHA256,
+    }
+    return manifests.build_artifact_manifest(
+        ISSUER_ID,
+        _CURRENCY_SERIES,
+        version,
+        released_at,
+        [artifact_entry],
+        ISSUER_KP,
+        ISSUER_KID,
+        manifest_version=manifest_version,
+    )
+
+
+def gen_31_manifest_currency() -> None:
+    """G2 (artifact manifest `manifest_version`) + G3 (newest-seen rule),
+    attest-versioning.md rev 4 / v0.1 §7.2-§7.3 amendment. All five leaves
+    share one receipt (the artifact-manifest currency check is independent
+    of the receipt's own signature/schema verdict — only `trust`/`warnings`
+    move) and one issuer key manifest; only the artifact-manifest trust
+    material under `manifests.json` differs per leaf."""
+    key_manifest = _manifest_material(ISSUER_ID, ISSUER_KID, ISSUER_KP)
+    am1 = _currency_artifact_manifest(1, 1, _CURRENCY_RELEASED_AT_1)
+    am2 = _currency_artifact_manifest(2, 2, _CURRENCY_RELEASED_AT_2)
+    assert manifests.check_artifact_continuity(am1, am2) is True
+    assert manifests.check_artifact_continuity(am2, am1) is False
+
+    payload = issue.build_payload(**_base_payload_kwargs())
+    _assert_schema_valid(payload)
+    envelope = issue.issue(payload, ISSUER_KP, ISSUER_KID)
+
+    # (a) rollback-rejected: the trust store's own artifact-manifest chain
+    # history already holds am2, but the manifest currently PINNED for the
+    # series is the OLDER am1 (a rollback attempt, or a stale re-import) —
+    # mirrors vector 14b's key-manifest discontinuity shape, applied to
+    # artifact manifests.
+    trust_a = _trust_material(
+        (ISSUER_ID, key_manifest, "tls"),
+        artifact_manifests={ISSUER_ID: {_CURRENCY_SERIES: am1}},
+        artifact_manifest_chains={ISSUER_ID: {_CURRENCY_SERIES: [am1, am2]}},
+    )
+    expected_a = {
+        "signature": "valid",
+        "schema": "valid",
+        "revocation": "unknown",
+        "binding": "not_checked",
+        "trust": "unverified_rotation",
+        "ok": True,
+        "errors": [],
+        "warnings": [],
+    }
+    write_vector(
+        "31-manifest-currency/a-rollback-rejected",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust_a,
+        expected=expected_a,
+    )
+
+    # (b) monotone-ok: the pinned manifest IS the chain tail (am2) -> normal,
+    # provenance-derived trust; no currency violation.
+    trust_b = _trust_material(
+        (ISSUER_ID, key_manifest, "tls"),
+        artifact_manifests={ISSUER_ID: {_CURRENCY_SERIES: am2}},
+        artifact_manifest_chains={ISSUER_ID: {_CURRENCY_SERIES: [am1, am2]}},
+    )
+    expected_b = {
+        "signature": "valid",
+        "schema": "valid",
+        "revocation": "unknown",
+        "binding": "not_checked",
+        "trust": "verified",
+        "ok": True,
+        "errors": [],
+        "warnings": [],
+    }
+    write_vector(
+        "31-manifest-currency/b-monotone-ok",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust_b,
+        expected=expected_b,
+    )
+
+    # (c) legacy-unversioned-warn: the pinned manifest predates this
+    # amendment (no `manifest_version`) -> warned, never rejected (eternal
+    # verifiability, attest-versioning.md §3).
+    am_legacy = _currency_artifact_manifest(1, None, _CURRENCY_RELEASED_AT_1)
+    assert "manifest_version" not in am_legacy
+    trust_c = _trust_material(
+        (ISSUER_ID, key_manifest, "tls"),
+        artifact_manifests={ISSUER_ID: {_CURRENCY_SERIES: am_legacy}},
+    )
+    expected_c = {
+        "signature": "valid",
+        "schema": "valid",
+        "revocation": "unknown",
+        "binding": "not_checked",
+        "trust": "verified",
+        "ok": True,
+        "errors": [],
+        "warnings": ["artifact_manifest_unversioned"],
+    }
+    write_vector(
+        "31-manifest-currency/c-legacy-unversioned-warn",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust_c,
+        expected=expected_c,
+    )
+
+    # (d) unauthenticated-ignored: a previously valid v1 followed by an
+    # unsigned v2 must not influence currency or trust at all.
+    am2_unsigned = dict(am2)
+    del am2_unsigned["manifest_signature"]
+    trust_d = _trust_material(
+        (ISSUER_ID, key_manifest, "tls"),
+        artifact_manifests={ISSUER_ID: {_CURRENCY_SERIES: am2_unsigned}},
+        artifact_manifest_chains={ISSUER_ID: {_CURRENCY_SERIES: [am1, am2_unsigned]}},
+    )
+    expected_d = {
+        "signature": "valid",
+        "schema": "valid",
+        "revocation": "unknown",
+        "binding": "not_checked",
+        "trust": "verified",
+        "ok": True,
+        "errors": [],
+        "warnings": ["artifact_manifest_unauthenticated"],
+    }
+    write_vector(
+        "31-manifest-currency/d-unauthenticated-ignored",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust_d,
+        expected=expected_d,
+    )
+
+    # (e) legacy-transition-warn-only: the first versioned manifest after a
+    # legacy one is accepted; the legacy member's absence is the only signal.
+    am_first_versioned = _currency_artifact_manifest(2, 1, _CURRENCY_RELEASED_AT_2)
+    trust_e = _trust_material(
+        (ISSUER_ID, key_manifest, "tls"),
+        artifact_manifests={ISSUER_ID: {_CURRENCY_SERIES: am_first_versioned}},
+        artifact_manifest_chains={ISSUER_ID: {_CURRENCY_SERIES: [am_legacy, am_first_versioned]}},
+    )
+    expected_e = {
+        "signature": "valid",
+        "schema": "valid",
+        "revocation": "unknown",
+        "binding": "not_checked",
+        "trust": "verified",
+        "ok": True,
+        "errors": [],
+        "warnings": ["artifact_manifest_unversioned"],
+    }
+    write_vector(
+        "31-manifest-currency/e-legacy-transition-warn-only",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust_e,
+        expected=expected_e,
+    )
+
+
+def gen_32_anchor_v2() -> None:
+    """G4 (anchor profile v2, attest-v0.2.md §11.1): the OTS commitment
+    covers the checkpoint's FULL signed note (header AND signature lines,
+    `Checkpoint.signed_note_bytes`) instead of just its unsigned header
+    (`note_bytes`) — closing TM-33's residual risk that a chosen unsigned
+    note can be pre-anchored and signed later. One receipt/checkpoint
+    fixture (independent of group 28's own `entry_a`/`checkpoint_a`, built
+    fresh here so this group stands alone) with three OTS anchor evidence
+    variants, all against the SAME checkpoint:
+
+    - (a) declares `anchor_profile: "signed-note-v2"` and the op-chain
+      genuinely commits over `signed_note_bytes` -> verifies cleanly, no
+      note-only warning.
+    - (b) also declares `"signed-note-v2"`, but the op-chain was built from
+      `SHA-256(note_bytes)` alone (the OLD v1 seed) -> the replayed chain
+      lands on a different root than pinned, so the anchor FAILS — the
+      direct demonstration that a v1-shaped commitment cannot pass as v2
+      proof of the signed note's existence (TM-33's mitigation, negative
+      case).
+    - (c) declares no `anchor_profile` at all (legacy) with a genuinely
+      v1-shaped (`note_bytes`-only) op-chain -> verifies and upgrades
+      standing exactly like pre-G4 evidence always has (eternal
+      verifiability, attest-versioning.md §3), but now carries the
+      `anchor_note_only` warning classifying it as the weaker profile.
+    """
+    payload = issue.build_payload(**_base_payload_kwargs())
+    _assert_schema_valid(payload)
+    envelope = issue.issue(payload, ISSUER_KP, ISSUER_KID)
+    trust = _issuer_only_trust()
+
+    entry = {
+        "type": "receipt",
+        "issuer": ISSUER_ID,
+        "core_sha256": tlog.receipt_core_hash(envelope),
+    }
+    entry_bytes = tlog.encode_entry(entry)
+    root = tlog.build_tree([entry_bytes])
+    checkpoint_text = _sign_checkpoint_oracle(LOG_ORIGIN, 1, root)
+    inclusion = _hex_proof(tlog.inclusion_proof([entry_bytes], 0))
+    parsed_checkpoint = tlog.parse_checkpoint(checkpoint_text)
+    note_bytes = parsed_checkpoint.note_bytes
+    signed_note_bytes = parsed_checkpoint.signed_note_bytes
+    assert signed_note_bytes != note_bytes  # sanity: the v2 seed is strictly more bytes
+
+    def _evidence(**overrides: Any) -> dict[str, Any]:
+        base: dict[str, Any] = {
+            "entry": entry,
+            "leaf_index": 0,
+            "tree_size": 1,
+            "inclusion_proof": inclusion,
+            "checkpoint": checkpoint_text,
+        }
+        base.update(overrides)
+        return base
+
+    header_time = 1700000000  # transparency.py's own documented KAT (-> 2023-11-14T22:13:20Z)
+
+    def _single_hash_ots_proof(
+        commitment_bytes: bytes, header_hash_seed: bytes
+    ) -> tuple[dict[str, Any], anchor.AnchorPolicy]:
+        header_hash = hashlib.sha256(header_hash_seed).hexdigest()
+        accumulator_start = hashlib.sha256(commitment_bytes).digest()
+        header_merkle_root = hashlib.sha256(accumulator_start).digest().hex()
+        proof = {
+            "kind": "ots",
+            "ops": [["sha256"]],
+            "header_merkle_root": header_merkle_root,
+            "header_hash": header_hash,
+            "header_time": header_time,
+        }
+        policy = anchor.AnchorPolicy(
+            pinned_headers={
+                header_hash: anchor.PinnedHeader(
+                    header_hash=header_hash, merkle_root=header_merkle_root, time=header_time
+                )
+            },
+            crqc_horizon=None,
+        )
+        return proof, policy
+
+    # --- (a) v2-valid ---
+    ots_proof_a, policy_a = _single_hash_ots_proof(
+        signed_note_bytes, b"attest-vectors-32a-v2-header-v1"
+    )
+    write_vector(
+        "32-anchor-v2/a-v2-valid",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected={
+            "signature": "valid",
+            "schema": "valid",
+            "revocation": "unknown",
+            "binding": "not_checked",
+            "trust": "verified",
+            "transparency": "anchored_before:2023-11-14T22:13:20Z",
+            "corroboration": "logged",
+            "manifest_freshness": "not_checked",
+            "ok": True,
+            "errors": [],
+            "warnings": [],
+        },
+        transparency=_evidence(
+            anchors={
+                "checkpoint": checkpoint_text,
+                "proofs": [ots_proof_a],
+                "anchor_profile": "signed-note-v2",
+            }
+        ),
+        log_keys=[_log_key()],
+        anchor_policy=policy_a,
+    )
+
+    # --- (b) v2-commit-mismatch ---
+    ots_proof_b, policy_b = _single_hash_ots_proof(
+        note_bytes, b"attest-vectors-32b-v1-shaped-header-v1"
+    )
+    assert ots_proof_b["header_merkle_root"] != ots_proof_a["header_merkle_root"]
+    write_vector(
+        "32-anchor-v2/b-v2-commit-mismatch",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected={
+            "signature": "valid",
+            "schema": "valid",
+            "revocation": "unknown",
+            "binding": "not_checked",
+            "trust": "verified",
+            "transparency": "logged",
+            "corroboration": "logged",
+            "manifest_freshness": "not_checked",
+            "ok": True,
+            "errors": [],
+            "warnings": [
+                "proof[0]: ots op-chain result does not match header_merkle_root; anchor_profile "
+                "signed-note-v2 requires the accumulator to start from "
+                "SHA256(checkpoint.signed_note_bytes) — this evidence looks like a note-v1 "
+                "commitment presented as signed-note-v2"
+            ],
+        },
+        transparency=_evidence(
+            anchors={
+                "checkpoint": checkpoint_text,
+                "proofs": [ots_proof_b],
+                "anchor_profile": "signed-note-v2",
+            }
+        ),
+        log_keys=[_log_key()],
+        anchor_policy=policy_b,
+    )
+
+    # --- (c) v1-note-only-warn ---
+    ots_proof_c, policy_c = _single_hash_ots_proof(note_bytes, b"attest-vectors-32c-v1-header-v1")
+    write_vector(
+        "32-anchor-v2/c-v1-note-only-warn",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected={
+            "signature": "valid",
+            "schema": "valid",
+            "revocation": "unknown",
+            "binding": "not_checked",
+            "trust": "verified",
+            "transparency": "anchored_before:2023-11-14T22:13:20Z",
+            "corroboration": "logged",
+            "manifest_freshness": "not_checked",
+            "ok": True,
+            "errors": [],
+            "warnings": ["anchor_note_only"],
+        },
+        transparency=_evidence(anchors={"checkpoint": checkpoint_text, "proofs": [ots_proof_c]}),
+        log_keys=[_log_key()],
+        anchor_policy=policy_c,
+    )
+
+
+def gen_33_logged_revocation() -> None:
+    """G5 (v0.2 §8/§15 amendment, TM-47): `revocation-record` becomes the
+    THIRD loggable entry type, and a `refund_window` revocation record is
+    effective ONLY when the verifier is Stage-2 capable (`log_keys`/
+    `anchor_policy` supplied — the same gate `28-transparency` already uses)
+    AND `revocation_evidence` proves the record's log entry was anchored no
+    later than the receipt's own refund-window deadline (`issued_at +
+    revocation_window_days`) — closing the backdating gap where an unlogged
+    or late-anchored revocation had no contradicting evidence.
+    `policy`/`compromised`/`none` classes are UNAFFECTED: logging remains
+    optional corroboration for them, never a gate.
+
+    One `refund_window` receipt (`REFUND_WINDOW_DAYS` = 14, `ISSUED_AT`
+    2025-07-02T13:50:00Z -> deadline 2025-07-16T13:50:00Z) with one
+    window-effective record (`REVOKED_INSIDE_WINDOW_AT`, 2025-07-10, reused
+    from `23-revocation-refund-window`) drives (a)-(c); (d) is an
+    independent `policy`-class fixture.
+
+    - (a) `revocation-record` log entry genuinely logged and OTS-anchored
+      BEFORE the deadline (header_time = `REVOKED_INSIDE_WINDOW_AT`) ->
+      honored, `revocation: "revoked"`.
+    - (b) Stage-2-capable verifier (`log_keys`/`anchor_policy` set), but NO
+      `revocation_evidence` at all for this record -> never proven logged,
+      ignored with `revocation_unlogged_deadline`.
+    - (c) `revocation_evidence` present and genuinely verifies, but the OTS
+      anchor's pinned header time (`REVOKED_AT`, 2025-08-01) is AFTER the
+      deadline -> ignored with the same warning.
+    - (d) `policy` class (not `refund_window`): a Stage-2-capable verifier
+      with no `revocation_evidence` still honors it — the deadline rule
+      never engages for this class.
+    """
+    payload = issue.build_payload(
+        **_base_payload_kwargs(
+            revocability="refund_window", revocation_window_days=REFUND_WINDOW_DAYS
+        )
+    )
+    _assert_schema_valid(payload)
+    envelope = issue.issue(payload, ISSUER_KP, ISSUER_KID)
+    issuer_manifest = _manifest_material(ISSUER_ID, ISSUER_KID, ISSUER_KP)
+    trust = _trust_material((ISSUER_ID, issuer_manifest, "tls"))
+
+    record = revocation.build_record(
+        RECEIPT_ID, "revoked", REVOKED_INSIDE_WINDOW_AT, ISSUER_KP, ISSUER_KID
+    )
+    assert revocation.verify_record(record, issuer_manifest) is True
+
+    entry = {
+        "type": "revocation-record",
+        "issuer": ISSUER_ID,
+        "record_sha256": revocation.record_hash(record),
+    }
+    entry_bytes = tlog.encode_entry(entry)
+    root = tlog.build_tree([entry_bytes])
+    checkpoint_text = _sign_checkpoint_oracle(LOG_ORIGIN, 1, root)
+    inclusion = _hex_proof(tlog.inclusion_proof([entry_bytes], 0))
+    signed_note_bytes = tlog.parse_checkpoint(checkpoint_text).signed_note_bytes
+
+    def _revocation_evidence(header_time: int) -> tuple[dict[str, Any], anchor.AnchorPolicy]:
+        """A genuine single-`["sha256"]`-op OTS anchor over
+        `SHA-256(checkpoint.signed_note_bytes)`, declaring `anchor_profile:
+        "signed-note-v2"` (G4, attest-v0.2.md §11.1) — newly produced anchors
+        MUST use the v2 commitment, same shape `32-anchor-v2/a-v2-valid`
+        uses, just with a caller-chosen (rather than the group-32 KAT) header
+        time so it can straddle the refund-window deadline."""
+        header_hash = hashlib.sha256(
+            f"attest-vectors-33-revocation-header-{header_time}".encode()
+        ).hexdigest()
+        accumulator_start = hashlib.sha256(signed_note_bytes).digest()
+        header_merkle_root = hashlib.sha256(accumulator_start).digest().hex()
+        policy = anchor.AnchorPolicy(
+            pinned_headers={
+                header_hash: anchor.PinnedHeader(
+                    header_hash=header_hash, merkle_root=header_merkle_root, time=header_time
+                )
+            },
+            crqc_horizon=None,
+        )
+        evidence = {
+            "entry": entry,
+            "leaf_index": 0,
+            "tree_size": 1,
+            "inclusion_proof": inclusion,
+            "checkpoint": checkpoint_text,
+            "anchors": {
+                "checkpoint": checkpoint_text,
+                "proofs": [
+                    {
+                        "kind": "ots",
+                        "ops": [["sha256"]],
+                        "header_merkle_root": header_merkle_root,
+                        "header_hash": header_hash,
+                        "header_time": header_time,
+                    }
+                ],
+                "anchor_profile": "signed-note-v2",
+            },
+        }
+        return evidence, policy
+
+    # --- (a) timely-logged-honored ---
+    # REVOKED_INSIDE_WINDOW_AT (2025-07-10T00:00:00Z) as unix seconds — inside
+    # the refund-window deadline (2025-07-16T13:50:00Z).
+    evidence_a, policy_a = _revocation_evidence(1752105600)
+    write_vector(
+        "33-logged-revocation/a-timely-logged-honored",
+        payload=payload,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected={
+            "signature": "valid",
+            "schema": "valid",
+            "revocation": "revoked",
+            "binding": "not_checked",
+            "trust": "verified",
+            "ok": False,
+            "errors": [],
+            "warnings": [],
+        },
+        revocation_record=record,
+        revocation_evidence=evidence_a,
+        log_keys=[_log_key()],
+        anchor_policy=policy_a,
+    )
+
+    # --- (b) unlogged-ignored-warn ---
+    write_vector(
+        "33-logged-revocation/b-unlogged-ignored-warn",
+        payload=None,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected={
+            "signature": "valid",
+            "schema": "valid",
+            "revocation": "invalid_revocation_ignored",
+            "binding": "not_checked",
+            "trust": "verified",
+            "ok": True,
+            "errors": [],
+            "warnings": ["revocation_unlogged_deadline"],
+        },
+        revocation_record=record,
+        log_keys=[_log_key()],
+        anchor_policy=_empty_anchor_policy(),
+    )
+
+    # --- (c) late-anchor-ignored ---
+    # REVOKED_AT (2025-08-01T00:00:00Z) as unix seconds — after the deadline.
+    evidence_c, policy_c = _revocation_evidence(1754006400)
+    write_vector(
+        "33-logged-revocation/c-late-anchor-ignored",
+        payload=None,
+        envelope=envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected={
+            "signature": "valid",
+            "schema": "valid",
+            "revocation": "invalid_revocation_ignored",
+            "binding": "not_checked",
+            "trust": "verified",
+            "ok": True,
+            "errors": [],
+            "warnings": ["revocation_unlogged_deadline"],
+        },
+        revocation_record=record,
+        revocation_evidence=evidence_c,
+        log_keys=[_log_key()],
+        anchor_policy=policy_c,
+    )
+
+    # --- (d) policy-class-unchanged ---
+    policy_payload = issue.build_payload(**_base_payload_kwargs(revocability="policy"))
+    _assert_schema_valid(policy_payload)
+    policy_envelope = issue.issue(policy_payload, ISSUER_KP, ISSUER_KID)
+    policy_record = revocation.build_record(
+        policy_payload["receipt_id"], "revoked", REVOKED_AT, ISSUER_KP, ISSUER_KID
+    )
+    assert revocation.verify_record(policy_record, issuer_manifest) is True
+    write_vector(
+        "33-logged-revocation/d-policy-class-unchanged",
+        payload=policy_payload,
+        envelope=policy_envelope,
+        envelope_raw=None,
+        trust=trust,
+        expected={
+            "signature": "valid",
+            "schema": "valid",
+            "revocation": "revoked",
+            "binding": "not_checked",
+            "trust": "verified",
+            "ok": False,
+            "errors": [],
+            "warnings": [],
+        },
+        revocation_record=policy_record,
+        log_keys=[_log_key()],
+        anchor_policy=_empty_anchor_policy(),
+    )
+
+
 def main() -> None:
     _clear_leaf_dirs(VECTORS_DIR)
     VECTORS_DIR.mkdir(parents=True, exist_ok=True)
@@ -2789,6 +3597,11 @@ def main() -> None:
     gen_26_hybrid()
     gen_27_valid_to_absent()
     gen_28_transparency()
+    gen_29_limits()
+    gen_30_mixed_keyset()
+    gen_31_manifest_currency()
+    gen_32_anchor_v2()
+    gen_33_logged_revocation()
     leaf_count = sum(1 for _ in VECTORS_DIR.rglob("expected.json"))
     print(f"generated {leaf_count} vector cases under {VECTORS_DIR}")
 

@@ -288,6 +288,7 @@ function evaluateUntrustedEvidence(
     anchorVerdict = verifyAnchor(anchorsEvidence, checkpoint, policy)
     warnings.push(...anchorVerdict.warnings)
     if (anchorVerdict.pqSurviving && anchorVerdict.anchoredBefore !== null) {
+      if (anchorVerdict.noteOnly) warnings.push(TRANSPARENCY_WARN.ANCHOR_NOTE_ONLY)
       const renderedAnchorTime = iso8601(anchorVerdict.anchoredBefore)
       if (renderedAnchorTime === null) {
         warnings.push(TRANSPARENCY_WARN.ANCHOR_TIME_INVALID)

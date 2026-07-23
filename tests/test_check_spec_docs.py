@@ -16,6 +16,7 @@ from tools import check_spec_docs
 from tools.check_spec_docs import REQUIRED_SECTIONS, collect_errors, main
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+SPEC_DIR = REPO_ROOT / "docs/spec"
 
 # Buyer property set used by the minimal schema fixture and pinned by the
 # minimal PC-01 row below -- kept in sync deliberately, the way the real
@@ -125,13 +126,56 @@ def _minimal_privacy(pc_rows: str | None = None) -> str:
     )
 
 
+def _minimal_versioning() -> str:
+    """A minimal attest-versioning.md fixture carrying every checked property."""
+    return (
+        "# attest-versioning — Normative Upgrade Policy\n\n"
+        "## 1. Scope and authority\n\nIntro.\n\n"
+        "## 2. The additive pattern\n\n"
+        "One exception exists: a result-classification downgrade mandated by an algorithm "
+        "lifecycle transition (§4) is NOT a breaking change and does not require a new "
+        "`attest_version`. A lifecycle transition records newly established cryptanalytic "
+        "reality about an algorithm; the protocol semantics are unchanged, and eternal "
+        "verifiability (§3) is preserved because the artifact remains verifiable — the result "
+        "simply reports what its signature is worth today.\n\n"
+        "## 3. Eternal verifiability\n\nIntro.\n\n"
+        "## 4. Algorithm lifecycle\n\n"
+        "| State | Issue | Verify | Verifier obligation |\n"
+        "| --- | --- | --- | --- |\n"
+        "| `active` | MAY issue | MUST verify | No downgrade. |\n"
+        "| `deprecated` | MUST NOT issue | MUST verify | SHOULD warn. |\n"
+        "| `unsafe` | MUST NOT issue | MUST verify with mandatory downgraded classification | "
+        "MUST cap the result classification. |\n\n"
+        "## 5. Amendment procedure\n\nIntro.\n\n"
+        "## 6. Registries\n\n"
+        "| Name | State | Introduced | Reference |\n"
+        "| --- | --- | --- | --- |\n"
+        "| `ed25519` | active | v0.1 | v0.1 §10 |\n"
+        "| `ed25519+ml-dsa-65` | active | v0.2 | v0.2 §2 |\n"
+        "\n"
+        "### 6.3 Revocation classes\n\n"
+        "| Name | State | Introduced | Reference |\n"
+        "| --- | --- | --- | --- |\n"
+        "| `none` | active | v0.1 | v0.1 §5.5 |\n"
+        "| `refund_window` | active | v0.1 | v0.1 §5.5 |\n"
+        "| `policy` | active | v0.1 | v0.1 §5.5 |\n"
+        "| `transferred` | reserved | — | Future transfer profile |\n"
+        "\n"
+        "## Revision log\n\n"
+        "- **2026-07-22 (rev 1)**: document introduced — vectors: none\n"
+    )
+
+
 def _base_docs() -> dict[str, object]:
     return {
         "threat_model": _minimal_threat_model(),
         "privacy": _minimal_privacy(),
-        "spec_v01": _minimal_spec_v01(),
-        "spec_v02": _minimal_spec_v02(),
+        "spec_v01": _minimal_spec_v01()
+        + "\n## Revision log\n\n- **2026-07-22 (rev 1)**: initial revision — vectors: none\n",
+        "spec_v02": _minimal_spec_v02()
+        + "\n## Revision log\n\n- **2026-07-22 (rev 1)**: initial revision — vectors: none\n",
         "schema": _minimal_schema(),
+        "versioning": _minimal_versioning(),
     }
 
 
@@ -447,8 +491,9 @@ def test_real_repo_docs_are_clean() -> None:
     schema = json.loads(
         (REPO_ROOT / "docs/spec/schema/attest-receipt.schema.json").read_text(encoding="utf-8")
     )
+    versioning = (SPEC_DIR / "attest-versioning.md").read_text(encoding="utf-8")
 
-    errors = collect_errors(threat_model, privacy, spec_v01, spec_v02, schema)
+    errors = collect_errors(threat_model, privacy, spec_v01, spec_v02, schema, versioning)
 
     assert errors == []
 
@@ -478,8 +523,247 @@ def test_main_exits_nonzero_when_a_document_drifts(
     monkeypatch.setattr(
         check_spec_docs, "_SCHEMA_PATH", _write(tmp_path, "s.json", json.dumps(_minimal_schema()))
     )
+    monkeypatch.setattr(
+        check_spec_docs,
+        "_VERSIONING_PATH",
+        _write(tmp_path, "versioning.md", _minimal_versioning()),
+    )
 
     assert main() == 1
+
+
+class TestVersioningDoc:
+    def test_versioning_doc_exists_and_has_required_sections(self) -> None:
+        text = (SPEC_DIR / "attest-versioning.md").read_text(encoding="utf-8")
+        assert check_spec_docs.check_versioning_sections(text) == []
+
+    def test_both_specs_have_revision_log(self) -> None:
+        for name in ("attest-v0.1.md", "attest-v0.2.md"):
+            text = (SPEC_DIR / name).read_text(encoding="utf-8")
+            assert not check_spec_docs.check_revision_logs(text, text)
+
+    def test_registry_suite_names_match_specs(self) -> None:
+        text = (SPEC_DIR / "attest-versioning.md").read_text(encoding="utf-8")
+        assert check_spec_docs.check_versioning_suite_names(text) == []
+
+    def test_lifecycle_states_are_exactly_three(self) -> None:
+        text = (SPEC_DIR / "attest-versioning.md").read_text(encoding="utf-8")
+        assert check_spec_docs.check_versioning_lifecycle_states(text) == []
+
+
+def test_versioning_doc_missing_heading_is_flagged_by_collect_errors() -> None:
+    docs = _base_docs()
+    docs["versioning"] = _minimal_versioning().replace("## 4. Algorithm lifecycle\n\n", "")
+
+    errors = collect_errors(**docs)
+
+    assert any("4. Algorithm lifecycle" in e for e in errors)
+
+
+def test_versioning_doc_demoted_heading_is_flagged_by_collect_errors() -> None:
+    docs = _base_docs()
+    docs["versioning"] = _minimal_versioning().replace(
+        "## 4. Algorithm lifecycle", "### 4. Algorithm lifecycle"
+    )
+
+    errors = collect_errors(**docs)
+
+    assert any("4. Algorithm lifecycle" in e for e in errors)
+
+
+def test_versioning_doc_missing_lifecycle_state_is_flagged_by_collect_errors() -> None:
+    docs = _base_docs()
+    docs["versioning"] = _minimal_versioning().replace(
+        "| `unsafe` | MUST NOT issue | MUST verify with mandatory downgraded classification | "
+        "MUST cap the result classification. |\n",
+        "",
+    )
+
+    errors = collect_errors(**docs)
+
+    assert any("unsafe" in e for e in errors)
+
+
+def test_versioning_doc_extra_lifecycle_state_is_flagged_by_collect_errors() -> None:
+    docs = _base_docs()
+    docs["versioning"] = _minimal_versioning().replace(
+        "| `unsafe` | MUST NOT issue | MUST verify with mandatory downgraded classification | "
+        "MUST cap the result classification. |\n",
+        "| `unsafe` | MUST NOT issue | MUST verify with mandatory downgraded classification | "
+        "MUST cap the result classification. |\n"
+        "| `frozen` | MUST NOT issue | MUST NOT verify | Reject. |\n",
+    )
+
+    errors = collect_errors(**docs)
+
+    assert any("frozen" in e or "exactly" in e for e in errors)
+
+
+def test_versioning_doc_missing_suite_name_is_flagged_by_collect_errors() -> None:
+    docs = _base_docs()
+    docs["versioning"] = _minimal_versioning().replace(
+        "| `ed25519` | active | v0.1 | v0.1 §10 |\n", ""
+    )
+
+    errors = collect_errors(**docs)
+
+    assert any("ed25519" in e for e in errors)
+
+
+def test_versioning_doc_missing_policy_revocation_row_is_flagged() -> None:
+    docs = _base_docs()
+    docs["versioning"] = _minimal_versioning().replace(
+        "| `policy` | active | v0.1 | v0.1 §5.5 |\n", ""
+    )
+
+    errors = collect_errors(**docs)
+
+    assert any("policy" in e for e in errors)
+
+
+def test_versioning_doc_missing_lifecycle_exception_is_flagged() -> None:
+    docs = _base_docs()
+    docs["versioning"] = _minimal_versioning().replace(
+        "One exception exists:", "The exception exists:"
+    )
+
+    errors = collect_errors(**docs)
+
+    assert any("One exception exists:" in e for e in errors)
+
+
+def test_versioning_doc_missing_revision_log_is_flagged_by_collect_errors() -> None:
+    docs = _base_docs()
+    docs["versioning"] = _minimal_versioning().replace(
+        "\n## Revision log\n\n- **2026-07-22 (rev 1)**: document introduced — vectors: none\n",
+        "",
+    )
+
+    errors = collect_errors(**docs)
+
+    assert any("attest-versioning.md" in e and "Revision log" in e for e in errors)
+
+
+def test_missing_revision_log_is_flagged_by_collect_errors() -> None:
+    docs = _base_docs()
+    docs["spec_v01"] = _minimal_spec_v01()  # no '## Revision log' section
+
+    errors = collect_errors(**docs)
+
+    assert any("attest-v0.1.md" in e and "Revision log" in e for e in errors)
+
+
+def test_revision_log_requires_a_grammar_valid_entry() -> None:
+    docs = _base_docs()
+    docs["spec_v01"] = _minimal_spec_v01() + "\n## Revision log\n\nIntro.\n"
+
+    errors = collect_errors(**docs)
+
+    assert any("attest-v0.1.md" in e and "revision-log entry" in e for e in errors)
+
+
+def test_revision_log_malformed_entry_is_flagged_with_its_line() -> None:
+    docs = _base_docs()
+    docs["spec_v01"] = _minimal_spec_v01() + (
+        "\n## Revision log\n\n- **2026-07-22 (rev 1)**: initial revision; vectors: none\n"
+    )
+
+    errors = collect_errors(**docs)
+
+    assert any("attest-v0.1.md" in e and "line" in e and "revision-log entry" in e for e in errors)
+
+
+# --- receipt_id §5.1 prose <-> schema.receipt_id.pattern drift guard ---------
+
+
+def _spec_v01_with_receipt_id_row(prose_pattern: str) -> str:
+    """A minimal §5.1 receipt_id table row, injected into a v0.1 fixture doc."""
+    base = _minimal_spec_v01()
+    row = f"\n\n| `receipt_id` | string, ULID (`{prose_pattern}`) | REQUIRED | ULID. |\n"
+    return base + row
+
+
+def test_receipt_id_prose_pattern_diverging_from_schema_is_an_error() -> None:
+    docs = _base_docs()
+    docs["spec_v01"] = (
+        _spec_v01_with_receipt_id_row("^[0-9A-HJKMNP-TV-Z]{26}$")
+        + "\n## Revision log\n\n- **2026-07-22 (rev 1)**: initial revision — vectors: none\n"
+    )
+    docs["schema"] = _minimal_schema()
+    docs["schema"]["properties"]["receipt_id"] = {
+        "type": "string",
+        "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+    }
+
+    errors = collect_errors(**docs)
+
+    assert any("receipt_id" in e and "diverges from" in e and "attest-v0.1.md" in e for e in errors)
+
+
+def test_receipt_id_prose_pattern_matching_schema_is_clean() -> None:
+    docs = _base_docs()
+    pattern = "^[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    docs["spec_v01"] = (
+        _spec_v01_with_receipt_id_row(pattern)
+        + "\n## Revision log\n\n- **2026-07-22 (rev 1)**: initial revision — vectors: none\n"
+    )
+    docs["schema"] = _minimal_schema()
+    docs["schema"]["properties"]["receipt_id"] = {"type": "string", "pattern": pattern}
+
+    errors = collect_errors(**docs)
+
+    assert not any("receipt_id" in e and "diverges from" in e for e in errors)
+
+
+def test_receipt_id_row_absent_from_fixture_does_not_error() -> None:
+    """Fixture docs where NEITHER side models `receipt_id` at all (the
+    common case for every other test in this file, via `_base_docs()`/
+    `_minimal_schema()`) are not a drift signal and must not be flagged —
+    the check only skips when both sides are simultaneously absent; a
+    one-sided absence (M2, 2026-07-22 fix wave 2) is fail-closed instead,
+    see `test_receipt_id_schema_pattern_absent_while_prose_present_is_an_error`
+    and `test_receipt_id_prose_row_absent_while_schema_pattern_present_is_an_error`."""
+    docs = _base_docs()
+
+    errors = collect_errors(**docs)
+
+    assert not any("receipt_id" in e for e in errors)
+
+
+def test_receipt_id_schema_pattern_absent_while_prose_present_is_an_error() -> None:
+    """M2 (2026-07-22 fix wave 2): §5.1 carries a receipt_id ULID prose
+    pattern, but the schema has no `properties.receipt_id.pattern` at all —
+    previously this fell through the old code's early `if schema_pattern is
+    None: return []`, fail-open. Must now be an explicit, fail-closed error."""
+    docs = _base_docs()
+    docs["spec_v01"] = (
+        _spec_v01_with_receipt_id_row("^[0-7][0-9A-HJKMNP-TV-Z]{25}$")
+        + "\n## Revision log\n\n- **2026-07-22 (rev 1)**: initial revision — vectors: none\n"
+    )
+    docs["schema"] = _minimal_schema()  # no receipt_id property at all
+
+    errors = collect_errors(**docs)
+
+    assert any(
+        "receipt_id" in e and "attest-v0.1.md" in e and "schema" in e.lower() for e in errors
+    )
+
+
+def test_receipt_id_prose_row_absent_while_schema_pattern_present_is_an_error() -> None:
+    """M2 companion: the schema defines `receipt_id.pattern`, but §5.1 carries
+    no receipt_id prose row at all — previously this fell through the old
+    code's early `if match is None: return []`, fail-open. Must now be an
+    explicit, fail-closed error."""
+    docs = _base_docs()  # spec_v01 has no §5.1 receipt_id row
+    docs["schema"] = _minimal_schema()
+    docs["schema"]["properties"]["receipt_id"] = {
+        "type": "string",
+        "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+    }
+
+    errors = collect_errors(**docs)
+
+    assert any("receipt_id" in e and "attest-v0.1.md" in e and "prose" in e.lower() for e in errors)
 
 
 def _write(directory: Path, name: str, content: str) -> Path:

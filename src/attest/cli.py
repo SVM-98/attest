@@ -94,6 +94,16 @@ class CliUsageError(Exception):
     """A usage/IO problem this CLI can explain better than the raw exception."""
 
 
+def _manifest_version_arg(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer >= 1") from exc
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be an integer >= 1")
+    return parsed
+
+
 # --- small I/O helpers -------------------------------------------------------
 
 
@@ -264,12 +274,27 @@ def _load_trust_dir(trust_dir: Path) -> verify.TrustStore:
         raise CliUsageError(f"--trust-dir {trust_dir} is not a directory")
 
     by_issuer: dict[str, list[dict[str, Any]]] = {}
+    # G2/G3 (attest-versioning.md rev 4): artifact manifests dropped into the
+    # same --trust-dir are grouped by their own `(issuer, series)` pair — which the
+    # spec requires to equal a receipt's `work.artifact_series` (v0.1 §7.2) —
+    # so `TrustStore.artifact_manifests`/`artifact_manifest_chains` end up
+    # keyed exactly the way `verify()` looks them up. Distinguished from key
+    # manifests by the absence of `keys[]` (a key manifest always carries it;
+    # an artifact manifest never does).
+    by_issuer_series: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for path in sorted(trust_dir.glob("*.json")):
         manifest = _read_json(path)
-        issuer = manifest.get("issuer") if isinstance(manifest, dict) else None
+        if not isinstance(manifest, dict):
+            continue
+        issuer = manifest.get("issuer")
         if not isinstance(issuer, str):
             continue
-        by_issuer.setdefault(issuer, []).append(manifest)
+        if "keys" in manifest:
+            by_issuer.setdefault(issuer, []).append(manifest)
+            continue
+        series = manifest.get("series")
+        if isinstance(series, str):
+            by_issuer_series.setdefault((issuer, series), []).append(manifest)
 
     manifests_map: dict[str, dict[str, Any]] = {}
     provenance: dict[str, str] = {}
@@ -280,7 +305,20 @@ def _load_trust_dir(trust_dir: Path) -> verify.TrustStore:
         provenance[issuer] = _PROVENANCE_BUNDLE
         chains[issuer] = ordered
 
-    return verify.TrustStore(manifests=manifests_map, provenance=provenance, chains=chains)
+    artifact_manifests_map: dict[str, dict[str, dict[str, Any]]] = {}
+    artifact_manifest_chains: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    for (issuer, series), am_versions in by_issuer_series.items():
+        am_ordered = sorted(am_versions, key=lambda m: m.get("manifest_version", 0))
+        artifact_manifests_map.setdefault(issuer, {})[series] = am_ordered[-1]
+        artifact_manifest_chains.setdefault(issuer, {})[series] = am_ordered
+
+    return verify.TrustStore(
+        manifests=manifests_map,
+        provenance=provenance,
+        chains=chains,
+        artifact_manifests=artifact_manifests_map,
+        artifact_manifest_chains=artifact_manifest_chains,
+    )
 
 
 def _safe_name(value: str) -> str:
@@ -739,6 +777,7 @@ def _cmd_manifest_artifacts(args: argparse.Namespace) -> int:
         artifacts,
         signing_kp,
         args.signing_kid,
+        manifest_version=args.manifest_version,
     )
     if not manifests.verify_artifact_manifest(manifest, key_manifest):
         raise CliUsageError(
@@ -752,6 +791,7 @@ def _cmd_manifest_artifacts(args: argparse.Namespace) -> int:
             "issuer": args.issuer,
             "series": args.series,
             "version": args.version,
+            "manifest_version": args.manifest_version,
         }
     )
     return EXIT_OK
@@ -1120,6 +1160,35 @@ def _cmd_log_anchor(args: argparse.Namespace) -> int:
             f"match this log's origin {origin!r}"
         )
 
+    # G4/I1 (attest-v0.2.md §11.1.1): an anchors evidence bundle carries
+    # exactly one anchor_profile, and every proof in it MUST commit under
+    # that profile — this command only ever produces `signed-note-v2`
+    # proofs (see below), so appending to a bundle that already carries
+    # proofs under a DIFFERENT profile would silently relabel those retained
+    # proofs' profile without re-anchoring them. Refuse instead of
+    # overwriting; check this BEFORE reading --ots-proof at all, since the
+    # append is refused regardless of what it contains.
+    existing_anchors = evidence.get("anchors")
+    existing_proofs: list[Any] = (
+        existing_anchors["proofs"]
+        if isinstance(existing_anchors, dict) and isinstance(existing_anchors.get("proofs"), list)
+        else []
+    )
+    if existing_proofs:
+        existing_profile = (
+            existing_anchors.get("anchor_profile") if isinstance(existing_anchors, dict) else None
+        )
+        if existing_profile is None:
+            existing_profile = "note-v1"
+        if existing_profile != "signed-note-v2":
+            raise CliUsageError(
+                f"{args.evidence} already carries {len(existing_proofs)} proof(s) under "
+                f"anchor_profile {existing_profile!r}; an anchors evidence bundle carries "
+                "exactly one anchor_profile and every proof MUST commit under it "
+                "(attest-v0.2.md §11.1.1) — produce a fresh signed-note-v2 bundle instead, "
+                "or re-anchor every proof in this bundle with v2 tooling"
+            )
+
     ots_proof = _read_json(
         args.ots_proof, max_bytes=_MAX_STAGE2_INPUT_BYTES["json"], input_name="--ots-proof"
     )
@@ -1129,8 +1198,8 @@ def _cmd_log_anchor(args: argparse.Namespace) -> int:
     # its content: this mirrors --attest-version selecting the signing
     # profile elsewhere in this CLI, not the fail-open "trust the artifact's
     # own self-description" antipattern (there is no accept/reject decision
-    # here — attaching is purely mechanical; `verify --transparency` is the
-    # one boundary that actually judges this evidence).
+    # here about `kind` — `verify --transparency` is still the one boundary
+    # that judges the evidence's cryptographic standing).
     new_proofs: list[dict[str, Any]] = [{**ots_proof, "kind": "ots"}]
     if args.rfc3161_token is not None:
         token_b64 = base64.b64encode(
@@ -1142,16 +1211,55 @@ def _cmd_log_anchor(args: argparse.Namespace) -> int:
         ).decode("ascii")
         new_proofs.append({"kind": "rfc3161", "token_b64": token_b64})
 
-    existing_anchors = evidence.get("anchors")
-    existing_proofs: list[Any] = (
-        existing_anchors["proofs"]
-        if isinstance(existing_anchors, dict) and isinstance(existing_anchors.get("proofs"), list)
-        else []
+    # G4/I2 (attest-v0.2.md §11.1.1): this command only ever stamps
+    # `anchor_profile: "signed-note-v2"` (below), so a --ots-proof whose
+    # op-chain does not actually commit over `signed_note_bytes` would
+    # produce evidence that mislabels its own commitment — catch that here,
+    # at attachment time, instead of only failing later inside
+    # `verify --transparency`'s fail-closed op-chain replay.
+    v2_seed = hashlib.sha256(evidence_checkpoint.signed_note_bytes).digest()
+    v2_accumulator, v2_warning = anchor.replay_ots_op_chain(v2_seed, ots_proof.get("ops"))
+    proof_root = ots_proof.get("header_merkle_root")
+    v2_matches = (
+        v2_warning is None
+        and v2_accumulator is not None
+        and isinstance(proof_root, str)
+        and v2_accumulator.hex() == proof_root
     )
+    if not v2_matches:
+        legacy_seed = hashlib.sha256(evidence_checkpoint.note_bytes).digest()
+        legacy_accumulator, legacy_warning = anchor.replay_ots_op_chain(
+            legacy_seed, ots_proof.get("ops")
+        )
+        legacy_matches = (
+            legacy_warning is None
+            and legacy_accumulator is not None
+            and isinstance(proof_root, str)
+            and legacy_accumulator.hex() == proof_root
+        )
+        if legacy_matches:
+            raise CliUsageError(
+                f"{args.ots_proof}'s op-chain was produced by pre-G4 tooling committing "
+                "note_bytes (the unsigned checkpoint header alone); anchor_profile "
+                "signed-note-v2 requires the full signed note (signed_note_bytes) — "
+                "re-produce the OTS proof against the signed checkpoint"
+            )
+        raise CliUsageError(
+            f"{args.ots_proof}'s op-chain does not replay to its own header_merkle_root "
+            f"from the signed-note-v2 seed SHA256(signed_note_bytes)={v2_seed.hex()} — "
+            "re-produce the OTS proof against this evidence's checkpoint"
+        )
+
     updated_evidence = dict(evidence)
     updated_evidence["anchors"] = {
         "checkpoint": checkpoint_text,
         "proofs": [*existing_proofs, *new_proofs],
+        # G4 (attest-v0.2.md §11.1.1): newly-produced anchor evidence MUST
+        # declare the v2 commitment profile; the seed check above already
+        # confirmed --ots-proof's op-chain replays from
+        # SHA-256(checkpoint.signed_note_bytes) (header AND signature
+        # lines), not the legacy SHA-256(checkpoint.note_bytes)-only seed.
+        "anchor_profile": "signed-note-v2",
     }
     serialized = canon.dumps(updated_evidence)
     if len(serialized) > verify._MAX_TRANSPARENCY_EVIDENCE_LEN:
@@ -1638,6 +1746,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--issuer", required=True)
     p.add_argument("--series", required=True)
     p.add_argument("--version", required=True, type=int)
+    p.add_argument(
+        "--manifest-version",
+        required=True,
+        type=_manifest_version_arg,
+        help="G2/G3 currency counter (attest-versioning.md rev 4) — distinct from --version "
+        "(the series' own release number); REQUIRED on every manifest built going forward",
+    )
     p.add_argument("--released-at", required=True)
     p.add_argument("--artifacts", required=True, type=Path, help="JSON file: array of artifacts")
     p.add_argument("--signing-kid", required=True)
