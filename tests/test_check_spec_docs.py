@@ -954,6 +954,50 @@ class TestInternetDraftSnapshot:
         assert any("exactly one" in e.lower() and "attest-v0.2.md" in e for e in errors)
 
 
+class TestConformanceDoc:
+    def test_doc_exists_and_covers_the_required_topics(self) -> None:
+        text = (REPO_ROOT / "docs" / "conformance.md").read_text(encoding="utf-8")
+        for needle in (
+            "tools/conformance_runner.py",
+            "{leaf}",
+            "attest conformant",
+            "self-certification",
+        ):
+            assert needle in text
+
+    def test_checker_reports_missing_file(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            check_spec_docs, "_CONFORMANCE_DOC_PATH", REPO_ROOT / "does-not-exist.md"
+        )
+        errors = check_spec_docs.check_conformance_doc()
+        assert any("missing" in e.lower() for e in errors)
+
+    def test_checker_is_clean_on_the_real_doc(self) -> None:
+        assert check_spec_docs.check_conformance_doc() == []
+
+    def test_checker_flags_a_removed_required_literal(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        text = (REPO_ROOT / "docs" / "conformance.md").read_text(encoding="utf-8")
+        drifted = text.replace("{leaf}", "LEAF_PLACEHOLDER")
+        assert "{leaf}" not in drifted
+        monkeypatch.setattr(
+            check_spec_docs, "_CONFORMANCE_DOC_PATH", _write(tmp_path, "c.md", drifted)
+        )
+        errors = check_spec_docs.check_conformance_doc()
+        assert any("{leaf}" in e for e in errors)
+
+    def test_main_exits_nonzero_when_doc_is_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Pins the main() wiring: check_conformance_doc() is called directly
+        # from main() (not through collect_errors()), so a test that only
+        # calls the checker function directly would stay green even if
+        # main() stopped calling it.
+        monkeypatch.setattr(
+            check_spec_docs, "_CONFORMANCE_DOC_PATH", REPO_ROOT / "does-not-exist.md"
+        )
+        assert main() == 1
+
+
 def test_versioning_doc_missing_heading_is_flagged_by_collect_errors() -> None:
     docs = _base_docs()
     docs["versioning"] = _minimal_versioning().replace("## 4. Algorithm lifecycle\n\n", "")
