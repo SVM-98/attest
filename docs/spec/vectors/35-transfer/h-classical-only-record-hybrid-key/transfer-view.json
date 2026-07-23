@@ -1,0 +1,17 @@
+[
+  {
+    "record": {
+      "holder_authorization": {
+        "sig": "ZxakQx8xvj0PFcNJQ2DPlxl2zPathLkK883HPfR9-HFgsVQNe3dXNNjDrdeejQ1aphBbkNmoZm7IiR3TxM1fAw"
+      },
+      "new_holder_pubkey": "TtMvY7818O7vyyXyii4fvchzrig1ZxsMlGD18S5FVqg",
+      "new_receipt_id": "01JZ5PDHT040G2081040G20810",
+      "receipt_id": "01JZ5PDHT0000G40R40M30E209",
+      "signature": {
+        "kid": "store.example.com/keys/2025-01#ed25519-1",
+        "sig": "mkVk-UeP-Vp8AInkkfcuV35c4ZD4iFyS-MuNmhU5neZ6X6AmYc7Ozk-tdi-YLU5QXIFFnv3b0Oz_L1zYWTSVAQ"
+      },
+      "transferred_at": "2025-07-20T00:00:00Z"
+    }
+  }
+]

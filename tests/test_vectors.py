@@ -61,6 +61,23 @@ Vector-directory conventions (a "vector case" is any directory containing
     `transparency`/`corroboration`/`manifest_freshness` in `expected.json`
     (those stay at their zero-default `not_checked`/`none`/`not_checked`,
     unasserted): this is a DIFFERENT evidence channel from `transparency.json`.
+  - optional `transfer-view.json` (group 35 only, v0.2 §17 Stage 3): a JSON
+    ARRAY of untrusted claims `[{"record": <a transfer.py record>,
+    "evidence": <§10.2 evidence bundle>}]`, fed to `verify()` as
+    `transfer_view=`, reusing group 35's own `log-keys.json`/
+    `anchor-policy.json`. Absent for every leaf outside group 35, so
+    `verify()` sees `None`. Group 35 leaves do NOT gain `transparency`/
+    `corroboration`/`manifest_freshness` either (same discipline as group 33).
+  - `chain.json` (group 36 only, v0.2 §17.5 chain-of-title audit): a leaf
+    containing this file is a SEPARATE audit surface, EXCLUDED from the
+    `verify()` parametrization above and driven instead by
+    `test_chain_audit_vectors`, which calls `transfer.audit_chain` with the
+    leaf's `chain.json` (`{"payloads", "transfer_view", "revocation_view"}`),
+    the sole trusted manifest in `manifests.json`, and `log-keys.json`/
+    `anchor-policy.json`. Its `expected.json` shape is `{"chain_valid": bool,
+    "link_status": [...], "errors_contains": [...], "warnings": [...]}`,
+    matched as: `chain_valid` <-> `result.valid` exact, `link_status` exact
+    list, `errors_contains` substring, `warnings` exact list.
 """
 
 from __future__ import annotations
@@ -71,11 +88,20 @@ from typing import Any
 
 import pytest
 
-from attest import anchor, canon, keys, manifests, tlog, verify
+from attest import anchor, canon, keys, manifests, tlog, transfer, verify
 
 VECTORS_DIR = Path(__file__).resolve().parent.parent / "docs" / "spec" / "vectors"
 
-_VECTOR_DIRS = sorted((p.parent for p in VECTORS_DIR.rglob("expected.json")), key=str)
+_LEAF_DIRS = sorted((p.parent for p in VECTORS_DIR.rglob("expected.json")), key=str)
+
+# Group 36 (chain-of-title audit, v0.2 §17.5) leaves are a SEPARATE audit
+# surface (`transfer.audit_chain`, never `verify()`) — excluded from the
+# `verify()` parametrization below and driven instead by
+# `test_chain_audit_vectors`.
+_CHAIN_DIRS = [p for p in _LEAF_DIRS if (p / "chain.json").exists()]
+_CHAIN_IDS = [str(p.relative_to(VECTORS_DIR)) for p in _CHAIN_DIRS]
+
+_VECTOR_DIRS = [p for p in _LEAF_DIRS if p not in _CHAIN_DIRS]
 _VECTOR_IDS = [str(p.relative_to(VECTORS_DIR)) for p in _VECTOR_DIRS]
 
 _TAMPER_DIRS = [p for p in _VECTOR_DIRS if (p / "manifest_pristine.json").exists()]
@@ -173,6 +199,13 @@ def _revocation_evidence(vector_dir: Path) -> dict[str, Any] | None:
     return _load_json(path)  # type: ignore[no-any-return]
 
 
+def _transfer_view(vector_dir: Path) -> list[dict[str, Any]] | None:
+    path = vector_dir / "transfer-view.json"
+    if not path.exists():
+        return None
+    return _load_json(path)  # type: ignore[no-any-return]
+
+
 @pytest.mark.parametrize("vector_dir", _VECTOR_DIRS, ids=_VECTOR_IDS)
 def test_vector_matches_spec_intended_result(vector_dir: Path) -> None:
     expected = _load_json(vector_dir / "expected.json")
@@ -190,6 +223,7 @@ def test_vector_matches_spec_intended_result(vector_dir: Path) -> None:
         log_keys=_log_keys(vector_dir),
         anchor_policy=_anchor_policy(vector_dir),
         revocation_evidence=_revocation_evidence(vector_dir),
+        transfer_view=_transfer_view(vector_dir),
     )
 
     assert result.signature == expected["signature"]
@@ -237,6 +271,45 @@ def test_manifest_tamper_breaks_self_consistency(vector_dir: Path) -> None:
     assert manifests.verify_key_manifest(tampered) is False
 
 
+def _sole_key_manifest(vector_dir: Path) -> dict[str, Any]:
+    """Group 36 only: `audit_chain` takes ONE trusted `key_manifest`, not a
+    full `TrustStore` — every group 36 leaf's `manifests.json` trusts
+    exactly one issuer, so its sole `"manifests"` value is that manifest."""
+    data = _load_json(vector_dir / "manifests.json")
+    return next(iter(data["manifests"].values()))
+
+
+@pytest.mark.parametrize("vector_dir", _CHAIN_DIRS, ids=_CHAIN_IDS)
+def test_chain_audit_vectors(vector_dir: Path) -> None:
+    """Group 36 (v0.2 §17.5, chain-of-title audit): a SEPARATE surface from
+    `verify()` — see this module's docstring for the `chain.json` shape and
+    match rules."""
+    expected = _load_json(vector_dir / "expected.json")
+    chain = _load_json(vector_dir / "chain.json")
+    key_manifest = _sole_key_manifest(vector_dir)
+    log_keys = _log_keys(vector_dir)
+    anchor_policy = _anchor_policy(vector_dir)
+    assert log_keys is not None
+    assert anchor_policy is not None
+
+    result = transfer.audit_chain(
+        chain["payloads"],
+        chain["transfer_view"],
+        chain["revocation_view"],
+        key_manifest,
+        log_keys,
+        anchor_policy,
+    )
+
+    assert result.valid == expected["chain_valid"]
+    assert list(result.link_status) == expected["link_status"]
+    for substr in expected.get("errors_contains", []):
+        assert any(substr in e for e in result.errors), (
+            f"expected a chain error containing {substr!r}, got {result.errors!r}"
+        )
+    assert list(result.warnings) == expected["warnings"]
+
+
 def test_vectors_directory_is_nonempty() -> None:
     """Guard against a silently-empty parametrize list (e.g. a wrong
     `VECTORS_DIR` path) making the whole suite above vacuously pass."""
@@ -246,10 +319,14 @@ def test_vectors_directory_is_nonempty() -> None:
     # leaves (28, 2026-07-18) + 2 normative-ceiling leaves (29, 2026-07-22) +
     # 2 mixed-keyset leaves (30, 2026-07-22) + 5 manifest-currency leaves
     # (31, 2026-07-22) + 3 anchor-profile-v2 leaves (32, 2026-07-22, G4) +
-    # 4 logged-revocation leaves (33, 2026-07-23, G5/TM-47):
+    # 4 logged-revocation leaves (33, 2026-07-23, G5/TM-47) + 11 transfer
+    # leaves (35, 2026-07-23, §17 Stage 3) + 4 transfer-chain leaves (36,
+    # 2026-07-23, §17.5):
     # 19 a/b, 20 a-c, 21 a-g, 22 a-c, 23 a/b, 24, 25 a/b, 26 a-h, 28 a-n,
-    # 29 a/c, 30 a/b, 31 a-e, 32 a-c, 33 a-d.
-    assert len(_VECTOR_DIRS) >= 82
+    # 29 a/c, 30 a/b, 31 a-e, 32 a-c, 33 a-d, 35 a-k, 36 a-d. Counted over
+    # `_LEAF_DIRS` (ALL leaves, groups 35/36's chain-audit leaves included) —
+    # `_VECTOR_DIRS` alone (the `verify()`-routed subset) excludes them.
+    assert len(_LEAF_DIRS) >= 97
 
 
 _CANONICAL_DIRS = [p for p in _VECTOR_DIRS if (p / "canonical.json").exists()]

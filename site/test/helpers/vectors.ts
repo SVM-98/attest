@@ -23,8 +23,8 @@ export function findLeafDirs(root = VECTORS_ROOT): string[] {
 }
 export const vectorId = (dir: string) => relative(VECTORS_ROOT, dir).split(sep).join('/')
 
-const loadJsonStrict = (p: string): JsonObject =>
-  loadsStrict(new Uint8Array(readFileSync(p))) as JsonObject
+const loadJsonValueStrict = (p: string): JsonValue => loadsStrict(new Uint8Array(readFileSync(p))) as JsonValue
+const loadJsonStrict = (p: string): JsonObject => loadJsonValueStrict(p) as unknown as JsonObject
 
 export function envelopeBytes(dir: string): Uint8Array {
   const raw = join(dir, 'envelope.raw.json')
@@ -88,6 +88,39 @@ export function logKeys(dir: string): LogKey[] | null {
 export function revocationEvidence(dir: string): JsonValue | null {
   const p = join(dir, 'revocation-evidence.json')
   return existsSync(p) ? loadJsonStrict(p) : null
+}
+// group 35 (transfer conformance corpus, v0.2 §17 Stage 3) only — mirrors
+// verifiers/ts/test/helpers/vectors.ts's loader of the same name. A
+// DIFFERENT evidence channel from transparency.json: fed to verify() as
+// transferView, reusing group 35's own logKeys/anchorPolicy.
+export function transferView(dir: string): JsonValue[] | null {
+  const p = join(dir, 'transfer-view.json')
+  return existsSync(p) ? (loadJsonValueStrict(p) as unknown as JsonValue[]) : null
+}
+// group 36 (transfer-chain conformance corpus, v0.2 §17.5) only — mirrors
+// verifiers/ts/test/helpers/vectors.ts's loader of the same name. A leaf
+// containing chain.json is routed to runChainAudit instead of runVerify().
+export interface ChainInput {
+  payloads: JsonObject[]
+  transferView: JsonValue[]
+  revocationView: JsonValue[]
+}
+export function chainInput(dir: string): ChainInput | null {
+  const p = join(dir, 'chain.json')
+  if (!existsSync(p)) return null
+  const parsed = loadJsonValueStrict(p) as unknown as JsonObject
+  return {
+    payloads: parsed.payloads as unknown as JsonObject[],
+    transferView: parsed.transfer_view as unknown as JsonValue[],
+    revocationView: parsed.revocation_view as unknown as JsonValue[],
+  }
+}
+// group 36 only: auditChain takes ONE trusted keyManifest, not a full
+// TrustStore — every group 36 leaf's manifests.json trusts exactly one
+// issuer, so its sole `manifests` value is that manifest.
+export function soleKeyManifest(dir: string): JsonObject {
+  const store = trustStore(dir)
+  return Object.values(store.manifests)[0]!
 }
 export function anchorPolicy(dir: string): AnchorPolicy | null {
   const p = join(dir, 'anchor-policy.json')

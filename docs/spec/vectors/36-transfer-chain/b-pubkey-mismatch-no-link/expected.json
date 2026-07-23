@@ -1,0 +1,10 @@
+{
+  "chain_valid": false,
+  "errors_contains": [
+    "chain link 1: new receipt buyer.pubkey != new_holder_pubkey"
+  ],
+  "link_status": [
+    "invalid"
+  ],
+  "warnings": []
+}

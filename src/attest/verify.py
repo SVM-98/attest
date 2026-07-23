@@ -28,7 +28,18 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
-from attest import anchor, canon, commitment, keys, manifests, pq, revocation, tlog, validate
+from attest import (
+    anchor,
+    canon,
+    commitment,
+    keys,
+    manifests,
+    pq,
+    revocation,
+    tlog,
+    transfer,
+    validate,
+)
 from attest import transparency as transparency_module
 
 _ALG = "Ed25519"  # hard-coded — never selected from any field, mirrors issue.py
@@ -70,6 +81,20 @@ _REVOCABILITY_REFUND_WINDOW = "refund_window"
 _REVOCABILITY_POLICY = "policy"
 
 _RECORD_STATUS_REVOKED = "revoked"
+
+# v0.2 Stage 3 (§17, issuer-mediated transfer): old-receipt extinguishment via
+# a `status: "transferred"` revocation record, honored only when BACKED by an
+# authenticated, log-included transfer record (§17.3's consent gate). The
+# literal is deliberately reused for both the record's own `status` field and
+# the reachable `revocation` result value — mirrors `_RECORD_STATUS_REVOKED`/
+# `_REVOCATION_REVOKED`'s existing dual use above.
+_REVOCATION_TRANSFERRED = "transferred"
+
+# Fixed literals (v0.2 §17.2-§17.4, verbatim; TS parity: messages.ts).
+_WARN_TRANSFERRED_REVOCATION_UNBACKED = "transferred_revocation_unbacked"
+_WARN_TRANSFER_RECORD_UNLOGGED = "transfer_record_unlogged"
+_WARN_TRANSFER_NOT_YET_TRANSFERABLE = "transfer_not_yet_transferable"
+_WARN_TRANSFER_DOUBLE_ASSIGNMENT = "transfer_double_assignment_conflict"
 
 _BINDING_PROVEN = "proven"
 _BINDING_NOT_PROVEN = "not_proven"
@@ -190,6 +215,10 @@ class VerificationResult:
     schema: str  # "valid" | "invalid" | "not_checked"
     revocation: (
         str  # "unknown" | "not_revoked_as_of:<T>" | "revoked" | "invalid_revocation_ignored"
+        # | "transferred" (v0.2 §17.3, Stage 3: a BACKED status:"transferred"
+        # revocation record extinguishes the old receipt — reachable only
+        # under Stage-3-capable verification, i.e. a caller that evaluates
+        # `transfer_view`)
     )
     binding: str  # "proven" | "not_proven" | "not_checked"
     trust: str  # "verified" | "unauthenticated_tofu" | "unverified_rotation"
@@ -211,11 +240,20 @@ class VerificationResult:
         `invalid_revocation_ignored` and `unknown`/`not_revoked_as_of:<T>` do
         NOT affect `ok` — an ignored-by-class or unverified revocation record
         must never degrade a receipt's validity (that would defeat the
-        revocability:none irrevocability guarantee, design vector 16)."""
+        revocability:none irrevocability guarantee, design vector 16).
+
+        v0.2 Stage 3 (design doc §4): `revocation == "transferred"` caps `ok`
+        the same way `"revoked"` already does — a BACKED transfer record
+        extinguishes the old receipt exactly as effectively as a plain
+        revocation, it is simply reported on a distinct value so a caller can
+        tell "sold" from "revoked" on the same feed. Reachable only under
+        Stage-3-capable verification (a caller that evaluates
+        `transfer_view`); a verifier that never does keeps v0.1's `ok`
+        formula unchanged."""
         return (
             self.signature == _SIG_VALID
             and self.schema == _SCHEMA_VALID
-            and self.revocation != _REVOCATION_REVOKED
+            and self.revocation not in (_REVOCATION_REVOKED, _REVOCATION_TRANSFERRED)
             and not self.errors
         )
 
@@ -683,6 +721,136 @@ def _revocation_deadline_satisfied(
     return False
 
 
+def _resolve_transfer_backing(
+    payload: dict[str, Any],
+    transfer_view: list[dict[str, Any]],
+    issuer_manifest: dict[str, Any],
+    issuer_id: str | None,
+    log_keys: list[tlog.LogKey] | None,
+    anchor_policy: anchor.AnchorPolicy | None,
+    warnings: list[str],
+) -> dict[str, Any] | None:
+    """v0.2 §17.2-§17.4 (Stage 3): the winning, BACKED transfer record for
+    `payload`'s own `receipt_id` among `transfer_view`'s untrusted claims
+    (`{"record": <transfer record>, "evidence": <§10.2 evidence bundle>}`),
+    or `None` if no claim survives every gate below.
+
+    `transfer_view` is materialized once at the untrusted boundary — the
+    SAME `canon.dumps`/size-bound/`except Exception` confinement
+    `_revocation_deadline_satisfied` already applies to `revocation_evidence`
+    — so every later phase sees ordinary JSON values, never a stateful/
+    hostile mapping or list a caller constructed.
+
+    Per claim, in this exact order (§17.3's consent gate plus §17.7/§17.2):
+
+    1. `record` is a dict whose `receipt_id` equals `payload`'s own — else
+       the claim is irrelevant to this receipt and is skipped silently.
+    2. `transfer.verify_record_signature(record, issuer_manifest)` — the
+       issuer's own signature (hoisting `manifests.verify_key_manifest` once
+       here, mirroring `_classify_revocation`'s own hoisting of the same
+       check — this function is called at most once per classification).
+       On failure: `_WARN_TRANSFERRED_REVOCATION_UNBACKED` (deduplicated),
+       skip.
+    3. `payload["buyer"]["pubkey"]` is a non-null string AND
+       `transfer.verify_authorization(record, pubkey)` — the OLD receipt's
+       own holder consented. Same unbacked warning on failure, skip.
+    4. If `payload["license"]["not_transferable_before"]` is present: both
+       timestamps parse (fail-closed) and `record["transferred_at"]` is not
+       earlier than it — else `_WARN_TRANSFER_NOT_YET_TRANSFERABLE`, skip.
+    5. Stage-2 capability (`log_keys` AND `anchor_policy` both supplied) and
+       `transfer.record_logged_standing(...)` proves this record's own
+       `transfer-record` log entry reached at least `logged` standing — else
+       `_WARN_TRANSFER_RECORD_UNLOGGED`, skip.
+
+    Survivors are `(leaf_index, record)` pairs; two or more is a double
+    assignment (§17.4) — `_WARN_TRANSFER_DOUBLE_ASSIGNMENT` — and the
+    EARLIEST log index (first-logged) wins.
+    """
+    try:
+        serialized = canon.dumps(transfer_view)
+        if len(serialized) > _MAX_TRANSPARENCY_EVIDENCE_LEN:
+            return None
+        materialized = json.loads(serialized)
+    # Adversarial-boundary confinement (never BaseException), mirroring
+    # `_revocation_deadline_satisfied`: a hostile `transfer_view` list/dict's
+    # `__eq__`/`__getitem__` must not escape as a bare exception.
+    except Exception:
+        return None
+    if not isinstance(materialized, list):
+        return None
+
+    receipt_id = payload.get("receipt_id")
+    manifest_ok = manifests.verify_key_manifest(issuer_manifest)
+
+    def _append_once(warning: str) -> None:
+        if warning not in warnings:
+            warnings.append(warning)
+
+    survivors: dict[str, tuple[int, dict[str, Any]]] = {}
+    for claim in materialized:
+        if not isinstance(claim, dict):
+            continue
+        record = claim.get("record")
+        if not isinstance(record, dict) or record.get("receipt_id") != receipt_id:
+            continue
+
+        if not manifest_ok or not transfer.verify_record_signature(record, issuer_manifest):
+            _append_once(_WARN_TRANSFERRED_REVOCATION_UNBACKED)
+            continue
+
+        buyer = payload.get("buyer")
+        holder_pubkey = buyer.get("pubkey") if isinstance(buyer, dict) else None
+        if not isinstance(holder_pubkey, str) or not transfer.verify_authorization(
+            record, holder_pubkey
+        ):
+            _append_once(_WARN_TRANSFERRED_REVOCATION_UNBACKED)
+            continue
+
+        license_block = payload.get("license")
+        not_transferable_before = (
+            license_block.get("not_transferable_before")
+            if isinstance(license_block, dict)
+            else None
+        )
+        if not_transferable_before is not None:
+            transferred_at = _parse_iso(record.get("transferred_at"))
+            floor = _parse_iso(not_transferable_before)
+            honored = False
+            if transferred_at is not None and floor is not None:
+                try:
+                    honored = transferred_at >= floor
+                except TypeError:
+                    honored = False  # incomparable naive/aware mix — fail closed
+            if not honored:
+                _append_once(_WARN_TRANSFER_NOT_YET_TRANSFERABLE)
+                continue
+
+        leaf_index = None
+        if log_keys is not None and anchor_policy is not None:
+            leaf_index = transfer.record_logged_standing(
+                record,
+                claim.get("evidence"),
+                issuer_id if issuer_id is not None else "",
+                log_keys,
+                anchor_policy,
+                warnings,
+            )
+        if leaf_index is None:
+            _append_once(_WARN_TRANSFER_RECORD_UNLOGGED)
+            continue
+
+        record_hash = transfer.record_hash(record)
+        previous = survivors.get(record_hash)
+        if previous is None or leaf_index < previous[0]:
+            survivors[record_hash] = (leaf_index, record)
+
+    if not survivors:
+        return None
+    if len(survivors) > 1:
+        _append_once(_WARN_TRANSFER_DOUBLE_ASSIGNMENT)
+    return min(survivors.values(), key=lambda item: item[0])[1]
+
+
 def _classify_revocation(
     payload: dict[str, Any],
     revocation_view: list[dict[str, Any]] | None,
@@ -693,6 +861,7 @@ def _classify_revocation(
     log_keys: list[tlog.LogKey] | None = None,
     anchor_policy: anchor.AnchorPolicy | None = None,
     revocation_evidence: dict[str, Any] | None = None,
+    transfer_view: list[dict[str, Any]] | None = None,
 ) -> str:
     """§6 step 6 / §3.1: revocation-by-class.
 
@@ -738,6 +907,21 @@ def _classify_revocation(
     padding past the cap. For `none` (irrevocable) a revocation can never
     affect `ok`, so it is a non-fatal warning. In both cases revocation is
     `"unknown"`.
+
+    v0.2 Stage 3 (§17.3, design doc §4): once the `"revoked"`-status logic
+    above has run to completion WITHOUT itself yielding `_REVOCATION_REVOKED`
+    — byte-identical to pre-Stage-3 behavior; this ordering is what keeps
+    every existing conformance leaf unchanged — an authenticated, matching
+    `status == "transferred"` record is additionally considered, for ALL
+    revocability classes, `none` included (the consent-gate principle,
+    §17.3): a BACKED winner (see `_resolve_transfer_backing`) yields
+    `_REVOCATION_TRANSFERRED`; otherwise the outcome reverts to whatever the
+    `"revoked"`-status logic already computed, and
+    `_WARN_TRANSFERRED_REVOCATION_UNBACKED` is appended UNLESS the resolver
+    itself already appended a more specific warning
+    (`transfer_record_unlogged`/`transfer_not_yet_transferable`) or
+    `transfer_view` was never supplied at all — in which case the resolver is
+    never reached, and this function appends the unbacked warning directly.
     """
     if not revocation_view:  # None or empty: no data, no freshness anchor either way
         return _REVOCATION_UNKNOWN
@@ -786,7 +970,11 @@ def _classify_revocation(
 
     # Effective revocations for THIS receipt: matching receipt_id, authenticated,
     # and status == "revoked". Matching-but-unauthenticated records are warned.
+    # A matching, authenticated `status == "transferred"` record (Stage 3,
+    # §17.3) is collected separately — it is not a "revoked"-status statement,
+    # so it plays no part in the "revoked"-status dispatch below.
     valid: list[dict[str, Any]] = []
+    transferred_matches: list[dict[str, Any]] = []
     for record in revocation_view:
         if not isinstance(record, dict) or record.get("receipt_id") != receipt_id:
             continue
@@ -795,55 +983,108 @@ def _classify_revocation(
             continue
         if record.get("status") == _RECORD_STATUS_REVOKED:
             valid.append(record)
+        elif record.get("status") == _REVOCATION_TRANSFERRED:
+            transferred_matches.append(record)
 
-    if revocability == _REVOCABILITY_NONE:
-        if valid:
-            warnings.append(
-                "revocation record ignored: license.revocability is 'none' (irrevocable)"
-            )
-            return _REVOCATION_INVALID_IGNORED
-        return not_revoked
-
-    if revocability == _REVOCABILITY_POLICY:
-        if valid:
-            return _REVOCATION_REVOKED
-        return not_revoked
-
-    if revocability == _REVOCABILITY_REFUND_WINDOW:
-        window_end = _refund_window_end(payload)
-        effective = [r for r in valid if _within_refund_window(r, window_end)]
-        if effective:
-            # G5 (TM-47): a Stage-2-capable verifier MUST additionally apply
-            # the deadline-effectiveness rule — a window-effective record is
-            # honored only with evidence proving it was logged and anchored
-            # no later than `window_end`. A verifier that never supplies
-            # log_keys/anchor_policy at all is not Stage-2 capable, so the
-            # rule does not engage and v0.1 semantics stand.
-            if log_keys is not None and anchor_policy is not None:
-                issuer_id = (
-                    issuer_manifest.get("issuer") if isinstance(issuer_manifest, dict) else None
+    def _revoked_class_result() -> str:
+        """The pre-Stage-3 `"revoked"`-status dispatch, unchanged — kept as a
+        nested function purely so its result can be captured before the
+        Stage 3 transferred-class check runs (see the enclosing docstring)."""
+        if revocability == _REVOCABILITY_NONE:
+            if valid:
+                warnings.append(
+                    "revocation record ignored: license.revocability is 'none' (irrevocable)"
                 )
-                if not _revocation_deadline_satisfied(
-                    effective,
-                    revocation_evidence,
-                    issuer_id if isinstance(issuer_id, str) else None,
-                    log_keys,
-                    anchor_policy,
-                    window_end,
-                    warnings,
-                ):
-                    warnings.append(_WARN_REVOCATION_UNLOGGED_DEADLINE)
-                    return _REVOCATION_INVALID_IGNORED
-            return _REVOCATION_REVOKED
-        if valid:  # matched and verified, but every one fell outside the window
-            warnings.append(f"revocation record for {receipt_id!r} outside refund window, ignored")
-            return _REVOCATION_INVALID_IGNORED
+                return _REVOCATION_INVALID_IGNORED
+            return not_revoked
+
+        if revocability == _REVOCABILITY_POLICY:
+            if valid:
+                return _REVOCATION_REVOKED
+            return not_revoked
+
+        if revocability == _REVOCABILITY_REFUND_WINDOW:
+            window_end = _refund_window_end(payload)
+            effective = [r for r in valid if _within_refund_window(r, window_end)]
+            if effective:
+                # G5 (TM-47): a Stage-2-capable verifier MUST additionally
+                # apply the deadline-effectiveness rule — a window-effective
+                # record is honored only with evidence proving it was logged
+                # and anchored no later than `window_end`. A verifier that
+                # never supplies log_keys/anchor_policy at all is not
+                # Stage-2 capable, so the rule does not engage and v0.1
+                # semantics stand.
+                if log_keys is not None and anchor_policy is not None:
+                    deadline_issuer_id = (
+                        issuer_manifest.get("issuer") if isinstance(issuer_manifest, dict) else None
+                    )
+                    if not _revocation_deadline_satisfied(
+                        effective,
+                        revocation_evidence,
+                        deadline_issuer_id if isinstance(deadline_issuer_id, str) else None,
+                        log_keys,
+                        anchor_policy,
+                        window_end,
+                        warnings,
+                    ):
+                        warnings.append(_WARN_REVOCATION_UNLOGGED_DEADLINE)
+                        return _REVOCATION_INVALID_IGNORED
+                return _REVOCATION_REVOKED
+            if valid:  # matched and verified, but every one fell outside the window
+                warnings.append(
+                    f"revocation record for {receipt_id!r} outside refund window, ignored"
+                )
+                return _REVOCATION_INVALID_IGNORED
+            return not_revoked
+
+        # Unknown/malformed revocability: schema validation (step 5, already
+        # run before this is ever called) should reject this payload outright
+        # — fail closed by never honoring a match under an unrecognized class.
         return not_revoked
 
-    # Unknown/malformed revocability: schema validation (step 5, already run
-    # before this is ever called) should reject this payload outright — fail
-    # closed by never honoring a match under an unrecognized class.
-    return not_revoked
+    revoked_result = _revoked_class_result()
+    if revoked_result == _REVOCATION_REVOKED:
+        return revoked_result
+
+    # --- Stage 3 (§17.3): transferred-class backing, considered only once
+    # the "revoked"-status logic above did NOT itself yield "revoked" — and
+    # for ALL revocability classes, `none` included (the consent-gate
+    # principle).
+    if transferred_matches:
+        if transfer_view is None:
+            # The resolver is never reached at all — this function is the
+            # only place left to report the unbacked outcome.
+            if _WARN_TRANSFERRED_REVOCATION_UNBACKED not in warnings:
+                warnings.append(_WARN_TRANSFERRED_REVOCATION_UNBACKED)
+            return _REVOCATION_INVALID_IGNORED
+
+        manifest_issuer_id = (
+            issuer_manifest.get("issuer") if isinstance(issuer_manifest, dict) else None
+        )
+        winner = _resolve_transfer_backing(
+            payload,
+            transfer_view,
+            issuer_manifest,
+            manifest_issuer_id if isinstance(manifest_issuer_id, str) else None,
+            log_keys,
+            anchor_policy,
+            warnings,
+        )
+        if winner is not None:
+            return _REVOCATION_TRANSFERRED
+        if not any(
+            warning in warnings
+            for warning in (
+                _WARN_TRANSFERRED_REVOCATION_UNBACKED,
+                _WARN_TRANSFER_RECORD_UNLOGGED,
+                _WARN_TRANSFER_NOT_YET_TRANSFERABLE,
+                _WARN_TRANSFER_DOUBLE_ASSIGNMENT,
+            )
+        ):
+            warnings.append(_WARN_TRANSFERRED_REVOCATION_UNBACKED)
+        return _REVOCATION_INVALID_IGNORED
+
+    return revoked_result
 
 
 def _check_binding_salt(
@@ -907,6 +1148,7 @@ def verify(
     log_keys: list[tlog.LogKey] | None = None,
     anchor_policy: anchor.AnchorPolicy | None = None,
     revocation_evidence: dict[str, Any] | None = None,
+    transfer_view: list[dict[str, Any]] | None = None,
 ) -> VerificationResult:
     """§6 steps 0-7. `max_revocation_records` bounds the untrusted revocation
     view: a larger view is not evaluated (revocation `"unknown"`). It fails
@@ -940,6 +1182,19 @@ def verify(
     engages and v0.1 semantics are unchanged — this is what keeps every
     pre-G5 caller's behavior byte-for-byte identical. `policy`/`compromised`/
     `none` revocability classes are entirely unaffected by this parameter.
+
+    `transfer_view` is v0.2 Stage 3's (§17) evidence channel — the SECOND
+    sanctioned exception to "Stage 2 is purely informational", after G5's
+    `revocation_evidence`: an untrusted list of claims, each `{"record": <a
+    transfer.py transfer record>, "evidence": <§10.2 evidence bundle>}`,
+    reusing the SAME `log_keys`/`anchor_policy` Stage-2-capability gate
+    (both supplied). A `status: "transferred"` record in `revocation_view`
+    is honored — `revocation: "transferred"`, capping `ok` the same way
+    `"revoked"` already does — only when this channel proves a BACKED
+    transfer record for the same `receipt_id`; see
+    `_resolve_transfer_backing` and `_classify_revocation`. A caller that
+    never supplies `transfer_view` sees ZERO behavior change, exactly like
+    every other Stage 2/3 addition.
     """
     # Caller-contract enforcement (security): a non-list `revocation_view`
     # must fail loud. If a lone record OBJECT slipped through here,
@@ -949,6 +1204,11 @@ def verify(
     # security check. `None` (no view) stays valid.
     if revocation_view is not None and not isinstance(revocation_view, list):
         raise TypeError("revocation_view must be a list of records or None")
+    # Same caller-contract enforcement, extended to the Stage 3 channel: a
+    # lone claim OBJECT must fail loud rather than be silently iterated as
+    # dict keys by `_resolve_transfer_backing`.
+    if transfer_view is not None and not isinstance(transfer_view, list):
+        raise TypeError("transfer_view must be a list of claims or None")
 
     errors: list[str] = []
     warnings: list[str] = []
@@ -1349,6 +1609,7 @@ def verify(
             log_keys=log_keys,
             anchor_policy=anchor_policy,
             revocation_evidence=revocation_evidence,
+            transfer_view=transfer_view,
         )
         binding_result = (
             _classify_binding(payload, disclosure)
