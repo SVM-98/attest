@@ -167,7 +167,11 @@ checkable rather than merely asserted.
 What is given up is real and worth naming: JOSE's mature multi-language
 tooling ecosystem (JWK sets, negotiable `alg`/`kid` headers, broad library
 support) and COSE's constrained-device profile (compact binary framing with
-no canonicalization pass required on a small embedded verifier). attest's
+no *payload* canonicalization pass required on a small embedded verifier —
+COSE_Sign1 still deterministically encodes a `Sig_structure` from the
+protected header and payload per RFC 9052 §4.4, as stated above; what it
+avoids is canonicalizing a parsed JSON payload the way attest-JCS does).
+attest's
 own `kid` and `alg` fields (v0.1 §4.1) borrow JOSE's vocabulary for
 readability without adopting JOSE's negotiation model: `alg` is pinned per
 `attest_version` and is never used for verifier-side algorithm dispatch — the
@@ -229,7 +233,7 @@ attest answers an adjacent but different question about a different
 relationship to the same asset: not what the asset is or how it was made,
 but that a license to hold or use a copy of it was granted, by whom, to
 whom, and under what terms — a signed side-document (the receipt envelope,
-v0.1 §4) that references an artifact by hash (`work.artifact_sha256` and
+v0.1 §4) that references an artifact by hash (`work.artifacts[].sha256` and
 related fields) rather than describing the asset's own provenance. The
 honest boundary is not that a manifest is structurally incapable of
 carrying licensing information — C2PA permits externally-defined and custom

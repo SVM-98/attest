@@ -88,14 +88,21 @@
         Internet-Draft form, but the living specification remains
         authoritative, and a conflict between this document and the living
         specification is resolved in the living specification's favor.
-        Within this document specifically, the core receipt structure is
-        specified normatively by this draft's own payload field registry
-        (<xref target="payload-registry"/>) and the field rules stated
-        throughout this document, never by incorporating the schema itself
-        as normative text: <tt>attest-receipt.schema.json</tt> is this
-        draft's machine-readable reference implementation artifact, which
-        an implementation MAY validate against (<xref target="verify"/>
-        Step 5).</t>
+        Within this document specifically, a payload <bcp14>MUST</bcp14>
+        satisfy the structural constraints of the core receipt schema:
+        those constraints are precisely the ones expressed by
+        <tt>attest-receipt.schema.json</tt> in the attest source
+        repository, EXCEPT its Stage 3 (v0.2 §17.8) holder-binding
+        conditional on <tt>license.transferable</tt> and
+        <tt>buyer.pubkey</tt>, which belongs to the Stage 3 extension
+        (<xref target="extensions"/>) and is outside this profile's
+        normative surface. This draft's own payload field registry
+        (<xref target="payload-registry"/>) is a descriptive, prose
+        summary of that same structure, kept in step with it, never a
+        second and independent normative source: the schema itself,
+        minus that one named Stage 3 conditional, is the precise
+        structural authority a conforming implementation validates
+        against (<xref target="verify"/> Step 5).</t>
         <t>This document mirrors attest-v0.1.md at revision 5.</t>
         <t>This document mirrors attest-v0.2.md at revision 6, for the
         complete core/hybrid surface it normatively incorporates: Section 2
@@ -549,7 +556,43 @@ buyer signs: UTF8("Attest-binding-challenge-v1") || 0x00
         hybrid error literals of the living specification's v0.2 §3.1
         verbatim (or a superset containing them), so that
         cross-implementation conformance testing can match on literal
-        text; this document does not transcribe them.</t>
+        text; <xref target="tbl-hybrid-errors"/> transcribes that table
+        verbatim.</t>
+        <table anchor="tbl-hybrid-errors">
+          <name>Hybrid error-literal table (verbatim, living specification v0.2 §3.1)</name>
+          <thead>
+            <tr><th>Literal (verbatim)</th><th>Emitted when</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><tt>hybrid envelope requires exactly two
+            signatures</tt></td><td><tt>signatures</tt> length ≠
+            2.</td></tr>
+            <tr><td><tt>malformed signature block</tt></td><td>either
+            signature entry is not an object.</td></tr>
+            <tr><td><tt>hybrid envelope requires algs Ed25519 and
+            ML-DSA-65 in order</tt></td><td>entry 0/1 <tt>alg</tt> is not
+            exactly <tt>["Ed25519", "ML-DSA-65"]</tt> in that order
+            (includes a duplicated <tt>alg</tt>).</td></tr>
+            <tr><td><tt>hybrid envelope signatures must share a single
+            kid</tt></td><td>the two entries' <tt>kid</tt> values
+            differ.</td></tr>
+            <tr><td><tt>malformed signature block: 'kid' must be a
+            string</tt></td><td>the shared <tt>kid</tt> is not a
+            string.</td></tr>
+            <tr><td><tt>malformed signature block: 'sig' must be a
+            string</tt></td><td>either signature entry's <tt>sig</tt> is
+            not a string.</td></tr>
+            <tr><td><tt>key entry for kid {kid!r} has no ML-DSA-65
+            public key</tt></td><td>the resolved manifest key entry
+            lacks <tt>pub_ml_dsa_65</tt>.</td></tr>
+            <tr><td><tt>signature verification failed</tt></td><td>the
+            Ed25519 leg fails to verify (unchanged literal from
+            v0.1).</td></tr>
+            <tr><td><tt>ML-DSA-65 signature verification
+            failed</tt></td><td>the ML-DSA-65 leg fails to
+            verify.</td></tr>
+          </tbody>
+        </table>
       </section>
     </section>
 
@@ -700,20 +743,20 @@ buyer signs: UTF8("Attest-binding-challenge-v1") || 0x00
         warning.</li>
         <li><strong>Step 4 (signature verification):</strong> per the
         selected profile (<xref target="sigprofiles"/>).</li>
-        <li><strong>Step 5 (schema validation):</strong> of the parsed
-        payload against this document's own normative payload field
-        registry (<xref target="payload-registry"/>) and field rules. An
-        implementation MAY perform this check by validating against
-        <tt>attest-receipt.schema.json</tt> in the attest source
-        repository, the reference implementation of this draft's payload
-        registry, rather than the normative text itself. That reference
-        schema also encodes the living specification's Stage 3 (v0.2 §17.8)
+        <li><strong>Step 5 (schema validation):</strong> the parsed
+        payload <bcp14>MUST</bcp14> satisfy the structural constraints of
+        the core receipt schema, <tt>attest-receipt.schema.json</tt> in
+        the attest source repository, EXCEPT its Stage 3 (v0.2 §17.8)
         holder-binding conditional on <tt>license.transferable</tt> and
-        <tt>buyer.pubkey</tt>; that conditional belongs to the Stage 3
-        extension (<xref target="extensions"/>) and is OUTSIDE this
-        profile's normative scope — a verifier conforming to this
-        document's core/hybrid profile alone is not required to enforce
-        it.</li>
+        <tt>buyer.pubkey</tt>, which belongs to the Stage 3 extension
+        (<xref target="extensions"/>) and is OUTSIDE this profile's
+        normative scope — a verifier conforming to this document's
+        core/hybrid profile alone is not required to enforce it. This
+        document's own payload field registry
+        (<xref target="payload-registry"/>) is a descriptive summary of
+        that same structure, not a second, independent normative source:
+        the schema, minus that one named conditional, is the precise
+        structural authority this step checks against.</li>
         <li><strong>Step 6 (revocation):</strong> only if
         <tt>revocation_view</tt> is supplied, and only if signature and
         schema both succeeded; see <xref target="revocation"/>.</li>
@@ -763,7 +806,12 @@ buyer signs: UTF8("Attest-binding-challenge-v1") || 0x00
       the resource a hostile envelope or manifest can force it to spend
       before any cryptographic or schema work runs, and these ceilings bind
       every <tt>attest_version</tt> this document defines, including the
-      hybrid envelopes and manifests of <xref target="hybrid-profile"/>.</t>
+      hybrid envelopes and manifests of <xref target="hybrid-profile"/>. The
+      revocation-view record ceiling (<xref target="revocation"/>) is a
+      distinct bound and is NOT one of these structural ceilings: it applies
+      only at Step 6, to the untrusted <tt>revocation_view</tt> input, never
+      before cryptographic or schema work runs, and is evaluated
+      independently of the table below.</t>
       <table anchor="tbl-ceilings">
         <name>Structural ceilings</name>
         <thead><tr><th>Ceiling</th><th>Value</th><th>Class</th></tr></thead>
@@ -779,8 +827,6 @@ buyer signs: UTF8("Attest-binding-challenge-v1") || 0x00
           <tr><td>Artifact manifest <tt>artifacts[]</tt> length</td>
           <td>4,096 entries</td><td>New; MUST accept within, MAY reject
           beyond</td></tr>
-          <tr><td>Revocation-view record count</td><td>10,000 records
-          (<xref target="revocation"/>)</td><td>Pre-existing; unconditional</td></tr>
         </tbody>
       </table>
     </section>
@@ -852,7 +898,12 @@ buyer signs: UTF8("Attest-binding-challenge-v1") || 0x00
       error, <tt>ok</tt> becomes false), while for
       <tt>revocability: "none"</tt> receipts an oversized view is a
       non-fatal warning instead, since a revocation record can never affect
-      <tt>ok</tt> for that class regardless of view size.</t>
+      <tt>ok</tt> for that class regardless of view size. This bound exists
+      independently of the Structural ceilings of <xref target="verify"/>:
+      it is a per-call record-count cap on trusted-input-shaped-as-untrusted
+      data (the <tt>revocation_view</tt> parameter), evaluated at Step 6,
+      never a wire-format or manifest-shape structural bound checked before
+      cryptographic or schema work runs.</t>
     </section>
 
     <section anchor="security" numbered="true" toc="default">
@@ -914,10 +965,16 @@ buyer signs: UTF8("Attest-binding-challenge-v1") || 0x00
       <t><strong>Structural ceilings bound resource exhaustion before
       cryptographic work runs.</strong> The ceilings of
       <xref target="verify"/> (envelope size, manifest array lengths,
-      parse-tree nesting depth, revocation-view record count) exist so that
-      a hostile envelope or manifest cannot force a verifier to spend
-      unbounded resources parsing or evaluating it before any signature or
-      schema check has a chance to reject it outright.</t>
+      parse-tree nesting depth) exist so that a hostile envelope or manifest
+      cannot force a verifier to spend unbounded resources parsing or
+      evaluating it before any signature or schema check has a chance to
+      reject it outright. The revocation-view record ceiling
+      (<xref target="revocation"/>) bounds a distinct, later-evaluated
+      input — the untrusted <tt>revocation_view</tt> supplied at Step 6,
+      only once signature and schema have both already succeeded — and
+      exists independently of the pre-crypto ceilings above, for the same
+      resource-exhaustion reason applied to that later, separately-supplied
+      input.</t>
     </section>
 
     <section anchor="privacy" numbered="true" toc="default">
@@ -1093,6 +1150,16 @@ buyer signs: UTF8("Attest-binding-challenge-v1") || 0x00
         <seriesInfo name="RFC" value="4648"/>
         <seriesInfo name="DOI" value="10.17487/RFC4648"/>
       </reference>
+      <reference anchor="FIPS204" target="https://csrc.nist.gov/pubs/fips/204/final">
+        <front>
+          <title>Module-Lattice-Based Digital Signature Standard</title>
+          <author>
+            <organization>National Institute of Standards and Technology</organization>
+          </author>
+          <date year="2024" month="August"/>
+        </front>
+        <seriesInfo name="FIPS" value="204"/>
+      </reference>
     </references>
     <references>
       <name>Informative References</name>
@@ -1142,16 +1209,6 @@ buyer signs: UTF8("Attest-binding-challenge-v1") || 0x00
         </front>
         <seriesInfo name="RFC" value="9052"/>
         <seriesInfo name="DOI" value="10.17487/RFC9052"/>
-      </reference>
-      <reference anchor="FIPS204" target="https://csrc.nist.gov/pubs/fips/204/final">
-        <front>
-          <title>Module-Lattice-Based Digital Signature Standard</title>
-          <author>
-            <organization>National Institute of Standards and Technology</organization>
-          </author>
-          <date year="2024" month="August"/>
-        </front>
-        <seriesInfo name="FIPS" value="204"/>
       </reference>
       <reference anchor="W3C.VC-DATA-MODEL" target="https://www.w3.org/TR/vc-data-model-2.0/">
         <front>

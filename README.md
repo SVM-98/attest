@@ -130,7 +130,7 @@ being finished on branches, and are linked here rather than left invisible:
 Three further pieces make attest citable and checkable, not just built and
 tested, and are likewise linked here rather than left invisible:
 
-- **IETF Internet-Draft.** [`ietf/draft-martinalli-open-purchase-receipts.md`](https://github.com/SVM-98/attest/blob/pillar-1/ietf/draft-martinalli-open-purchase-receipts.md)
+- **IETF Internet-Draft.** [`ietf/draft-martinalli-open-purchase-receipts.xml`](https://github.com/SVM-98/attest/blob/pillar-1/ietf/draft-martinalli-open-purchase-receipts.xml)
   is the source for `draft-martinalli-open-purchase-receipts-00`, a
   snapshot-profile mirror of the living spec (declares it mirrors v0.1
   revision 5 and v0.2 revision 6) that builds clean to `-00` txt/html in CI.
