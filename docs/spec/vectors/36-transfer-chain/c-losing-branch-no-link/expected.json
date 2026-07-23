@@ -1,0 +1,10 @@
+{
+  "chain_valid": false,
+  "errors_contains": [
+    "chain link 1: losing branch of a double assignment"
+  ],
+  "link_status": [
+    "invalid"
+  ],
+  "warnings": []
+}
