@@ -4,6 +4,8 @@ This directory holds the attest conformance suite: fixed, language-neutral test 
 
 **Normative conformance requirement**: an implementation is attest-conformant iff it produces every vector's expected result. There is no partial conformance — any single mismatch is a conformance failure.
 
+To run this corpus against YOUR implementation (any language) see [`docs/conformance.md`](../../conformance.md) — `tools/conformance_runner.py` replays every leaf through an adapter command you supply and produces the pass/fail conformance report; the v0.1/v0.2 subset rules above are exactly what it implements.
+
 ## Vector format
 
 Each leaf directory contains:
