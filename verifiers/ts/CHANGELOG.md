@@ -38,6 +38,28 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   leaf groups `27-valid-to-absent` and `28-transparency`, bringing the corpus
   this package runs to 66 leaves across 29 groups.
 
+## [0.4.0] — 2026-07-23
+
+### Added
+
+- **v0.2 Stage 3 — issuer-mediated transfer** (`docs/spec/attest-v0.2.md` §17) verify-only
+  parity: `src/transfer.ts` builds the same transfer-record verification, holder-authorization
+  check, and log-required honoring (consent gate) as the Python reference, over the
+  identical closed six-field record profile and `Attest-transfer-authorization-v1`
+  domain-separated preimage. `verify()` reports the new reachable `revocation:
+  "transferred"` value, capping `ok` the same way `"revoked"` already does, honored for
+  every `license.revocability` class once backed by an authenticated
+  `holder_authorization` and a logged inclusion proof; unlogged, double-assigned
+  (earliest-index-wins), and not-yet-transferable claims resolve to the same warning
+  literals as the Python reference (`transfer_record_unlogged`,
+  `transfer_double_assignment_conflict`, `transfer_not_yet_transferable`). A separate
+  `auditChain` surface walks a whole chain of transfers independent of single-receipt
+  `verify()`. A v0.2 receipt with `license.transferable: true` and a null/absent
+  `buyer.pubkey` is now a schema error (v0.1 receipts untouched). Closed a
+  Python/TypeScript parity divergence in Stage 3 date validation during review. New
+  conformance leaf groups `35-transfer` (11 leaves) and `36-transfer-chain` (4 leaves),
+  bringing the corpus this package runs to 97 leaves across 36 groups.
+
 ## [0.1.2] — 2026-07-13
 
 First npm release from the hardened OIDC pipeline (Trusted Publishing +
