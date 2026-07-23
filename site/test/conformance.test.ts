@@ -15,6 +15,7 @@ describe('conformance corpus through the site adapter', () => {
       transparency: V.transparencyEvidence(dir),
       logKeys: V.logKeys(dir),
       anchorPolicy: V.anchorPolicy(dir),
+      revocationEvidence: V.revocationEvidence(dir),
     })
     const r = run.result
     expect(r.signature).toBe(exp.signature)

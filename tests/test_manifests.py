@@ -288,6 +288,267 @@ def test_artifact_manifest_released_within_window_true() -> None:
     assert manifests.verify_artifact_manifest(am, key_manifest)
 
 
+# --- G1 normative ceilings (attest-versioning.md §5 amendment) --------------
+
+
+def _filler_key_entries(count: int, prefix: str) -> list[dict[str, Any]]:
+    """`count` distinct, deterministic Ed25519 key entries — no wall-clock or
+    CSPRNG randomness, matching `tools/gen_vectors.py`'s determinism
+    discipline (this file has no such existing rule, but generated
+    filler at ceiling scale should still be reproducible on inspection)."""
+    entries = []
+    for i in range(count):
+        seed = hashlib.sha256(f"{prefix}-{i}".encode()).digest()
+        kp = keys.from_seed(seed)
+        entries.append(
+            manifests.key_entry(
+                f"{ISSUER}/keys/test#filler-{i}", kp.pub, "2026-01-01T00:00:00Z", None, "active"
+            )
+        )
+    return entries
+
+
+def test_verify_key_manifest_true_at_key_ceiling() -> None:
+    entries = [manifests.key_entry(KID1, KP1.pub, "2026-01-01T00:00:00Z", None, "active")]
+    entries += _filler_key_entries(manifests.MAX_MANIFEST_KEYS - 1, "test-manifest-ceiling-at")
+    assert len(entries) == manifests.MAX_MANIFEST_KEYS
+    manifest = manifests.build_key_manifest(ISSUER, 1, "2026-01-01T00:00:00Z", entries, KP1, KID1)
+    assert manifests.verify_key_manifest(manifest) is True
+
+
+def test_verify_key_manifest_false_over_key_ceiling() -> None:
+    entries = [manifests.key_entry(KID1, KP1.pub, "2026-01-01T00:00:00Z", None, "active")]
+    entries += _filler_key_entries(manifests.MAX_MANIFEST_KEYS, "test-manifest-ceiling-over")
+    assert len(entries) == manifests.MAX_MANIFEST_KEYS + 1
+    manifest = manifests.build_key_manifest(ISSUER, 1, "2026-01-01T00:00:00Z", entries, KP1, KID1)
+    assert manifests.verify_key_manifest(manifest) is False
+
+
+def test_verify_artifact_manifest_true_at_entries_ceiling() -> None:
+    key_manifest = _v1_manifest()
+    artifacts = [_artifact() for _ in range(manifests.MAX_ARTIFACT_ENTRIES)]
+    am = manifests.build_artifact_manifest(
+        ISSUER, SERIES, 1, "2026-03-01T00:00:00Z", artifacts, KP1, KID1
+    )
+    assert manifests.verify_artifact_manifest(am, key_manifest) is True
+
+
+def test_build_artifact_manifest_manifest_version_included_when_given() -> None:
+    key_manifest = _v1_manifest()
+    am = manifests.build_artifact_manifest(
+        ISSUER, SERIES, 1, "2026-03-01T00:00:00Z", [_artifact()], KP1, KID1, manifest_version=1
+    )
+    assert am["manifest_version"] == 1
+    assert manifests.verify_artifact_manifest(am, key_manifest)
+
+
+@pytest.mark.parametrize("manifest_version", [0, -1, True, "1"])
+def test_build_artifact_manifest_rejects_invalid_manifest_version(manifest_version: object) -> None:
+    with pytest.raises(ValueError, match="manifest_version must be an integer >= 1"):
+        manifests.build_artifact_manifest(
+            ISSUER,
+            SERIES,
+            1,
+            "2026-03-01T00:00:00Z",
+            [_artifact()],
+            KP1,
+            KID1,
+            manifest_version=manifest_version,  # type: ignore[arg-type]
+        )
+
+
+def test_verify_artifact_manifest_rejects_signed_zero_manifest_version() -> None:
+    key_manifest = _v1_manifest()
+    manifest = manifests.build_artifact_manifest(
+        ISSUER, SERIES, 1, "2026-03-01T00:00:00Z", [_artifact()], KP1, KID1
+    )
+    manifest["manifest_version"] = 0
+    manifest["manifest_signature"] = manifests.sign_signature_block(
+        manifests._signable(manifest),
+        KP1,
+        KID1,  # type: ignore[attr-defined]
+    )
+    assert manifests.verify_artifact_manifest(manifest, key_manifest) is False
+
+
+def test_build_artifact_manifest_manifest_version_omitted_by_default() -> None:
+    """Backward compatibility: an artifact manifest built without `manifest_version`
+    (the pre-Task-3 shape) never gains the field — eternal verifiability requires
+    every previously-conforming caller of `build_artifact_manifest` to keep working
+    byte-for-byte."""
+    am = manifests.build_artifact_manifest(
+        ISSUER, SERIES, 1, "2026-03-01T00:00:00Z", [_artifact()], KP1, KID1
+    )
+    assert "manifest_version" not in am
+
+
+# --- check_artifact_continuity (G3 currency, attest-versioning.md rev 4) ----
+
+
+def _artifact_manifest(version: int, manifest_version: int | None) -> dict[str, Any]:
+    return manifests.build_artifact_manifest(
+        ISSUER,
+        SERIES,
+        version,
+        "2026-03-01T00:00:00Z",
+        [_artifact()],
+        KP1,
+        KID1,
+        manifest_version=manifest_version,
+    )
+
+
+def test_artifact_manifest_monotone_accepts() -> None:
+    m1 = _artifact_manifest(1, 1)
+    m2 = _artifact_manifest(2, 2)
+    assert manifests.check_artifact_continuity(trusted=m1, candidate=m2) is True
+
+
+def test_artifact_manifest_regression_not_silently_accepted() -> None:
+    m1 = _artifact_manifest(1, 1)
+    m2 = _artifact_manifest(2, 2)
+    assert manifests.check_artifact_continuity(trusted=m2, candidate=m1) is False
+
+
+def test_artifact_manifest_continuity_gap_false() -> None:
+    m1 = _artifact_manifest(1, 1)
+    m3 = _artifact_manifest(3, 3)
+    assert manifests.check_artifact_continuity(trusted=m1, candidate=m3) is False
+
+
+def test_artifact_manifest_continuity_issuer_mismatch_false() -> None:
+    trusted = _artifact_manifest(1, 1)
+    candidate = manifests.build_artifact_manifest(
+        "evil.example.com",
+        SERIES,
+        2,
+        "2026-03-01T00:00:00Z",
+        [_artifact()],
+        KP1,
+        KID1,
+        manifest_version=2,
+    )
+    assert manifests.check_artifact_continuity(trusted=trusted, candidate=candidate) is False
+
+
+def test_artifact_manifest_continuity_series_mismatch_false() -> None:
+    trusted = _artifact_manifest(1, 1)
+    candidate = manifests.build_artifact_manifest(
+        ISSUER,
+        "store.example.com/works/OTHER-002",
+        2,
+        "2026-03-01T00:00:00Z",
+        [_artifact()],
+        KP1,
+        KID1,
+        manifest_version=2,
+    )
+    assert manifests.check_artifact_continuity(trusted=trusted, candidate=candidate) is False
+
+
+def test_artifact_manifest_continuity_legacy_trusted_warn_only() -> None:
+    trusted = _artifact_manifest(1, None)
+    candidate = _artifact_manifest(2, 1)
+    assert manifests.check_artifact_continuity(trusted=trusted, candidate=candidate) is True
+
+
+def test_artifact_manifest_continuity_legacy_candidate_warn_only() -> None:
+    trusted = _artifact_manifest(1, 1)
+    candidate = _artifact_manifest(2, None)
+    assert manifests.check_artifact_continuity(trusted=trusted, candidate=candidate) is True
+
+
+def test_artifact_manifest_same_version_value_identical_accepted() -> None:
+    """A same-version RE-DELIVERY of the byte-identical manifest is continuous
+    (e.g. a caller re-fetching the same trusted manifest it already holds)."""
+    m1 = _artifact_manifest(1, 1)
+    m1_again = dict(m1)
+    assert manifests.check_artifact_continuity(trusted=m1, candidate=m1_again) is True
+
+
+def test_artifact_manifest_same_version_distinct_content_rejected() -> None:
+    """Equivocation shape: two DIFFERENT manifests at the SAME manifest_version
+    must NOT be treated as continuous — the caller routes this to
+    `unverified_rotation` instead of silently accepting either."""
+    m1 = _artifact_manifest(1, 1)
+    m1_variant = manifests.build_artifact_manifest(
+        ISSUER,
+        SERIES,
+        1,
+        "2026-03-02T00:00:00Z",
+        [_artifact()],
+        KP1,
+        KID1,
+        manifest_version=1,
+    )
+    assert m1 != m1_variant
+    assert manifests.check_artifact_continuity(trusted=m1, candidate=m1_variant) is False
+
+
+def test_verify_artifact_manifest_false_over_entries_ceiling() -> None:
+    key_manifest = _v1_manifest()
+    artifacts = [_artifact() for _ in range(manifests.MAX_ARTIFACT_ENTRIES + 1)]
+    am = manifests.build_artifact_manifest(
+        ISSUER, SERIES, 1, "2026-03-01T00:00:00Z", artifacts, KP1, KID1
+    )
+    assert manifests.verify_artifact_manifest(am, key_manifest) is False
+
+
+# --- G6 mixed-keyset prohibition (v0.2 §2.3/§13 amendment) ------------------
+
+
+def _hybrid_entry(kid: str, kp: Any, status: str = "active") -> dict[str, Any]:
+    return manifests.key_entry(
+        kid, kp.pub, "2026-01-01T00:00:00Z", None, status, pub_ml_dsa_65=bytes(1952)
+    )
+
+
+def test_has_active_ed_only_sibling_true_when_ed_only_key_active() -> None:
+    manifest = {
+        "keys": [
+            _hybrid_entry(KID1, KP1, status="active"),
+            manifests.key_entry(KID2, KP2.pub, "2026-01-01T00:00:00Z", None, "active"),
+        ]
+    }
+    assert manifests.has_active_ed_only_sibling(manifest) is True
+
+
+def test_has_active_ed_only_sibling_false_when_sibling_retired() -> None:
+    manifest = {
+        "keys": [
+            _hybrid_entry(KID1, KP1, status="active"),
+            manifests.key_entry(KID2, KP2.pub, "2026-01-01T00:00:00Z", None, "retired"),
+        ]
+    }
+    assert manifests.has_active_ed_only_sibling(manifest) is False
+
+
+def test_has_active_ed_only_sibling_false_when_no_hybrid_key_at_all() -> None:
+    manifest = {
+        "keys": [
+            manifests.key_entry(KID1, KP1.pub, "2026-01-01T00:00:00Z", None, "active"),
+            manifests.key_entry(KID2, KP2.pub, "2026-01-01T00:00:00Z", None, "active"),
+        ]
+    }
+    assert manifests.has_active_ed_only_sibling(manifest) is False
+
+
+def test_has_active_ed_only_sibling_false_when_all_keys_hybrid() -> None:
+    manifest = {
+        "keys": [
+            _hybrid_entry(KID1, KP1, status="active"),
+            _hybrid_entry(KID2, KP2, status="active"),
+        ]
+    }
+    assert manifests.has_active_ed_only_sibling(manifest) is False
+
+
+def test_has_active_ed_only_sibling_malformed_keys_fails_closed_no_raise() -> None:
+    assert manifests.has_active_ed_only_sibling({"keys": "not-a-list"}) is False
+    assert manifests.has_active_ed_only_sibling({"keys": [None, 42, "x"]}) is False
+    assert manifests.has_active_ed_only_sibling({}) is False
+
+
 # --- rotate_key_manifest: retirement / compromise ----------------------------
 
 

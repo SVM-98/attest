@@ -32,8 +32,10 @@ const NODE_PREFIX = Uint8Array.of(0x01) // RFC 6962 §2.1: MTH(D[n]) = SHA-256(0
 
 const TYPE_KEY_MANIFEST = 'key-manifest'
 const TYPE_RECEIPT = 'receipt'
+const TYPE_REVOCATION_RECORD = 'revocation-record'
 const KEY_MANIFEST_FIELDS = new Set(['type', 'issuer', 'manifest_version', 'manifest_sha256'])
 const RECEIPT_FIELDS = new Set(['type', 'issuer', 'core_sha256'])
+const REVOCATION_RECORD_FIELDS = new Set(['type', 'issuer', 'record_sha256'])
 // Mirrors tlog.py's `_MAX_ENTRY_SCALAR_LEN`: both cores bound free-text
 // entry scalars before regex matching, diagnostic rendering, or JCS work.
 const MAX_ENTRY_SCALAR_LEN = 500_000
@@ -240,9 +242,12 @@ function requireManifestVersion(entry: Record<string, unknown>): void {
 /** Validate `entry` against a CLOSED schema and return its canonical
  * (attest-JCS) bytes — the exact bytes that get leaf-hashed into the log.
  *
- * Two entry types, exactly these members each (extras rejected):
+ * Three entry types, exactly these members each (extras rejected):
  * - `key-manifest`: `{type, issuer, manifest_version, manifest_sha256}`.
  * - `receipt`: `{type, issuer, core_sha256}`.
+ * - `revocation-record` (v0.2 §8, G5): `{type, issuer, record_sha256}`,
+ *   where `record_sha256 = recordHash(record)` (revocation.ts) —
+ *   `SHA-256(JCS(record))` over the entire signed revocation record.
  *
  * `entry` is untrusted evidence (the "materialized", plain-JS-number
  * convention this port uses — see `transparency.ts`): `manifest_version`
@@ -267,6 +272,10 @@ export function encodeEntry(entry: unknown): Uint8Array {
     requireFields(entry, RECEIPT_FIELDS)
     requireIssuer(entry)
     requireHex64(entry, 'core_sha256')
+  } else if (entryType === TYPE_REVOCATION_RECORD) {
+    requireFields(entry, REVOCATION_RECORD_FIELDS)
+    requireIssuer(entry)
+    requireHex64(entry, 'record_sha256')
   } else {
     throw new TlogError(`unknown entry type: ${pyRepr(entryType)}`)
   }
@@ -372,12 +381,21 @@ function truncRepr(value: string, limit = 80): string {
  * range (up to 2**64-1), which exceeds Number.MAX_SAFE_INTEGER — this is the
  * one place in this port that is NOT the "materialized" plain-number
  * convention (see the module comment in transparency.ts).
+ *
+ * `signedNoteBytes` is the FULL checkpoint text as parsed — header lines,
+ * blank line, AND every C2SP signature line, byte-for-byte the original
+ * input to `parseCheckpoint`/`verifyCheckpoint` (never re-serialized).
+ * `anchor.ts`'s v2 anchor profile (`"signed-note-v2"`, attest-v0.2.md
+ * §11.1) commits an OTS op-chain over this instead of `noteBytes` alone,
+ * closing the gap where a chosen note could be pre-anchored before it was
+ * ever signed (TM-33's residual risk).
  */
 export interface Checkpoint {
   origin: string
   treeSize: bigint
   root: Uint8Array
   noteBytes: Uint8Array
+  signedNoteBytes: Uint8Array
 }
 
 /** A pinned transparency-log signing identity: one `name`, two legs. Ships
@@ -553,7 +571,14 @@ function parseCore(text: unknown): { checkpoint: Checkpoint; signatures: Array<[
   }
   const signatures = parseSignatureLines(sigLines)
   const noteBytes = buildNoteBytes(header)
-  return { checkpoint: { origin, treeSize, root, noteBytes }, signatures }
+  // `text` is guaranteed a string here (splitNote already threw otherwise).
+  // It is NOT pure ASCII (each C2SP signature line opens with the em dash
+  // U+2014, a 3-byte UTF-8 sequence) but IS valid UTF-8 by construction
+  // (origin/tree-size/root/signature-line grammar each already constrain
+  // their slice of it to printable ASCII) — this is the original input
+  // bytes back, not a re-serialization.
+  const signedNoteBytes = new TextEncoder().encode(text as string)
+  return { checkpoint: { origin, treeSize, root, noteBytes, signedNoteBytes }, signatures }
 }
 
 /** Parse a C2SP signed-note checkpoint body. Structural/shape validation

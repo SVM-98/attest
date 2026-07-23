@@ -22,6 +22,36 @@ _PRIVACY_PATH = _REPO_ROOT / "docs/spec/attest-privacy.md"
 _SPEC_V01_PATH = _REPO_ROOT / "docs/spec/attest-v0.1.md"
 _SPEC_V02_PATH = _REPO_ROOT / "docs/spec/attest-v0.2.md"
 _SCHEMA_PATH = _REPO_ROOT / "docs/spec/schema/attest-receipt.schema.json"
+_VERSIONING_PATH = _REPO_ROOT / "docs/spec/attest-versioning.md"
+
+# The six normative sections attest-versioning.md's amendment procedure
+# requires (§5) every reader be able to find by exact heading.
+_VERSIONING_REQUIRED_HEADINGS: tuple[str, ...] = (
+    "## 1. Scope and authority",
+    "## 2. The additive pattern",
+    "## 3. Eternal verifiability",
+    "## 4. Algorithm lifecycle",
+    "## 5. Amendment procedure",
+    "## 6. Registries",
+)
+
+# The two signature suites the two normative specs actually define (v0.1 §10,
+# v0.2 §2). A registry entry for a suite neither spec defines would register
+# nothing real; naming both here keeps that in sync by construction.
+_VERSIONING_REQUIRED_SUITES: tuple[str, ...] = ("`ed25519`", "`ed25519+ml-dsa-65`")
+
+# §4's algorithm lifecycle defines exactly these three states.
+_VERSIONING_LIFECYCLE_STATES: tuple[str, ...] = ("`active`", "`deprecated`", "`unsafe`")
+
+# §6.3 lists the existing `license.revocability` classes (v0.1 §5.5), plus the
+# separate reserved `transferred` row for the future transfer profile.
+# `compromised` is NOT one of these: it is a key lifecycle STATUS (v0.1 §7.3),
+# not a revocation class, and does not belong in this registry (2026-07-23 fix).
+_VERSIONING_REQUIRED_REVOCATION_CLASSES: tuple[str, ...] = (
+    "`none`",
+    "`refund_window`",
+    "`policy`",
+)
 
 # Required traceability-matrix coverage: every numbered section of the two
 # normative specs except each document's own §1 (conformance language) and
@@ -63,6 +93,14 @@ _PC01_PATTERN_PIN_RE = re.compile(
 )
 _PC01_PATTERN_FIELDS = {"commitment", "pubkey"}
 _PC01_ENUM_PIN_RE = re.compile(r"`identifier_type` to the\s+enum `?(\[[^`]*\])`?")
+_REVISION_LOG_HEADING_RE = re.compile(r"^## Revision log$", re.MULTILINE)
+_REVISION_LOG_ENTRY_RE = re.compile(
+    r"^- \*\*\d{4}-\d{2}-\d{2} \(rev \d+\)\*\*: .+ — vectors: \S.*$"
+)
+
+# §5.1's `receipt_id` row inlines the ULID regex in backticks, e.g.:
+# `| \`receipt_id\` | string, ULID (\`^[0-7][0-9A-HJKMNP-TV-Z]{25}$\`) | REQUIRED | ... |`
+_RECEIPT_ID_PROSE_ROW_RE = re.compile(r"\| `receipt_id` \| string, ULID \(`([^`]+)`\) \|")
 
 
 class TmEntry(NamedTuple):
@@ -324,14 +362,154 @@ def check_schema_pins(pc_rows: list[PcRow], schema: dict[str, object]) -> list[s
     return errors
 
 
+def check_versioning_sections(versioning: str) -> list[str]:
+    """Every §1-§6 heading the amendment procedure (§5) requires is present."""
+    errors: list[str] = []
+    for heading in _VERSIONING_REQUIRED_HEADINGS:
+        if re.search(rf"^{re.escape(heading)}$", versioning, re.MULTILINE) is None:
+            errors.append(f"missing required heading {heading!r}")
+    return errors
+
+
+def check_versioning_suite_names(versioning: str) -> list[str]:
+    """The §6.1 registry names every signature suite the specs actually define."""
+    errors: list[str] = []
+    for suite in _VERSIONING_REQUIRED_SUITES:
+        if re.search(rf"^\| {re.escape(suite)} \|", versioning, re.MULTILINE) is None:
+            errors.append(f"§6.1 registry missing suite row {suite}")
+    return errors
+
+
+def check_versioning_lifecycle_states(versioning: str) -> list[str]:
+    """§4's algorithm lifecycle names exactly the three defined states."""
+    section_match = re.search(
+        r"^## 4\. Algorithm lifecycle$([\s\S]*?)(?=^## |\Z)", versioning, re.MULTILINE
+    )
+    if section_match is None:
+        return ["missing required heading '## 4. Algorithm lifecycle'"]
+
+    actual = set(re.findall(r"^\| (`[^`]+`) \|", section_match.group(1), re.MULTILINE))
+    expected = set(_VERSIONING_LIFECYCLE_STATES)
+    if actual != expected:
+        return [
+            "§4 algorithm lifecycle states must be exactly "
+            f"{sorted(expected)}, found {sorted(actual)}"
+        ]
+    return []
+
+
+def check_versioning_revocation_classes(versioning: str) -> list[str]:
+    """The §6.3 registry has a table row for every existing class."""
+    errors: list[str] = []
+    for revocation_class in _VERSIONING_REQUIRED_REVOCATION_CLASSES:
+        if re.search(rf"^\| {re.escape(revocation_class)} \|", versioning, re.MULTILINE) is None:
+            errors.append(f"§6.3 registry missing revocation-class row {revocation_class}")
+    return errors
+
+
+def check_versioning_lifecycle_exception(versioning: str) -> list[str]:
+    """§2 explicitly exempts lifecycle-driven classification downgrades."""
+    if re.search(r"^One exception exists:.*$", versioning, re.MULTILINE) is None:
+        return ["§2 missing required lifecycle exception paragraph 'One exception exists:'"]
+    return []
+
+
+def _check_revision_log(spec_text: str, filename: str) -> list[str]:
+    """Validate the required revision-log heading, entries, and entry grammar."""
+    errors: list[str] = []
+    heading_match = _REVISION_LOG_HEADING_RE.search(spec_text)
+    if heading_match is None:
+        return [f"{filename}: missing '## Revision log' section"]
+
+    lines = spec_text.splitlines()
+    heading_line = spec_text[: heading_match.start()].count("\n")
+    entry_count = 0
+    for index in range(heading_line + 1, len(lines)):
+        line = lines[index]
+        if line.startswith("## "):
+            break
+        if line.startswith("- "):
+            entry_count += 1
+            if _REVISION_LOG_ENTRY_RE.fullmatch(line) is None:
+                errors.append(
+                    f"{filename}: revision-log entry on line {index + 1} does not match "
+                    "required grammar"
+                )
+    if entry_count == 0:
+        errors.append(f"{filename}: revision log requires at least one revision-log entry")
+    return errors
+
+
+def check_receipt_id_pattern(spec_v01: str, schema: dict[str, object]) -> list[str]:
+    """§5.1's inline `receipt_id` ULID regex MUST equal the schema's own
+    `properties.receipt_id.pattern` — the two describe the same wire
+    constraint (a Crockford base32 ULID whose leading character is bounded
+    to `[0-7]`, since a 26-char ULID otherwise overflows 128 bits) and must
+    never drift (2026-07-22 fix: the prose lacked that high-bit guard while
+    the schema already had it).
+
+    Skips ONLY when NEITHER side models `receipt_id` at all — most fixture
+    docs in this test module carry no full §5.1 table and no `receipt_id`
+    schema property, and are not meant to exercise this check; that is not a
+    drift signal. A ONE-SIDED absence, though, IS a drift signal (a prose row
+    added/removed without touching the schema, or vice versa) and is now an
+    explicit, fail-closed error (M2, 2026-07-22 fix wave 2 — this function
+    used to `return []` on either side's absence alone, silently blessing
+    exactly that drift). The real spec and schema always carry both.
+    """
+    match = _RECEIPT_ID_PROSE_ROW_RE.search(spec_v01)
+
+    properties = schema.get("properties")
+    receipt_id_schema = properties.get("receipt_id") if isinstance(properties, dict) else None
+    schema_pattern = (
+        receipt_id_schema.get("pattern") if isinstance(receipt_id_schema, dict) else None
+    )
+
+    if match is None and schema_pattern is None:
+        return []
+
+    if match is None:
+        return [
+            f"attest-v0.1.md: schema defines receipt_id.pattern {schema_pattern!r} but "
+            "§5.1 has no receipt_id prose row (fail-closed: one-sided absence is drift)"
+        ]
+
+    prose_pattern = match.group(1)
+
+    if schema_pattern is None:
+        return [
+            f"attest-v0.1.md: §5.1 receipt_id prose pattern {prose_pattern!r} but schema "
+            "defines no receipt_id.pattern (fail-closed: one-sided absence is drift)"
+        ]
+
+    if prose_pattern != schema_pattern:
+        return [
+            f"attest-v0.1.md: §5.1 receipt_id prose pattern {prose_pattern!r} diverges from "
+            f"schema pattern {schema_pattern!r}"
+        ]
+    return []
+
+
+def check_revision_logs(spec_v01: str, spec_v02: str) -> list[str]:
+    """Both normative specs have non-empty revision logs with valid entries."""
+    return _check_revision_log(spec_v01, "attest-v0.1.md") + _check_revision_log(
+        spec_v02, "attest-v0.2.md"
+    )
+
+
 def collect_errors(
     threat_model: str,
     privacy: str,
     spec_v01: str,
     spec_v02: str,
     schema: dict[str, object],
+    versioning: str,
 ) -> list[str]:
     """Cross-check the two companion docs against each other and the specs.
+
+    Also checks attest-versioning.md's required sections and registries, and
+    that both normative specs carry the `## Revision log` section its
+    amendment procedure (§5) requires.
 
     Returns one human-readable string per problem found; an empty list means
     the documents are internally consistent and in sync with the specs and
@@ -359,6 +537,18 @@ def collect_errors(
     errors += [f"attest-threat-model.md: {e}" for e in check_matrix(threat_model, set(tm_ids))]
     errors += [f"attest-privacy.md: {e}" for e in check_claims(pc_rows)]
     errors += [f"attest-privacy.md: {e}" for e in check_schema_pins(pc_rows, schema)]
+    errors += [f"attest-versioning.md: {e}" for e in check_versioning_sections(versioning)]
+    errors += [f"attest-versioning.md: {e}" for e in check_versioning_suite_names(versioning)]
+    errors += [f"attest-versioning.md: {e}" for e in check_versioning_lifecycle_states(versioning)]
+    errors += [
+        f"attest-versioning.md: {e}" for e in check_versioning_revocation_classes(versioning)
+    ]
+    errors += [
+        f"attest-versioning.md: {e}" for e in check_versioning_lifecycle_exception(versioning)
+    ]
+    errors += check_revision_logs(spec_v01, spec_v02)
+    errors += _check_revision_log(versioning, "attest-versioning.md")
+    errors += check_receipt_id_pattern(spec_v01, schema)
     return errors
 
 
@@ -368,8 +558,9 @@ def main() -> int:
     spec_v01 = _SPEC_V01_PATH.read_text(encoding="utf-8")
     spec_v02 = _SPEC_V02_PATH.read_text(encoding="utf-8")
     schema = json.loads(_SCHEMA_PATH.read_text(encoding="utf-8"))
+    versioning = _VERSIONING_PATH.read_text(encoding="utf-8")
 
-    errors = collect_errors(threat_model, privacy, spec_v01, spec_v02, schema)
+    errors = collect_errors(threat_model, privacy, spec_v01, spec_v02, schema, versioning)
     for error in errors:
         print(f"ERROR {error}")
     return 1 if errors else 0
