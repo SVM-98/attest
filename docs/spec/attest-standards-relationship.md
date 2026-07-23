@@ -24,27 +24,38 @@ cooperating roles: an `issuer`, a `credentialSubject` carrying the claimed
 attributes, and one or more securing mechanisms — embedded Data Integrity
 proofs or an enveloping JOSE/COSE wrapper — that establish who signed the
 credential and that it has not been altered. The claim shape itself is
-open-world: a credential's properties are defined by whatever vocabulary its
-`@context` (or, for a plain-JSON credential, its declared `type`) brings in,
-and a verifier is expected to accept credentials whose issuer or type it has
-never seen before, deferring to trust-list or issuer-registry policy to
-decide whether to honor them. Proof formats are deliberately plural by
-design, not a single pinned mechanism — a verifier that speaks the data model
-still has to implement whichever proof suite a given credential actually
-used.
+open-world and extensible: a credential's properties are defined by whatever
+vocabulary its `@context` brings in — VC Data Model 2.0 requires `@context`
+on every credential, including one processed under a fixed, type-specific
+JSON Schema, because `@context` is what fixes the JSON-LD term-to-IRI
+mapping those properties resolve against, not an indirection a plain-JSON
+credential can skip. Which contexts, document shapes, issuers, or types a
+given verifier actually honors is left to that verifier's own
+application-defined trust policy — a data model that supports open
+vocabularies is not the same claim as consumers accepting arbitrary
+issuer/type combinations automatically; nothing in the data model defers
+that decision to a registry on a verifier's behalf. Proof formats are
+deliberately plural by design, not a single pinned mechanism — a verifier
+that speaks the data model still has to implement whichever proof suite a
+given credential actually used.
 
-attest's payload takes the opposite position on both axes. Its field set is
-a single closed JSON Schema (`docs/spec/schema/attest-receipt.schema.json`)
-with no `@context` indirection and no open vocabulary to resolve; and its
-signing step is not a choice among proof suites but one mandatory
-canonicalization profile, attest-JCS (v0.1 §9), whose output is byte-exact
-across the Python and TypeScript reference implementations by construction
-of the 97-leaf conformance corpus — a verifier that does not reproduce
-attest-JCS exactly cannot verify an attest receipt at all. Choosing a
-purpose-built envelope over a Verifiable Credential is choosing that
-closed-schema, single-canonicalization determinism over the VC model's
-open-world extensibility and proof-suite plurality; the two are trading in
-opposite directions on purpose, not one failing to be the other.
+attest's payload takes the opposite position on both axes. Its schema
+(`docs/spec/schema/attest-receipt.schema.json`) declares a fixed required
+core with no `@context` indirection and no remote vocabulary to resolve —
+but it is not a closed field set: the schema sets `additionalProperties:
+true`, and v0.1 §11.2 requires a conforming verifier to accept a signed
+unknown top-level payload field as valid-with-warning, never as a schema
+error. The closedness is in canonicalization and semantics, not in what
+fields a payload may carry: attest's signing step is not a choice among
+proof suites but one mandatory canonicalization profile, attest-JCS (v0.1
+§9), whose output is byte-exact across the Python and TypeScript reference
+implementations by construction of the 97-leaf conformance corpus — a
+verifier that does not reproduce attest-JCS exactly cannot verify an attest
+receipt at all. Choosing a purpose-built envelope over a Verifiable
+Credential is choosing that fixed-core, single-canonicalization,
+no-remote-context determinism over the VC model's open-world extensibility,
+`@context`-driven semantics, and proof-suite plurality; the two are trading
+in opposite directions on purpose, not one failing to be the other.
 
 What a future bridge could look like: an attest envelope (`payload` plus
 `signatures`) could be embedded as an opaque, independently-verifiable object
@@ -58,14 +69,21 @@ v0.2 defines such a wrapper, and attest depends on none existing.
 ## 2. eIDAS 2.0 and the EUDI Wallet
 
 eIDAS 2.0 (Regulation (EU) 2024/1183) builds the European Digital Identity
-Wallet framework around Person Identification Data, Electronic Attestations
-of Attributes (EAAs) — with a separately defined, more strongly regulated
-qualified-EAA tier — issued by attestation providers and presented to relying
-parties through a wallet under the supervision of Member State conformity
-assessment and a qualified-trust-service-provider trust framework. An EAA's
-evidentiary weight comes from that regulatory apparatus: which provider
-issued it, whether the provider and its issuance process are qualified, and
-which trust list vouches for the provider's certificate.
+Wallet framework around Person Identification Data and Electronic
+Attestations of Attributes (EAAs) presented to relying parties through a
+wallet, itself subject to Member State conformity assessment as a wallet
+solution. The Regulation does not treat every EAA alike: a **qualified**
+EAA (QEAA) is, by definition, issued by a qualified trust service provider
+operating under that provider's qualified-status obligations and the
+trust-list apparatus that vouches for its certificate, while the EUDI
+architecture separately recognizes a public-sector EAA (issued by or on
+behalf of a public-sector body under its own authority, with no
+qualified-trust-service-provider dependency) and a non-qualified EAA (issued
+by any other attestation provider, likewise with no such dependency). An
+EAA's evidentiary weight therefore depends on which of the three it is: for
+a QEAA, the qualified provider and its trust-list-anchored certificate carry
+that weight; for a public-sector or non-qualified EAA, whatever authority or
+reputation the issuing provider otherwise has does.
 
 attest issues merchant purchase evidence with none of that apparatus present
 anywhere in its verification path: an issuer-signed record of a license
@@ -81,7 +99,7 @@ honest one's. The two frameworks attest to different kinds of fact for
 different kinds of relying party, and neither depends on the other existing.
 
 What a future bridge could look like: an attest receipt could be carried as
-one of the attributes an EAA attests to (a wallet holding "this identity
+one of the attributes a (Q)EAA attests to (a wallet holding "this identity
 purchased title X" as a wallet-presentable attestation), or the buyer-side
 binding proof attest already defines (v0.1 §8) could someday be satisfied by
 a wallet-mediated presentation instead of a bare public-key challenge.
@@ -90,16 +108,29 @@ Either direction is potential future carriage; attest depends on neither.
 ## 3. JOSE/JWS and COSE
 
 This is the objection an expert in either format will raise first: why not
-just sign a detached JWS or a COSE_Sign1 structure over the payload? JOSE
-(JWS, RFC 7515) and COSE (RFC 9052) both sign a serialized, encoded wire
-form of the payload — the base64url header and payload segments joined by
-JWS Compact Serialization, or a COSE_Sign1 structure's protected header and
-payload bytes — and the signature covers exactly those transmitted bytes,
-whatever a particular signer happened to encode. That is precisely why
-detached content is a first-class, well-used feature of both formats: the
-payload segment can be stripped from the envelope and carried separately,
-because the signature was never over a canonical re-derivation of a parsed
-object, only over the octets the signer chose to transmit.
+just sign a detached JWS or a COSE_Sign1 structure over the payload? Both
+formats sign the payload's own producer-chosen serialization rather than a
+canonical re-derivation from a parsed object — but what each actually
+protects is represented differently, and neither matches the simplified
+picture of "the transmitted wire form is the trust anchor." JWS Compact
+Serialization classically signs `base64url(header).base64url(payload)`
+(RFC 7515), but RFC 7797 lets a JWS carry an unencoded, detached payload —
+the base64url wrapping is a convention modern JWS tooling can and does skip,
+not something the signature scheme requires. COSE_Sign1's signature input is
+not the transmitted `COSE_Sign1` structure's own wire bytes either: RFC 9052
+§4.4 defines it over a deterministically-encoded `Sig_structure` built from
+the protected header and payload, which a verifier reconstructs and
+re-encodes rather than re-verifying the outer envelope's bytes verbatim.
+What both formats share, and what distinguishes them from attest, is that
+whichever exact bytes get signed, they are the *producer's own serialization*
+of the payload — the octets that party actually produced (or a
+deterministic re-encoding derived from them) — preserved and signed as
+transmitted, not recomputed independently from a parsed object by whoever
+verifies later. That is precisely why detached content is a first-class,
+well-used feature of both formats: the payload can be stripped from the
+envelope and carried separately, because the signature was never over a
+canonical re-derivation of a parsed object, only over the producer's own
+serialized bytes.
 
 attest inverts that relationship. The signature input is `JCS(payload)`
 (v0.1 §9) — the RFC 8785-canonical serialization of the *parsed* payload
@@ -116,12 +147,16 @@ identically — UTF-16BE member-name ordering, the integer-only number
 restriction with `|n| < 2^53` that v0.1 §9 layers on top of RFC 8785's own
 I-JSON number rule, duplicate-member rejection, lone-surrogate rejection —
 and a canonicalizer bug is a silent signature mismatch, not a loud parse
-error. JOSE and COSE avoid that requirement entirely by making the
-transmitted wire form itself the trust anchor; attest's bet is that a
-strict, narrow, corpus-enforced canonicalizer is the safer engineering
-trade-off across independent language runtimes, and the 97-leaf conformance
-corpus — exercised byte-identically by the Python and TypeScript reference
-verifiers — is what makes that bet checkable rather than merely asserted.
+error. JOSE and COSE need no such canonicalization step at all, because
+each preserves and signs the producer's own serialized payload octets
+rather than recomputing a canonical form from a parsed object; attest's bet
+is that trading that no-canonicalization simplicity for a strict, narrow,
+corpus-enforced canonicalizer is the safer engineering trade-off when the
+signed bytes must be recoverable from a parsed JSON object in any language,
+rather than preserved from whichever producer happened to serialize the
+wire form — and the 97-leaf conformance corpus, exercised byte-identically
+by the Python and TypeScript reference verifiers, is what makes that bet
+checkable rather than merely asserted.
 
 What is given up is real and worth naming: JOSE's mature multi-language
 tooling ecosystem (JWK sets, negotiable `alg`/`kid` headers, broad library
@@ -136,9 +171,9 @@ opposite of JOSE's negotiable `alg` header, and stated as a MUST NOT in v0.1
 What a future bridge could look like: a COSE_Sign1 wrapper carrying an
 unmodified attest envelope as an opaque payload is a plausible
 constrained-device transport profile — it would carry attest inside COSE's
-framing for a small-device transport hop without adopting COSE's own
-signing-over-the-wire-form model for the receipt itself. Nothing in v0.1 or
-v0.2 defines this today.
+framing for a small-device transport hop without adopting COSE's own model
+of signing the producer's serialized payload octets directly for the
+receipt itself. Nothing in v0.1 or v0.2 defines this today.
 
 ## 4. RFC 8785 (JCS)
 
@@ -176,24 +211,33 @@ A C2PA manifest is a signed, structured record of assertions about an
 asset's provenance — actions describing how it was produced or edited,
 ingredient assertions chaining in the manifests of source assets it was
 derived from, and hash-binding assertions tying the manifest to the exact
-asset bytes it describes — embedded in or alongside the asset itself, and
-accumulated into a manifest store as the asset passes through further tools.
-A C2PA manifest answers what an asset is and how it came to be, and it
-travels physically with the asset it describes.
+asset bytes it describes. A Manifest Store commonly travels embedded in or
+alongside the asset, but C2PA does not require that carriage: a Manifest
+Store may instead be hosted externally (a repository or manifest-serving
+endpoint) and referenced rather than embedded, and manifests still
+accumulate as the asset passes through further C2PA-aware tools regardless
+of which carriage a given store uses. A C2PA manifest answers what an asset
+is and how it came to be.
 
 attest answers an adjacent but different question about a different
 relationship to the same asset: not what the asset is or how it was made,
 but that a license to hold or use a copy of it was granted, by whom, to
 whom, and under what terms — a signed side-document (the receipt envelope,
 v0.1 §4) that references an artifact by hash (`work.artifact_sha256` and
-related fields) rather than embedding anything inside the asset itself. A
-receipt says nothing about an artifact's authorship or edit history; a C2PA
-manifest says nothing about who is licensed to hold a copy of the asset it
-describes.
+related fields) rather than describing the asset's own provenance. The
+honest boundary is not that a manifest is structurally incapable of
+carrying licensing information — C2PA permits externally-defined and custom
+assertion types, and nothing stops one from encoding license-adjacent data
+in a custom assertion — it is that C2PA does not standardize purchase or
+license evidence as a first-class concept: no assertion type in the core
+C2PA specification defines issuer, buyer, license terms, revocability, or
+any of the other fields v0.1 §5 fixes as normative and required. attest is a
+purpose-built specification for exactly that content; C2PA is not, whatever
+an ad hoc custom assertion could in principle be made to hold.
 
-The two are adjacent and non-overlapping by construction, and were designed
-to be checkable from opposite directions against the same object: a game
-binary could ship with an embedded C2PA manifest recording its build
+The two standardize different things and were designed to be checkable from
+opposite directions against the same object: a game binary could ship with
+an embedded or externally-hosted C2PA manifest recording its build
 provenance, sold to a buyer who separately holds an attest receipt recording
 the license grant for that exact binary, both referencing the same
 underlying artifact hash. Nothing in either specification requires the
@@ -223,7 +267,7 @@ mapping them explicitly is the point of this entry:
 | Statement | Payload (`payload`, v0.1 §5) |
 | Signed statement | Signed envelope (`payload` + `signatures`, v0.1 §4) |
 | Transparency service | Stage 2 log (`entries.jsonl` / tlog-tiles substrate, v0.2 §7) |
-| Receipt | Stage 2 inclusion evidence (`transparency` / `corroboration`, v0.2 §10) |
+| Receipt | Stage 2 evidence bundle — signed checkpoint + `inclusion_proof` (v0.2 §10.2) |
 
 Why attest is not "already SCITT," despite that structural overlap: SCITT
 standardizes the registration and inclusion layer itself — how a
@@ -240,9 +284,24 @@ make an unsigned or invalidly-signed receipt authentic — a receipt that
 fails signature verification stays failed regardless of what the log says
 about it (conformance vector 28i pins exactly this: a receipt rejected for a
 compromised signing key still honestly reports `transparency: "logged"` for
-its own genuinely-logged evidence). That is a design inversion of SCITT's
-registration-centric trust model, not an oversight, and not a claim that
-SCITT's model is the wrong one for its own purpose.
+its own genuinely-logged evidence). That log evidence cannot rescue an
+invalid signature is not, on its own, a difference from SCITT: RFC 9943
+mandates issuer-signature verification and authentication before a
+transparency service will register a statement at all, and its own §9.2 is
+explicit that registration proves only that an issuer produced a statement,
+never that the statement's contents are accurate — SCITT and attest **share**
+that behavior. The real distinction is elsewhere: whether a relying party's
+acceptance of a statement REQUIRES a trusted transparency-service receipt
+before it is honored. SCITT's architecture centers the receipt as the
+trust-establishing act for a statement's standing inside its ecosystem.
+attest does not: v0.1's `verified` verdict (§11.1) is reached from signature,
+schema, revocation, and binding checks alone, with no transparency evidence
+required anywhere in that path, and Stage 2's `transparency`/`corroboration`
+components are additive corroboration, never a gate on that verdict. That is
+the true difference in trust models — not that attest inverts SCITT's
+registration-centric design, but that attest never requires the analogous
+receipt SCITT does for a relying party to accept a statement — and it is not
+a claim that SCITT's model is the wrong one for its own purpose.
 
 Where Stage 2 genuinely does touch SCITT's territory, stated honestly rather
 than as a concession: the C2SP tlog-tiles log substrate and inclusion-proof
