@@ -140,6 +140,17 @@ class AdapterOutcome:
     error: str | None
 
 
+def _reject_json_constant(constant: str) -> Any:
+    """``parse_constant`` hook that rejects ``NaN``/``Infinity``/``-Infinity``.
+
+    ``json.loads`` accepts these non-standard constants by default; the real
+    verifier's output is always standard JSON, so adapter stdout carrying
+    them (even in an otherwise-ignored extra member) must be treated as
+    invalid JSON, not silently parsed.
+    """
+    raise ValueError(f"non-standard JSON constant: {constant}")
+
+
 def run_adapter(template: str, leaf: Path, timeout: float) -> AdapterOutcome:
     """Invoke the adapter command ``template`` against one leaf directory.
 
@@ -167,8 +178,8 @@ def run_adapter(template: str, leaf: Path, timeout: float) -> AdapterOutcome:
         )
 
     try:
-        data = json.loads(proc.stdout)
-    except json.JSONDecodeError:
+        data = json.loads(proc.stdout, parse_constant=_reject_json_constant)
+    except (json.JSONDecodeError, ValueError):
         return AdapterOutcome(ok=False, data=None, error="adapter: stdout is not valid JSON")
     if not isinstance(data, dict):
         return AdapterOutcome(ok=False, data=None, error="adapter: stdout is not valid JSON")
@@ -182,6 +193,18 @@ def run_adapter(template: str, leaf: Path, timeout: float) -> AdapterOutcome:
 
 def _fmt(value: Any) -> str:
     return json.dumps(value)
+
+
+def _exact_eq(exp: object, act: object) -> bool:
+    """Type-strict equality for exact-scalar comparisons.
+
+    The real verifier emits genuine Python ``bool``s; ``bool`` is a subclass
+    of ``int`` in Python, so plain ``==`` would let a JSON number like ``1``
+    pass for ``true``. Requiring identical types (not just equal values)
+    closes that gap while leaving str-vs-str and bool-vs-bool comparisons
+    unaffected.
+    """
+    return type(exp) is type(act) and exp == act
 
 
 def diff_verify_result(expected: dict[str, Any], actual: dict[str, Any]) -> list[str]:
@@ -202,7 +225,7 @@ def diff_verify_result(expected: dict[str, Any], actual: dict[str, Any]) -> list
         exp_value = expected.get(field)
         if field not in actual:
             mismatches.append(f"{field}: missing from adapter output")
-        elif actual[field] != exp_value:
+        elif not _exact_eq(exp_value, actual[field]):
             mismatches.append(f"{field}: expected {_fmt(exp_value)}, got {_fmt(actual[field])}")
 
     for field in _VERIFY_CONDITIONAL_EXACT:
@@ -211,14 +234,17 @@ def diff_verify_result(expected: dict[str, Any], actual: dict[str, Any]) -> list
         exp_value = expected[field]
         if field not in actual:
             mismatches.append(f"{field}: missing from adapter output")
-        elif actual[field] != exp_value:
+        elif not _exact_eq(exp_value, actual[field]):
             mismatches.append(f"{field}: expected {_fmt(exp_value)}, got {_fmt(actual[field])}")
 
     for field in ("errors", "warnings"):
         if field not in expected:
             continue
         exp_list = expected[field]
-        act_list = actual.get(field, [])
+        if field not in actual:
+            mismatches.append(f"{field}: missing from adapter output")
+            continue
+        act_list = actual[field]
         if act_list != exp_list:
             mismatches.append(f"{field}: expected {_fmt(exp_list)}, got {_fmt(act_list)}")
 
@@ -250,7 +276,7 @@ def diff_chain_result(expected: dict[str, Any], actual: dict[str, Any]) -> list[
     exp_valid = expected.get("chain_valid")
     if "valid" not in actual:
         mismatches.append("valid: missing from adapter output")
-    elif actual["valid"] != exp_valid:
+    elif not _exact_eq(exp_valid, actual["valid"]):
         mismatches.append(f"valid: expected {_fmt(exp_valid)}, got {_fmt(actual['valid'])}")
 
     exp_link_status = expected.get("link_status", [])
@@ -269,9 +295,12 @@ def diff_chain_result(expected: dict[str, Any], actual: dict[str, Any]) -> list[
             )
 
     exp_warnings = expected.get("warnings", [])
-    act_warnings = actual.get("warnings", [])
-    if act_warnings != exp_warnings:
-        mismatches.append(f"warnings: expected {_fmt(exp_warnings)}, got {_fmt(act_warnings)}")
+    if "warnings" not in actual:
+        mismatches.append("warnings: missing from adapter output")
+    else:
+        act_warnings = actual["warnings"]
+        if act_warnings != exp_warnings:
+            mismatches.append(f"warnings: expected {_fmt(exp_warnings)}, got {_fmt(act_warnings)}")
 
     return mismatches
 
