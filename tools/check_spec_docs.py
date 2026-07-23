@@ -23,6 +23,7 @@ _SPEC_V01_PATH = _REPO_ROOT / "docs/spec/attest-v0.1.md"
 _SPEC_V02_PATH = _REPO_ROOT / "docs/spec/attest-v0.2.md"
 _SCHEMA_PATH = _REPO_ROOT / "docs/spec/schema/attest-receipt.schema.json"
 _VERSIONING_PATH = _REPO_ROOT / "docs/spec/attest-versioning.md"
+_VECTORS_PATH = _REPO_ROOT / "docs/spec/vectors"
 
 # The six normative sections attest-versioning.md's amendment procedure
 # requires (§5) every reader be able to find by exact heading.
@@ -63,7 +64,7 @@ _VERSIONING_ACTIVE_REVOCATION_CLASS = "`transferred`"
 # normative specs except each document's own §1 (conformance language) and
 # v0.2 §5 (a worked example carrying no mechanism of its own).
 REQUIRED_SECTIONS: tuple[str, ...] = tuple(f"v0.1 §{n}" for n in range(2, 16)) + tuple(
-    f"v0.2 §{n}" for n in range(2, 17) if n != 5
+    f"v0.2 §{n}" for n in range(2, 18) if n != 5
 )
 
 _VALID_CHECK_TYPES = frozenset({"schema", "corpus", "spec-text", "manual"})
@@ -368,6 +369,65 @@ def check_schema_pins(pc_rows: list[PcRow], schema: dict[str, object]) -> list[s
     return errors
 
 
+def check_pc08_corpus_claim(pc_rows: list[PcRow], vectors_path: Path) -> list[str]:
+    """PC-08's buyer-field claim covers filename-addressable payloads and
+    transfer-chain payloads embedded in ``chain.json``.
+
+    The former are found mechanically by filename; the latter deliberately are
+    not, so parse the three chain fixtures' ``payloads`` arrays as JSON.  Keep
+    the prose pin explicit about both the count and that distinction.
+    """
+    pc08_rows = [row for row in pc_rows if row.pc_id == 8]
+    if not pc08_rows:
+        return []
+
+    errors: list[str] = []
+    filename_payloads: list[dict[str, object]] = []
+    filename_counts: list[int] = []
+    for filename in ("payload.json", "envelope.json", "envelope.raw.json"):
+        files = sorted(vectors_path.rglob(filename))
+        filename_counts.append(len(files))
+        for path in files:
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
+            payload = data if filename == "payload.json" else data.get("payload")
+            if not isinstance(payload, dict):
+                errors.append(f"PC-08: {path.relative_to(_REPO_ROOT)} has no object payload")
+            else:
+                filename_payloads.append(payload)
+
+    chain_payloads: list[dict[str, object]] = []
+    chain_counts: list[int] = []
+    for path in sorted(vectors_path.rglob("chain.json")):
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+        payloads = data.get("payloads") if isinstance(data, dict) else None
+        if not isinstance(payloads, list) or not all(isinstance(item, dict) for item in payloads):
+            errors.append(f"PC-08: {path.relative_to(_REPO_ROOT)} has no object payloads array")
+            continue
+        chain_counts.append(len(payloads))
+        chain_payloads.extend(payloads)
+
+    payloads = filename_payloads + chain_payloads
+    expected_buyer_keys = {"commitment", "identifier_type", "pubkey"}
+    for index, payload in enumerate(payloads, start=1):
+        buyer = payload.get("buyer")
+        if not isinstance(buyer, dict) or set(buyer) != expected_buyer_keys:
+            errors.append(f"PC-08: payload object {index} has unexpected buyer member set")
+
+    counts = filename_counts + chain_counts
+    expected_detail = (
+        f"{len(payloads)} payload objects ({' + '.join(str(count) for count in counts)})"
+    )
+    required_note = "`chain.json` payloads are counted via JSON parse, not filename scan"
+    for row in pc08_rows:
+        if expected_detail not in row.detail:
+            errors.append(
+                f"PC-08: pinned corpus count must state {expected_detail}, found {row.detail!r}"
+            )
+        if required_note not in row.detail:
+            errors.append(f"PC-08: check detail must state that {required_note}")
+    return errors
+
+
 def check_versioning_sections(versioning: str) -> list[str]:
     """Every §1-§6 heading the amendment procedure (§5) requires is present."""
     errors: list[str] = []
@@ -647,6 +707,9 @@ def collect_errors(
     errors += [f"attest-threat-model.md: {e}" for e in check_matrix(threat_model, set(tm_ids))]
     errors += [f"attest-privacy.md: {e}" for e in check_claims(pc_rows)]
     errors += [f"attest-privacy.md: {e}" for e in check_schema_pins(pc_rows, schema)]
+    errors += [
+        f"attest-privacy.md: {e}" for e in check_pc08_corpus_claim(pc_rows, _VECTORS_PATH)
+    ]
     errors += [f"attest-versioning.md: {e}" for e in check_versioning_sections(versioning)]
     errors += [f"attest-versioning.md: {e}" for e in check_versioning_suite_names(versioning)]
     errors += [f"attest-versioning.md: {e}" for e in check_versioning_lifecycle_states(versioning)]

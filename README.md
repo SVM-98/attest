@@ -89,17 +89,18 @@ won't adopt voluntarily, the lever is regulation and market pressure, not forger
 
 Spec v0.1 is complete and v0.2 is specified and implemented on `main`, with two
 independent implementations — a Python reference implementation and a TypeScript
-verifier — that agree on all 82 conformance vector leaves across 34 groups: 50 of
+verifier — that agree on all 95 conformance vector leaves across 36 groups: 51 of
 them the v0.1 corpus, the rest exercising v0.2's hybrid signature profile,
-transparency/anchoring behaviour, and the upgrade-policy hardening (mixed-keyset
+transparency/anchoring behaviour, the upgrade-policy hardening (mixed-keyset
 prohibition, artifact-manifest currency, anchor profile v2, logged revocation
-deadlines). (A v0.1-only verifier is required to reject v0.2 envelopes, so it is
-measured against the 50-leaf subset.) There is also an
+deadlines), and Stage 3 issuer-mediated transfer. (A v0.1-only verifier is required
+to reject v0.2 envelopes, so it is measured against the 51-leaf subset.) There is also an
 end-to-end demo that deletes a store's entire infrastructure mid-lifecycle and
 proves the receipt still verifies.
 
-The published packages are still `0.1.2`: everything v0.2 lives on `main` and is
-not released yet.
+The published packages are `0.3.0`, which already ships v0.2 Stages 1 and 2
+(hybrid signatures; transparency and anchoring). Stage 3 — issuer-mediated
+transfer, this document's own §17 — is the remaining piece `0.4.0` ships.
 
 Three pieces of assurance work go beyond what a test suite can show. They are
 being finished on branches, and are linked here rather than left invisible:
@@ -112,7 +113,7 @@ being finished on branches, and are linked here rather than left invisible:
   file; nothing is claimed more broadly there than the prover checked. In
   progress on [`feature/p1.3-formal-verification`](https://github.com/SVM-98/attest/tree/feature/p1.3-formal-verification).
 - **[Threat model](https://github.com/SVM-98/attest/blob/pillar-1/docs/spec/attest-threat-model.md).**
-  60 attacks catalogued across the whole receipt lifecycle, each either mitigated
+  67 attacks catalogued across the whole receipt lifecycle, each either mitigated
   or recorded as out of scope with a reason, a traceability matrix, and the
   protocol gaps the exercise found left tracked in the open instead of quietly
   fixed. On [`pillar-1`](https://github.com/SVM-98/attest/tree/pillar-1).
@@ -120,6 +121,11 @@ being finished on branches, and are linked here rather than left invisible:
   Every field classified by what it reveals to which observer, twenty testable
   privacy claims, and a GDPR annex covering what a receipt deliberately does not
   record. On [`pillar-1`](https://github.com/SVM-98/attest/tree/pillar-1).
+- **[Transfer economics](https://github.com/SVM-98/attest/blob/pillar-1/docs/spec/attest-transfer-economics.md)
+  (non-normative).** The market and legal context behind Stage 3's transfer
+  profile — resale velocity, the issuer-royalty incentive, and the CJEU case law
+  (*UsedSoft*, *Tom Kabinet*) that makes transfer issuer-mediated rather than a
+  general resale right. On [`pillar-1`](https://github.com/SVM-98/attest/tree/pillar-1).
 
 ## Quickstart
 
@@ -175,7 +181,11 @@ specification defining the v0.2 hybrid Ed25519+ML-DSA-65 signature profile
 remain valid and verifiable forever. That profile was Stage 1; Stage 2 — issuer
 key transparency and timestamp anchoring, where a log corroborates a receipt's
 existence without ever being able to make an unsigned receipt look authentic —
-is specified in the same document. Transfer records are the remaining stage.
+is specified in the same document. Stage 3 — issuer-mediated transfer, giving
+`license.transferable` its first real meaning, layered on top of the Stage 2 log
+— is specified there too (§17); business economics around resale are
+deliberately out of protocol and live in the non-normative
+[transfer-economics annex](docs/spec/attest-transfer-economics.md).
 
 [docs/spec/attest-versioning.md](docs/spec/attest-versioning.md) is the
 normative upgrade policy governing both specifications above: the additive
@@ -209,9 +219,6 @@ Non-normative, and deliberately undated — these are directions, not commitment
   capture their own evidence of a purchase from a store that never signs anything,
   at weaker-than-issuer-signed trust. Legal review is required before any of this
   is built.
-- **Rights-holder-authorized transfer.** A future profile that gives real meaning
-  to the reserved `license.transferable` field, once rights holders actually
-  authorize resale or transfer.
 - **Registry / replication layer.** An optional layer for replicating verification
   material, with optional Merkle-root transparency anchoring — the only place a
   chain will ever appear in this project, and even then strictly optional.
@@ -231,7 +238,7 @@ registration — real trademark enforcement would require actually registering t
 mark, which has not happened.
 
 **Contributing.** See [`CONTRIBUTING.md`](CONTRIBUTING.md). Implementation pull
-requests must pass all 82 conformance vector leaves and keep both the Python and
+requests must pass all 95 conformance vector leaves and keep both the Python and
 TypeScript suites green.
 
 **Contact.** Use GitHub Issues for technical bugs, GitHub Discussions for
