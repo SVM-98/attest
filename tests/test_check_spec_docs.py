@@ -8,6 +8,7 @@ Fixture-driven: each case builds minimal doc strings and asserts on
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -58,11 +59,22 @@ def _spec_text(version: str, sections: list[int]) -> str:
 
 
 def _minimal_spec_v01() -> str:
-    return _spec_text("0.1", list(range(1, 16)))  # §1..§15
+    return (
+        _spec_text("0.1", list(range(1, 16)))  # §1..§15
+        + "### 5.5 `license`\n\n"
+        + "| `not_transferable_before` | string, ISO-8601 UTC | OPTIONAL | Reserved. |\n"
+    )
 
 
 def _minimal_spec_v02() -> str:
-    return _spec_text("0.2", list(range(1, 17)))  # §1..§16
+    return (
+        _spec_text("0.2", list(range(1, 17)))  # §1..§16
+        + "## 17. Stage 3: issuer-mediated transfer\n\n"
+        + "`Attest-transfer-authorization-v1` `transfer-record` "
+        + "`transferred_revocation_unbacked` `transfer_record_unlogged` "
+        + "`transfer_not_yet_transferable` `transfer_double_assignment_conflict` "
+        + '`revocation: "transferred"`\n'
+    )
 
 
 def _tm_entry(tm_id: int, verdict_line: str) -> str:
@@ -159,7 +171,17 @@ def _minimal_versioning() -> str:
         "| `none` | active | v0.1 | v0.1 §5.5 |\n"
         "| `refund_window` | active | v0.1 | v0.1 §5.5 |\n"
         "| `policy` | active | v0.1 | v0.1 §5.5 |\n"
-        "| `transferred` | reserved | — | Future transfer profile |\n"
+        "| `transferred` | active | v0.2 §17 | v0.2 §17.3 |\n"
+        "\n"
+        "### 6.4 Log entry types\n\n"
+        "| Name | State | Introduced | Reference |\n"
+        "| --- | --- | --- | --- |\n"
+        "| `transfer-record` | active | v0.2 §17 | v0.2 §8, §17.2 |\n"
+        "\n"
+        "### 6.5 Transfer types\n\n"
+        "| Name | State | Introduced | Reference |\n"
+        "| --- | --- | --- | --- |\n"
+        "| `issuer-mediated-v1` | active | v0.2 §17 | v0.2 §17 |\n"
         "\n"
         "## Revision log\n\n"
         "- **2026-07-22 (rev 1)**: document introduced — vectors: none\n"
@@ -498,6 +520,97 @@ def test_real_repo_docs_are_clean() -> None:
     assert errors == []
 
 
+def test_v02_stage3_section_removal_is_flagged_by_collect_errors() -> None:
+    threat_model = (SPEC_DIR / "attest-threat-model.md").read_text(encoding="utf-8")
+    privacy = (SPEC_DIR / "attest-privacy.md").read_text(encoding="utf-8")
+    spec_v01 = (SPEC_DIR / "attest-v0.1.md").read_text(encoding="utf-8")
+    spec_v02 = (SPEC_DIR / "attest-v0.2.md").read_text(encoding="utf-8")
+    schema = json.loads(
+        (SPEC_DIR / "schema/attest-receipt.schema.json").read_text(encoding="utf-8")
+    )
+    versioning = (SPEC_DIR / "attest-versioning.md").read_text(encoding="utf-8")
+    spec_v02_without_stage3 = re.sub(
+        r"^## 17\. Stage 3: issuer-mediated transfer.*?(?=^## Revision log$)",
+        "",
+        spec_v02,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+
+    errors = collect_errors(
+        threat_model, privacy, spec_v01, spec_v02_without_stage3, schema, versioning
+    )
+
+    assert errors
+
+
+def test_v01_not_transferable_before_row_removal_is_flagged_by_collect_errors() -> None:
+    threat_model = (SPEC_DIR / "attest-threat-model.md").read_text(encoding="utf-8")
+    privacy = (SPEC_DIR / "attest-privacy.md").read_text(encoding="utf-8")
+    spec_v01 = (SPEC_DIR / "attest-v0.1.md").read_text(encoding="utf-8")
+    spec_v02 = (SPEC_DIR / "attest-v0.2.md").read_text(encoding="utf-8")
+    schema = json.loads(
+        (SPEC_DIR / "schema/attest-receipt.schema.json").read_text(encoding="utf-8")
+    )
+    versioning = (SPEC_DIR / "attest-versioning.md").read_text(encoding="utf-8")
+    spec_v01_without_transfer_floor = re.sub(
+        r"^\| `not_transferable_before` \|.*\n",
+        "",
+        spec_v01,
+        flags=re.MULTILINE,
+    )
+
+    errors = collect_errors(
+        threat_model, privacy, spec_v01_without_transfer_floor, spec_v02, schema, versioning
+    )
+
+    assert errors
+
+
+def test_versioning_transfer_rows_swapped_between_registries_are_flagged() -> None:
+    threat_model = (SPEC_DIR / "attest-threat-model.md").read_text(encoding="utf-8")
+    privacy = (SPEC_DIR / "attest-privacy.md").read_text(encoding="utf-8")
+    spec_v01 = (SPEC_DIR / "attest-v0.1.md").read_text(encoding="utf-8")
+    spec_v02 = (SPEC_DIR / "attest-v0.2.md").read_text(encoding="utf-8")
+    schema = json.loads(
+        (SPEC_DIR / "schema/attest-receipt.schema.json").read_text(encoding="utf-8")
+    )
+    versioning = (SPEC_DIR / "attest-versioning.md").read_text(encoding="utf-8")
+    swapped_versioning = (
+        versioning.replace("`transfer-record`", "`temporary-transfer-row`")
+        .replace("`issuer-mediated-v1`", "`transfer-record`")
+        .replace("`temporary-transfer-row`", "`issuer-mediated-v1`")
+    )
+
+    errors = collect_errors(threat_model, privacy, spec_v01, spec_v02, schema, swapped_versioning)
+
+    assert errors
+
+
+def test_versioning_transferred_row_moved_out_of_section_6_3_is_flagged() -> None:
+    threat_model = (SPEC_DIR / "attest-threat-model.md").read_text(encoding="utf-8")
+    privacy = (SPEC_DIR / "attest-privacy.md").read_text(encoding="utf-8")
+    spec_v01 = (SPEC_DIR / "attest-v0.1.md").read_text(encoding="utf-8")
+    spec_v02 = (SPEC_DIR / "attest-v0.2.md").read_text(encoding="utf-8")
+    schema = json.loads(
+        (SPEC_DIR / "schema/attest-receipt.schema.json").read_text(encoding="utf-8")
+    )
+    versioning = (SPEC_DIR / "attest-versioning.md").read_text(encoding="utf-8")
+    lines = versioning.splitlines(keepends=True)
+    row_idx = next(
+        i for i, line in enumerate(lines) if line.startswith("| `transferred` | active |")
+    )
+    row = lines.pop(row_idx)
+    anchor_idx = next(
+        i for i, line in enumerate(lines) if line.startswith("| `issuer-mediated-v1` | active |")
+    )
+    lines.insert(anchor_idx + 1, row)
+    moved_versioning = "".join(lines)
+
+    errors = collect_errors(threat_model, privacy, spec_v01, spec_v02, schema, moved_versioning)
+
+    assert errors
+
+
 def test_main_exits_zero_on_the_real_docs() -> None:
     # The CI gate is the process exit code, not the error list. Every other test
     # calls collect_errors directly, so main() could return 0 unconditionally and
@@ -530,6 +643,32 @@ def test_main_exits_nonzero_when_a_document_drifts(
     )
 
     assert main() == 1
+
+
+class TestStage3Transfer:
+    def test_v02_has_stage3_sections(self) -> None:
+        text = (SPEC_DIR / "attest-v0.2.md").read_text(encoding="utf-8")
+        for needle in (
+            "## 17. Stage 3: issuer-mediated transfer",
+            "`Attest-transfer-authorization-v1`",
+            "`transfer-record`",
+            "`transferred_revocation_unbacked`",
+            "`transfer_record_unlogged`",
+            "`transfer_not_yet_transferable`",
+            "`transfer_double_assignment_conflict`",
+            '`revocation: "transferred"`',
+        ):
+            assert needle in text
+
+    def test_registry_transferred_is_active(self) -> None:
+        text = (SPEC_DIR / "attest-versioning.md").read_text(encoding="utf-8")
+        assert "| `transferred` | active" in text
+        assert "| `transfer-record` | active" in text
+        assert "`issuer-mediated-v1`" in text
+
+    def test_v01_registers_not_transferable_before(self) -> None:
+        text = (SPEC_DIR / "attest-v0.1.md").read_text(encoding="utf-8")
+        assert "`not_transferable_before`" in text
 
 
 class TestVersioningDoc:
@@ -619,6 +758,43 @@ def test_versioning_doc_missing_policy_revocation_row_is_flagged() -> None:
     errors = collect_errors(**docs)
 
     assert any("policy" in e for e in errors)
+
+
+def test_versioning_doc_transferred_row_not_active_is_flagged() -> None:
+    # A regression back to `reserved` (or any state other than `active`) must
+    # be caught -- mere row presence is not enough for this specific class,
+    # since v0.2 §17 (rev 6) activation is exactly the fact worth guarding.
+    docs = _base_docs()
+    docs["versioning"] = _minimal_versioning().replace(
+        "| `transferred` | active | v0.2 §17 | v0.2 §17.3 |\n",
+        "| `transferred` | reserved | — | Future transfer profile |\n",
+    )
+
+    errors = collect_errors(**docs)
+
+    assert any("transferred" in e and "active" in e for e in errors)
+
+
+def test_versioning_doc_transfer_record_row_not_active_is_flagged() -> None:
+    docs = _base_docs()
+    docs["versioning"] = _minimal_versioning().replace(
+        "| `transfer-record` | active | v0.2 §17 | v0.2 §8, §17.2 |\n", ""
+    )
+
+    errors = collect_errors(**docs)
+
+    assert any("transfer-record" in e and "active" in e for e in errors)
+
+
+def test_versioning_doc_issuer_mediated_v1_row_not_active_is_flagged() -> None:
+    docs = _base_docs()
+    docs["versioning"] = _minimal_versioning().replace(
+        "| `issuer-mediated-v1` | active | v0.2 §17 | v0.2 §17 |\n", ""
+    )
+
+    errors = collect_errors(**docs)
+
+    assert any("issuer-mediated-v1" in e and "active" in e for e in errors)
 
 
 def test_versioning_doc_missing_lifecycle_exception_is_flagged() -> None:

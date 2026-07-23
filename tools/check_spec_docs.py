@@ -43,8 +43,7 @@ _VERSIONING_REQUIRED_SUITES: tuple[str, ...] = ("`ed25519`", "`ed25519+ml-dsa-65
 # §4's algorithm lifecycle defines exactly these three states.
 _VERSIONING_LIFECYCLE_STATES: tuple[str, ...] = ("`active`", "`deprecated`", "`unsafe`")
 
-# §6.3 lists the existing `license.revocability` classes (v0.1 §5.5), plus the
-# separate reserved `transferred` row for the future transfer profile.
+# §6.3 lists the existing `license.revocability` classes (v0.1 §5.5).
 # `compromised` is NOT one of these: it is a key lifecycle STATUS (v0.1 §7.3),
 # not a revocation class, and does not belong in this registry (2026-07-23 fix).
 _VERSIONING_REQUIRED_REVOCATION_CLASSES: tuple[str, ...] = (
@@ -52,6 +51,13 @@ _VERSIONING_REQUIRED_REVOCATION_CLASSES: tuple[str, ...] = (
     "`refund_window`",
     "`policy`",
 )
+
+# `transferred` (v0.2 §17, rev 6) just moved from `reserved` to `active` --
+# checked separately from the tuple above, and for its exact state, not just
+# its presence: a regression back to `reserved` in this table would silently
+# undo the transfer profile's own registry activation, and mere row presence
+# (the check every other class above gets) would not catch that regression.
+_VERSIONING_ACTIVE_REVOCATION_CLASS = "`transferred`"
 
 # Required traceability-matrix coverage: every numbered section of the two
 # normative specs except each document's own §1 (conformance language) and
@@ -399,11 +405,74 @@ def check_versioning_lifecycle_states(versioning: str) -> list[str]:
 
 
 def check_versioning_revocation_classes(versioning: str) -> list[str]:
-    """The §6.3 registry has a table row for every existing class."""
+    """The §6.3 registry has a table row for every existing class, and
+    `transferred` (v0.2 §17, rev 6) specifically carries state `active`.
+
+    Matching is scoped to the §6.3 section slice so a row that migrates into a
+    DIFFERENT registry's table cannot satisfy these checks (same discipline as
+    check_versioning_transfer_registries)."""
     errors: list[str] = []
+    revocation_classes_match = re.search(
+        r"^### 6\.3 Revocation classes$([\s\S]*?)(?=^### |^## |\Z)", versioning, re.MULTILINE
+    )
+    if revocation_classes_match is None:
+        errors.append("missing required heading '### 6.3 Revocation classes'")
+        revocation_classes = ""
+    else:
+        revocation_classes = revocation_classes_match.group(1)
     for revocation_class in _VERSIONING_REQUIRED_REVOCATION_CLASSES:
-        if re.search(rf"^\| {re.escape(revocation_class)} \|", versioning, re.MULTILINE) is None:
+        if (
+            re.search(rf"^\| {re.escape(revocation_class)} \|", revocation_classes, re.MULTILINE)
+            is None
+        ):
             errors.append(f"§6.3 registry missing revocation-class row {revocation_class}")
+    active_pattern = rf"^\| {re.escape(_VERSIONING_ACTIVE_REVOCATION_CLASS)} \| active \|"
+    if re.search(active_pattern, revocation_classes, re.MULTILINE) is None:
+        errors.append(
+            "§6.3 registry missing active-state row for revocation class "
+            f"{_VERSIONING_ACTIVE_REVOCATION_CLASS}"
+        )
+    return errors
+
+
+# Stage 3 (v0.2 §17, rev 6) registers two more active rows this document's
+# amendment procedure (§5) requires: the §6.4 log entry type `transfer-record`
+# and the §6.5 transfer type `issuer-mediated-v1` -- the latter registry was
+# empty before this revision, so getting a row there at all (not just the
+# right state) is exactly the fact worth guarding against regression.
+_VERSIONING_REQUIRED_ACTIVE_LOG_ENTRY_TYPES: tuple[str, ...] = ("`transfer-record`",)
+_VERSIONING_REQUIRED_ACTIVE_TRANSFER_TYPES: tuple[str, ...] = ("`issuer-mediated-v1`",)
+
+
+def check_versioning_transfer_registries(versioning: str) -> list[str]:
+    """§6.4 and §6.5 each carry their Stage 3 (v0.2 §17, rev 6) active row."""
+    errors: list[str] = []
+    log_entry_types_match = re.search(
+        r"^### 6\.4 Log entry types$([\s\S]*?)(?=^### |^## |\Z)", versioning, re.MULTILINE
+    )
+    if log_entry_types_match is None:
+        errors.append("missing required heading '### 6.4 Log entry types'")
+        log_entry_types = ""
+    else:
+        log_entry_types = log_entry_types_match.group(1)
+    for entry_type in _VERSIONING_REQUIRED_ACTIVE_LOG_ENTRY_TYPES:
+        pattern = rf"^\| {re.escape(entry_type)} \| active \|"
+        if re.search(pattern, log_entry_types, re.MULTILINE) is None:
+            errors.append(f"§6.4 registry missing active-state row for log entry type {entry_type}")
+    transfer_types_match = re.search(
+        r"^### 6\.5 Transfer types$([\s\S]*?)(?=^### |^## |\Z)", versioning, re.MULTILINE
+    )
+    if transfer_types_match is None:
+        errors.append("missing required heading '### 6.5 Transfer types'")
+        transfer_types = ""
+    else:
+        transfer_types = transfer_types_match.group(1)
+    for transfer_type in _VERSIONING_REQUIRED_ACTIVE_TRANSFER_TYPES:
+        pattern = rf"^\| {re.escape(transfer_type)} \| active \|"
+        if re.search(pattern, transfer_types, re.MULTILINE) is None:
+            errors.append(
+                f"§6.5 registry missing active-state row for transfer type {transfer_type}"
+            )
     return errors
 
 
@@ -411,6 +480,47 @@ def check_versioning_lifecycle_exception(versioning: str) -> list[str]:
     """§2 explicitly exempts lifecycle-driven classification downgrades."""
     if re.search(r"^One exception exists:.*$", versioning, re.MULTILINE) is None:
         return ["§2 missing required lifecycle exception paragraph 'One exception exists:'"]
+    return []
+
+
+_STAGE3_HEADING = "## 17. Stage 3: issuer-mediated transfer"
+_STAGE3_REQUIRED_LITERALS: tuple[str, ...] = (
+    "Attest-transfer-authorization-v1",
+    "transfer-record",
+    "transferred_revocation_unbacked",
+    "transfer_record_unlogged",
+    "transfer_not_yet_transferable",
+    "transfer_double_assignment_conflict",
+    'revocation: "transferred"',
+)
+
+
+def check_v02_stage3_transfer_profile(spec_v02: str) -> list[str]:
+    """v0.2 §17 retains its heading and Stage 3 fixed vocabulary."""
+    errors: list[str] = []
+    stage3_match = re.search(
+        rf"^{re.escape(_STAGE3_HEADING)}$([\s\S]*?)(?=^## |\Z)", spec_v02, re.MULTILINE
+    )
+    if stage3_match is None:
+        errors.append(f"attest-v0.2.md: missing required heading {_STAGE3_HEADING!r}")
+        stage3_text = ""
+    else:
+        stage3_text = stage3_match.group(1)
+    for literal in _STAGE3_REQUIRED_LITERALS:
+        if literal not in stage3_text:
+            errors.append(f"attest-v0.2.md: §17 missing required literal {literal!r}")
+    return errors
+
+
+def check_v01_not_transferable_before_row(spec_v01: str) -> list[str]:
+    """v0.1 §5.5 retains Stage 3's not_transferable_before field row."""
+    license_match = re.search(
+        r"^### 5\.5 `license`$([\s\S]*?)(?=^### |^## |\Z)", spec_v01, re.MULTILINE
+    )
+    if license_match is None:
+        return ["attest-v0.1.md: missing required heading '### 5.5 `license`'"]
+    if re.search(r"^\| `not_transferable_before` \|", license_match.group(1), re.MULTILINE) is None:
+        return ["attest-v0.1.md: §5.5 missing required not_transferable_before row"]
     return []
 
 
@@ -546,6 +656,11 @@ def collect_errors(
     errors += [
         f"attest-versioning.md: {e}" for e in check_versioning_lifecycle_exception(versioning)
     ]
+    errors += [
+        f"attest-versioning.md: {e}" for e in check_versioning_transfer_registries(versioning)
+    ]
+    errors += check_v02_stage3_transfer_profile(spec_v02)
+    errors += check_v01_not_transferable_before_row(spec_v01)
     errors += check_revision_logs(spec_v01, spec_v02)
     errors += _check_revision_log(versioning, "attest-versioning.md")
     errors += check_receipt_id_pattern(spec_v01, schema)
