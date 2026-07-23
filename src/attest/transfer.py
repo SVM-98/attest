@@ -8,14 +8,17 @@ preimage, `authorization_message`) and the ISSUER's own signature over
 like every other v0.2 side-document (hybrid AND-rule via
 `manifests.sign_signature_block`/`verify_signature_block`, §13).
 
-This module only builds records, checks a holder's authorization signature
-in isolation, checks a record's own issuer-signature self-consistency
-against an issuer's key manifest, and evaluates whether a record has proven
-`logged` (or better) standing in the issuer's transparency log. It has no
-opinion on the full transfer semantics — old-receipt extinguishment,
-double-assignment, `not_transferable_before`, chain-of-title — which need the
-old AND new receipts in hand and belong to `verify.py` (§17.2-§17.8), the one
-module that has both.
+This module builds records, checks a holder's authorization signature in
+isolation, checks a record's own issuer-signature self-consistency against
+an issuer's key manifest, and evaluates whether a record has proven
+`logged` (or better) standing in the issuer's transparency log. Old-receipt
+extinguishment, double-assignment, and `not_transferable_before` need the
+receipt PAYLOAD in hand (its `buyer`/`license` blocks) and belong to
+`verify.py` (§17.3/§17.7), the one module with the single-receipt
+verification pipeline. Chain-of-title auditing (§17.5, `audit_chain` below)
+lives here instead: it is a separate audit surface over a whole SEQUENCE of
+receipts, needs none of `verify.py`'s single-receipt pipeline, and composes
+only this module's own primitives plus `revocation.verify_record_signature`.
 """
 
 from __future__ import annotations
@@ -23,10 +26,11 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from attest import anchor, canon, keys, manifests, pq, tlog
+from attest import anchor, canon, keys, manifests, pq, revocation, tlog
 from attest import transparency as transparency_module
 
 _DATE_FMT = "%Y-%m-%dT%H:%M:%SZ"
@@ -435,3 +439,216 @@ def record_logged_standing(
     if not isinstance(leaf_index, int) or isinstance(leaf_index, bool) or leaf_index < 0:
         return None
     return leaf_index
+
+
+# --- audit_chain (v0.2 §17.5): chain-of-title, a separate audit surface -----
+
+# Fixed literal (mirrors `verify._REVOCATION_TRANSFERRED` — the record's own
+# `status` field value a backing revocation record must carry).
+_RECORD_STATUS_TRANSFERRED = "transferred"
+
+# Chain-audit error literals (v0.2 §17.5, verbatim; `{i}` = 1-based link
+# ordinal; identical strings in TS — messages.ts).
+_ERR_NO_TRANSFER_RECORD = "chain link {i}: no transfer record"
+_ERR_ISSUER_SIGNATURE_INVALID = "chain link {i}: issuer signature invalid"
+_ERR_HOLDER_AUTHORIZATION_INVALID = "chain link {i}: holder authorization invalid"
+_ERR_TRANSFER_RECORD_NOT_LOGGED = "chain link {i}: transfer record not logged"
+_ERR_LOSING_BRANCH = "chain link {i}: losing branch of a double assignment"
+_ERR_LOOP_CLOSURE = "chain link {i}: new receipt buyer.pubkey != new_holder_pubkey"
+_ERR_MISSING_BACKED_REVOCATION = (
+    "chain link {i}: previous receipt lacks a backed transferred-class revocation"
+)
+
+
+@dataclass(frozen=True)
+class ChainAuditResult:
+    """v0.2 §17.5: chain-of-title audit — a SEPARATE surface from standard
+    single-receipt `verify()` (a receipt verifies standalone; §17.1's
+    loop-closure paragraph). `link_status`/errors are ordered link-by-link,
+    1-based in the error text, `link_status[k]` describing the transfer from
+    `payloads[k]` to `payloads[k + 1]`."""
+
+    valid: bool
+    link_status: tuple[str, ...]  # one of "valid" | "invalid" per link, len == len(payloads) - 1
+    errors: tuple[str, ...]
+    warnings: tuple[str, ...]
+
+
+def audit_chain(
+    payloads: list[dict[str, Any]],
+    transfer_view: list[dict[str, Any]],
+    revocation_view: list[dict[str, Any]],
+    key_manifest: dict[str, Any],
+    log_keys: list[tlog.LogKey],
+    anchor_policy: anchor.AnchorPolicy,
+) -> ChainAuditResult:
+    """Walk `payloads` (each receipt's own PAYLOAD dict — `receipt_id` and
+    `buyer.pubkey` are all this reads) as a chain of title, validating each
+    consecutive link `payloads[i - 1]` -> `payloads[i]` (1-based `i` in the
+    error text) against `transfer_view` (`{"record", "evidence"}` claims, the
+    same untrusted shape `verify()`'s `transfer_view` takes) and
+    `revocation_view` (ordinary revocation records).
+
+    `manifests.verify_key_manifest(key_manifest)` is hoisted once: if the
+    manifest is not self-consistent, NOTHING it would sign can be trusted,
+    so every link is immediately `"invalid"` with only the issuer-signature
+    literal, and no other check runs.
+
+    Otherwise, per link, in this exact order (deterministic multi-error
+    output — later checks for the SAME link still run after an earlier one
+    fails):
+
+    1. select the transfer-view claim whose `record["receipt_id"] ==
+       payloads[i - 1]["receipt_id"]` and `record["new_receipt_id"] ==
+       payloads[i]["receipt_id"]` — none found -> `_ERR_NO_TRANSFER_RECORD`,
+       and checks 2-6 below are skipped entirely (nothing to check them
+       against); check 7 still runs independently.
+    2. `verify_record_signature(record, key_manifest)` -> issuer signature.
+    3. `verify_authorization(record, payloads[i - 1]["buyer"]["pubkey"])` ->
+       holder authorization, against the PREVIOUS receipt's own key.
+    4. `record_logged_standing(...)` -> log inclusion.
+    5. Only once 2-4 all succeeded: among every OTHER transfer-view claim
+       that is ALSO established (issuer sig + holder auth + logged) for the
+       SAME previous `receipt_id` (regardless of ITS OWN `new_receipt_id` —
+       this is what makes a double assignment detectable at all, §17.4),
+       the selected record must hold the smallest log index -> losing
+       branch of a double assignment.
+    6. `record["new_holder_pubkey"] == payloads[i]["buyer"]["pubkey"]` ->
+       pubkey loop closure on the NEXT receipt.
+    7. (independent of the transfer record) an authenticated
+       `status == "transferred"` revocation record for `payloads[i - 1]`'s
+       `receipt_id` exists in `revocation_view`
+       (`revocation.verify_record_signature`) -> the previous receipt's own
+       backed extinguishment.
+
+    A link is `"valid"` iff every applicable check above passed; `valid` is
+    `True` iff every link is. Warnings accumulate from
+    `record_logged_standing`'s own shared-evaluator diagnostics (deduplicated
+    inside it), never invented here.
+    """
+    link_count = max(len(payloads) - 1, 0)
+
+    if not manifests.verify_key_manifest(key_manifest):
+        manifest_invalid_errors = tuple(
+            _ERR_ISSUER_SIGNATURE_INVALID.format(i=i) for i in range(1, link_count + 1)
+        )
+        return ChainAuditResult(
+            valid=link_count == 0,
+            link_status=tuple("invalid" for _ in range(link_count)),
+            errors=manifest_invalid_errors,
+            warnings=(),
+        )
+
+    manifest_issuer = key_manifest.get("issuer")
+    issuer_id_for_log = manifest_issuer if isinstance(manifest_issuer, str) else ""
+
+    errors: list[str] = []
+    warnings: list[str] = []
+    link_status: list[str] = []
+
+    for i in range(1, link_count + 1):
+        prev_payload = payloads[i - 1]
+        next_payload = payloads[i]
+        prev_receipt_id = prev_payload.get("receipt_id")
+        next_receipt_id = next_payload.get("receipt_id")
+        prev_buyer = prev_payload.get("buyer")
+        prev_pubkey = prev_buyer.get("pubkey") if isinstance(prev_buyer, dict) else None
+        link_ok = True
+
+        selected_claim: dict[str, Any] | None = None
+        for claim in transfer_view:
+            if not isinstance(claim, dict):
+                continue
+            candidate_record = claim.get("record")
+            if (
+                isinstance(candidate_record, dict)
+                and candidate_record.get("receipt_id") == prev_receipt_id
+                and candidate_record.get("new_receipt_id") == next_receipt_id
+            ):
+                selected_claim = claim
+                break
+
+        record = selected_claim.get("record") if selected_claim is not None else None
+        if not isinstance(record, dict):
+            errors.append(_ERR_NO_TRANSFER_RECORD.format(i=i))
+            link_ok = False
+        else:
+            sig_ok = verify_record_signature(record, key_manifest)
+            if not sig_ok:
+                errors.append(_ERR_ISSUER_SIGNATURE_INVALID.format(i=i))
+                link_ok = False
+
+            auth_ok = isinstance(prev_pubkey, str) and verify_authorization(record, prev_pubkey)
+            if not auth_ok:
+                errors.append(_ERR_HOLDER_AUTHORIZATION_INVALID.format(i=i))
+                link_ok = False
+
+            evidence = selected_claim.get("evidence") if selected_claim is not None else None
+            leaf_index = record_logged_standing(
+                record, evidence, issuer_id_for_log, log_keys, anchor_policy, warnings
+            )
+            if leaf_index is None:
+                errors.append(_ERR_TRANSFER_RECORD_NOT_LOGGED.format(i=i))
+                link_ok = False
+
+            if sig_ok and auth_ok and leaf_index is not None:
+                established_leaf_indices = [leaf_index]
+                for claim in transfer_view:
+                    if not isinstance(claim, dict):
+                        continue
+                    candidate = claim.get("record")
+                    if (
+                        not isinstance(candidate, dict)
+                        or candidate is record
+                        or candidate.get("receipt_id") != prev_receipt_id
+                    ):
+                        continue
+                    if not verify_record_signature(candidate, key_manifest):
+                        continue
+                    if not (
+                        isinstance(prev_pubkey, str)
+                        and verify_authorization(candidate, prev_pubkey)
+                    ):
+                        continue
+                    candidate_leaf_index = record_logged_standing(
+                        candidate,
+                        claim.get("evidence"),
+                        issuer_id_for_log,
+                        log_keys,
+                        anchor_policy,
+                        warnings,
+                    )
+                    if candidate_leaf_index is not None:
+                        established_leaf_indices.append(candidate_leaf_index)
+                if leaf_index != min(established_leaf_indices):
+                    errors.append(_ERR_LOSING_BRANCH.format(i=i))
+                    link_ok = False
+
+            next_buyer = next_payload.get("buyer")
+            next_pubkey = next_buyer.get("pubkey") if isinstance(next_buyer, dict) else None
+            if record.get("new_holder_pubkey") != next_pubkey:
+                errors.append(_ERR_LOOP_CLOSURE.format(i=i))
+                link_ok = False
+
+        backed = False
+        for rev_record in revocation_view:
+            if (
+                isinstance(rev_record, dict)
+                and rev_record.get("receipt_id") == prev_receipt_id
+                and rev_record.get("status") == _RECORD_STATUS_TRANSFERRED
+                and revocation.verify_record_signature(rev_record, key_manifest)
+            ):
+                backed = True
+                break
+        if not backed:
+            errors.append(_ERR_MISSING_BACKED_REVOCATION.format(i=i))
+            link_ok = False
+
+        link_status.append("valid" if link_ok else "invalid")
+
+    return ChainAuditResult(
+        valid=all(status == "valid" for status in link_status),
+        link_status=tuple(link_status),
+        errors=tuple(errors),
+        warnings=tuple(warnings),
+    )

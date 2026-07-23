@@ -19,7 +19,7 @@ from typing import Any
 
 import pytest
 
-from attest import cli, keys, pq, revocation, tlog, verify
+from attest import cli, keys, pq, revocation, tlog, transfer, verify
 from tests.helpers import make_payload
 
 ISSUER = "store.example.com"
@@ -3449,3 +3449,383 @@ def test_log_state_files_are_published_with_umask_default_modes(tmp_path: Path) 
     assert stat.S_IMODE(tile_dir.stat().st_mode) == 0o755
     for tile in tile_dir.iterdir():
         assert stat.S_IMODE(tile.stat().st_mode) == 0o644, tile.name
+
+
+# --- transfer authorize / record (v0.2 §17) ----------------------------------
+
+NEW_HOLDER_PUB_B64U = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"  # 32 zero bytes
+TRANSFERRED_AT = "2026-07-23T00:00:00Z"
+
+
+def _transfer_authorize(
+    tmp_path: Path,
+    receipt_path: Path,
+    holder_seed: Path,
+    out_name: str = "authorization.json",
+    new_holder_pubkey: str = NEW_HOLDER_PUB_B64U,
+    transferred_at: str = TRANSFERRED_AT,
+) -> Path:
+    out = tmp_path / out_name
+    rc = cli.main(
+        [
+            "transfer",
+            "authorize",
+            "--receipt",
+            str(receipt_path),
+            "--new-holder-pubkey",
+            new_holder_pubkey,
+            "--transferred-at",
+            transferred_at,
+            "--holder-seed",
+            str(holder_seed),
+            "--out",
+            str(out),
+        ]
+    )
+    assert rc == 0
+    return out
+
+
+def test_transfer_authorize_writes_verifiable_holder_signature(tmp_path: Path) -> None:
+    holder_seed, holder_pub = _keygen(tmp_path, "holder")
+    issuer_seed, _pub = _keygen(tmp_path, "issuer")
+    payload_path = _write_payload(
+        tmp_path, buyer={"pubkey": holder_pub.read_text(encoding="utf-8").strip()}
+    )
+    envelope_path = _issue(tmp_path, issuer_seed, payload_path)
+    receipt_id = json.loads(payload_path.read_text(encoding="utf-8"))["receipt_id"]
+
+    out = _transfer_authorize(tmp_path, envelope_path, holder_seed)
+
+    authorization = json.loads(out.read_text(encoding="utf-8"))
+    assert set(authorization) == {"sig"}
+    holder_kp = keys.from_seed(keys.b64u_decode(holder_seed.read_text(encoding="utf-8").strip()))
+    holder_pub_bytes = holder_kp.pub
+    message = (
+        b"Attest-transfer-authorization-v1\x00"
+        + receipt_id.encode()
+        + b"\x00"
+        + NEW_HOLDER_PUB_B64U.encode()
+        + b"\x00"
+        + TRANSFERRED_AT.encode()
+    )
+    assert keys.verify_strict(message, keys.b64u_decode(authorization["sig"]), holder_pub_bytes)
+
+
+def test_transfer_authorize_never_prints_the_signature_to_stdout(
+    tmp_path: Path, capsys: CapSys
+) -> None:
+    holder_seed, holder_pub = _keygen(tmp_path, "holder")
+    issuer_seed, _pub = _keygen(tmp_path, "issuer")
+    payload_path = _write_payload(
+        tmp_path, buyer={"pubkey": holder_pub.read_text(encoding="utf-8").strip()}
+    )
+    envelope_path = _issue(tmp_path, issuer_seed, payload_path)
+
+    capsys.readouterr()
+    out = _transfer_authorize(tmp_path, envelope_path, holder_seed)
+    captured = capsys.readouterr().out
+
+    sig_text = json.loads(out.read_text(encoding="utf-8"))["sig"]
+    assert sig_text not in captured
+
+
+@pytest.mark.parametrize("aliased_input", ("receipt", "holder-seed"))
+def test_transfer_authorize_rejects_out_aliased_with_input(
+    tmp_path: Path, capsys: CapSys, aliased_input: str
+) -> None:
+    holder_seed, holder_pub = _keygen(tmp_path, "holder")
+    issuer_seed, _pub = _keygen(tmp_path, "issuer")
+    payload_path = _write_payload(
+        tmp_path, buyer={"pubkey": holder_pub.read_text(encoding="utf-8").strip()}
+    )
+    receipt_path = _issue(tmp_path, issuer_seed, payload_path)
+    aliased_path = receipt_path if aliased_input == "receipt" else holder_seed
+    original = aliased_path.read_text(encoding="utf-8")
+
+    rc = cli.main(
+        [
+            "transfer",
+            "authorize",
+            "--receipt",
+            str(receipt_path),
+            "--new-holder-pubkey",
+            NEW_HOLDER_PUB_B64U,
+            "--transferred-at",
+            TRANSFERRED_AT,
+            "--holder-seed",
+            str(holder_seed),
+            "--out",
+            str(aliased_path),
+        ]
+    )
+
+    assert rc == 2
+    assert capsys.readouterr().err != ""
+    assert aliased_path.read_text(encoding="utf-8") == original
+
+
+def _write_authorization_sig(
+    tmp_path: Path, receipt_id: str, holder_kp: keys.SigningKeyPair
+) -> Path:
+    sig = transfer.sign_authorization(receipt_id, NEW_HOLDER_PUB_B64U, TRANSFERRED_AT, holder_kp)
+    out = tmp_path / "authorization.json"
+    out.write_text(json.dumps({"sig": keys.b64u(sig)}), encoding="utf-8")
+    return out
+
+
+def test_transfer_record_writes_self_verifying_record(tmp_path: Path) -> None:
+    seed, _pub = _keygen(tmp_path, "issuer")
+    manifest_path = _manifest_init(tmp_path, seed)
+    holder_kp = keys.generate()
+    old_receipt_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    new_receipt_id = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
+    authorization_path = _write_authorization_sig(tmp_path, old_receipt_id, holder_kp)
+    out = tmp_path / "record.json"
+
+    rc = cli.main(
+        [
+            "transfer",
+            "record",
+            "--receipt-id",
+            old_receipt_id,
+            "--new-receipt-id",
+            new_receipt_id,
+            "--new-holder-pubkey",
+            NEW_HOLDER_PUB_B64U,
+            "--transferred-at",
+            TRANSFERRED_AT,
+            "--holder-authorization",
+            str(authorization_path),
+            "--seed",
+            str(seed),
+            "--kid",
+            KID,
+            "--out",
+            str(out),
+        ]
+    )
+
+    assert rc == 0
+    record = json.loads(out.read_text(encoding="utf-8"))
+    key_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert transfer.verify_record(record, key_manifest) is True
+    assert transfer.verify_authorization(record, keys.b64u(holder_kp.pub)) is True
+    assert record["receipt_id"] == old_receipt_id
+    assert record["new_receipt_id"] == new_receipt_id
+
+
+def test_transfer_record_with_revocation_out_writes_transferred_revocation(
+    tmp_path: Path,
+) -> None:
+    seed, _pub = _keygen(tmp_path, "issuer")
+    manifest_path = _manifest_init(tmp_path, seed)
+    holder_kp = keys.generate()
+    old_receipt_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    new_receipt_id = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
+    authorization_path = _write_authorization_sig(tmp_path, old_receipt_id, holder_kp)
+    record_out = tmp_path / "record.json"
+    revocation_out = tmp_path / "revocation.json"
+
+    rc = cli.main(
+        [
+            "transfer",
+            "record",
+            "--receipt-id",
+            old_receipt_id,
+            "--new-receipt-id",
+            new_receipt_id,
+            "--new-holder-pubkey",
+            NEW_HOLDER_PUB_B64U,
+            "--transferred-at",
+            TRANSFERRED_AT,
+            "--holder-authorization",
+            str(authorization_path),
+            "--seed",
+            str(seed),
+            "--kid",
+            KID,
+            "--revocation-out",
+            str(revocation_out),
+            "--out",
+            str(record_out),
+        ]
+    )
+
+    assert rc == 0
+    revocation_record = json.loads(revocation_out.read_text(encoding="utf-8"))
+    key_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert revocation_record["status"] == "transferred"
+    assert revocation_record["receipt_id"] == old_receipt_id
+    assert revocation.verify_record(revocation_record, key_manifest) is True
+
+
+def test_transfer_record_hybrid_with_mldsa_seed(tmp_path: Path) -> None:
+    seed, _pub, mldsa_out = _keygen_hybrid(tmp_path, "issuer")
+    manifest_path = tmp_path / "manifest.json"
+    rc = cli.main(
+        [
+            "manifest",
+            "init",
+            "--issuer",
+            ISSUER,
+            "--kid",
+            KID,
+            "--seed",
+            str(seed),
+            "--valid-from",
+            VALID_FROM,
+            "--issued-at",
+            VALID_FROM,
+            "--mldsa-key",
+            str(mldsa_out),
+            "--out",
+            str(manifest_path),
+        ]
+    )
+    assert rc == 0
+    holder_kp = keys.generate()
+    old_receipt_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    new_receipt_id = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
+    authorization_path = _write_authorization_sig(tmp_path, old_receipt_id, holder_kp)
+    out = tmp_path / "record.json"
+
+    rc = cli.main(
+        [
+            "transfer",
+            "record",
+            "--receipt-id",
+            old_receipt_id,
+            "--new-receipt-id",
+            new_receipt_id,
+            "--new-holder-pubkey",
+            NEW_HOLDER_PUB_B64U,
+            "--transferred-at",
+            TRANSFERRED_AT,
+            "--holder-authorization",
+            str(authorization_path),
+            "--seed",
+            str(seed),
+            "--kid",
+            KID,
+            "--mldsa-seed",
+            str(mldsa_out),
+            "--out",
+            str(out),
+        ]
+    )
+
+    assert rc == 0
+    record = json.loads(out.read_text(encoding="utf-8"))
+    assert "sig_ml_dsa_65" in record["signature"]
+    key_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert transfer.verify_record(record, key_manifest) is True
+
+
+def test_transfer_record_seed_and_out_same_path_exits_2(tmp_path: Path) -> None:
+    seed, _pub = _keygen(tmp_path, "issuer")
+    holder_kp = keys.generate()
+    authorization_path = _write_authorization_sig(tmp_path, "01ARZ3NDEKTSV4RRFFQ69G5FAV", holder_kp)
+
+    rc = cli.main(
+        [
+            "transfer",
+            "record",
+            "--receipt-id",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "--new-receipt-id",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+            "--new-holder-pubkey",
+            NEW_HOLDER_PUB_B64U,
+            "--transferred-at",
+            TRANSFERRED_AT,
+            "--holder-authorization",
+            str(authorization_path),
+            "--seed",
+            str(seed),
+            "--kid",
+            KID,
+            "--out",
+            str(seed),
+        ]
+    )
+
+    assert rc == 2
+
+
+@pytest.mark.parametrize(
+    "collision",
+    (
+        "out-seed",
+        "out-holder-authorization",
+        "out-mldsa-seed",
+        "revocation-out-out",
+        "revocation-out-seed",
+        "revocation-out-holder-authorization",
+        "revocation-out-mldsa-seed",
+    ),
+)
+def test_transfer_record_rejects_aliased_paths_before_writing(
+    tmp_path: Path, capsys: CapSys, collision: str
+) -> None:
+    seed, _pub, mldsa_seed = _keygen_hybrid(tmp_path, "issuer")
+    holder_kp = keys.generate()
+    authorization_path = _write_authorization_sig(tmp_path, "01ARZ3NDEKTSV4RRFFQ69G5FAV", holder_kp)
+    record_out = tmp_path / "record.json"
+    revocation_out = tmp_path / "revocation.json"
+    expected_path: Path
+
+    if collision == "out-seed":
+        record_out = seed
+        expected_path = seed
+    elif collision == "out-holder-authorization":
+        record_out = authorization_path
+        expected_path = authorization_path
+    elif collision == "out-mldsa-seed":
+        record_out = mldsa_seed
+        expected_path = mldsa_seed
+    elif collision == "revocation-out-out":
+        record_out.write_text("record sentinel", encoding="utf-8")
+        revocation_out = record_out
+        expected_path = record_out
+    elif collision == "revocation-out-seed":
+        revocation_out = seed
+        expected_path = seed
+    elif collision == "revocation-out-holder-authorization":
+        revocation_out = authorization_path
+        expected_path = authorization_path
+    else:
+        revocation_out = mldsa_seed
+        expected_path = mldsa_seed
+    original = expected_path.read_text(encoding="utf-8")
+
+    rc = cli.main(
+        [
+            "transfer",
+            "record",
+            "--receipt-id",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "--new-receipt-id",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+            "--new-holder-pubkey",
+            NEW_HOLDER_PUB_B64U,
+            "--transferred-at",
+            TRANSFERRED_AT,
+            "--holder-authorization",
+            str(authorization_path),
+            "--seed",
+            str(seed),
+            "--kid",
+            KID,
+            "--mldsa-seed",
+            str(mldsa_seed),
+            "--revocation-out",
+            str(revocation_out),
+            "--out",
+            str(record_out),
+        ]
+    )
+
+    assert rc == 2
+    assert capsys.readouterr().err != ""
+    assert expected_path.read_text(encoding="utf-8") == original

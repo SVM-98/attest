@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from attest import anchor, canon, keys, manifests, pq, tlog, transfer, transparency
+from attest import anchor, canon, keys, manifests, pq, revocation, tlog, transfer, transparency
 
 ISSUER = "store.example.com"
 KID = f"{ISSUER}/keys/test#ed25519-1"
@@ -418,3 +418,210 @@ def test_record_logged_standing_raises_on_malformed_log_keys() -> None:
     record = _build_record()
     with pytest.raises(transparency.TransparencyError):
         transfer.record_logged_standing(record, {"entry": {}}, ISSUER, [], _no_horizon_policy())
+
+
+# --- audit_chain (v0.2 §17.5) -------------------------------------------------
+
+SECOND_NEW_HOLDER_KP = keys.from_seed(bytes([26]) * 32)
+ID0 = OLD_ID
+ID1 = NEW_ID
+ID2 = "01ARZ3NDEKTSV4RRFFQ69G5FAY"
+LOSING_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAZ"
+AT2 = "2026-07-24T00:00:00Z"
+
+
+def _chain_payload(receipt_id: str, buyer_kp: keys.SigningKeyPair) -> dict[str, Any]:
+    """The minimal payload shape `audit_chain` reads: `receipt_id` and
+    `buyer.pubkey` only — a full signed envelope is never needed for this
+    audit surface (§17.5: the new receipt stands alone; the chain lives in
+    the explicit transfer/revocation records, not in the receipt envelope)."""
+    return {"receipt_id": receipt_id, "buyer": {"pubkey": keys.b64u(buyer_kp.pub)}}
+
+
+def _chain_transfer_record(
+    receipt_id: str,
+    new_receipt_id: str,
+    new_holder_kp: keys.SigningKeyPair,
+    holder_kp: keys.SigningKeyPair,
+    transferred_at: str = AT,
+) -> dict[str, Any]:
+    new_holder_pubkey = keys.b64u(new_holder_kp.pub)
+    sig = transfer.sign_authorization(receipt_id, new_holder_pubkey, transferred_at, holder_kp)
+    return transfer.build_record(
+        receipt_id, new_receipt_id, new_holder_pubkey, transferred_at, sig, ISSUER_KP, KID
+    )
+
+
+def _chain_transferred_revocation(receipt_id: str, at: str = AT) -> dict[str, Any]:
+    return revocation.build_record(receipt_id, "transferred", at, ISSUER_KP, KID)
+
+
+def _chain_log_bundle(
+    records_in_order: list[dict[str, Any]], hk: pq.HybridSigningKeys
+) -> list[dict[str, Any]]:
+    """One genuine transfer-record log containing every record in
+    `records_in_order`, in that log order (index 0 = earliest/first-logged).
+    Mirrors `tests/test_verify_transfer.py`'s identically-named helper."""
+    entries = [
+        {"type": "transfer-record", "issuer": ISSUER, "record_sha256": transfer.record_hash(r)}
+        for r in records_in_order
+    ]
+    leaves = [tlog.encode_entry(e) for e in entries]
+    root = tlog.build_tree(leaves)
+    tree_size = len(leaves)
+    checkpoint_text = tlog.sign_checkpoint(
+        _TRANSFER_LOG_ORIGIN, tree_size, root, hk, _TRANSFER_LOG_NAME
+    )
+    return [
+        {
+            "entry": entry,
+            "leaf_index": i,
+            "tree_size": tree_size,
+            "inclusion_proof": [p.hex() for p in tlog.inclusion_proof(leaves, i)],
+            "checkpoint": checkpoint_text,
+        }
+        for i, entry in enumerate(entries)
+    ]
+
+
+def test_audit_chain_two_links_valid() -> None:
+    hk = pq.HybridSigningKeys(ed=keys.generate(), mldsa=pq.generate())
+    p0 = _chain_payload(ID0, HOLDER_KP)
+    p1 = _chain_payload(ID1, NEW_HOLDER_KP)
+    p2 = _chain_payload(ID2, SECOND_NEW_HOLDER_KP)
+
+    record1 = _chain_transfer_record(ID0, ID1, NEW_HOLDER_KP, HOLDER_KP, AT)
+    record2 = _chain_transfer_record(ID1, ID2, SECOND_NEW_HOLDER_KP, NEW_HOLDER_KP, AT2)
+    bundle1, bundle2 = _chain_log_bundle([record1, record2], hk)
+    view = [
+        {"record": record1, "evidence": bundle1},
+        {"record": record2, "evidence": bundle2},
+    ]
+    rev_view = [
+        _chain_transferred_revocation(ID0, AT),
+        _chain_transferred_revocation(ID1, AT2),
+    ]
+
+    res = transfer.audit_chain(
+        [p0, p1, p2], view, rev_view, _key_manifest(), [_transfer_log_key(hk)], _no_horizon_policy()
+    )
+
+    assert res.valid is True
+    assert res.link_status == ("valid", "valid")
+    assert res.errors == ()
+
+
+def test_audit_chain_pubkey_loop_closure_failure() -> None:
+    hk = pq.HybridSigningKeys(ed=keys.generate(), mldsa=pq.generate())
+    p0 = _chain_payload(ID0, HOLDER_KP)
+    # p1's own buyer.pubkey does NOT match the transfer record's new_holder_pubkey.
+    p1 = _chain_payload(ID1, SECOND_NEW_HOLDER_KP)
+
+    record1 = _chain_transfer_record(ID0, ID1, NEW_HOLDER_KP, HOLDER_KP, AT)
+    bundle1 = _chain_log_bundle([record1], hk)[0]
+    view = [{"record": record1, "evidence": bundle1}]
+    rev_view = [_chain_transferred_revocation(ID0, AT)]
+
+    res = transfer.audit_chain(
+        [p0, p1], view, rev_view, _key_manifest(), [_transfer_log_key(hk)], _no_horizon_policy()
+    )
+
+    assert res.link_status == ("invalid",)
+    assert "chain link 1: new receipt buyer.pubkey != new_holder_pubkey" in res.errors
+
+
+def test_audit_chain_losing_branch_rejected() -> None:
+    hk = pq.HybridSigningKeys(ed=keys.generate(), mldsa=pq.generate())
+    p0 = _chain_payload(ID0, HOLDER_KP)
+    # The chain is built on the LATER-logged record (new_receipt_id=LOSING_ID).
+    p1 = _chain_payload(LOSING_ID, SECOND_NEW_HOLDER_KP)
+
+    early_record = _chain_transfer_record(ID0, ID1, NEW_HOLDER_KP, HOLDER_KP, AT)
+    late_record = _chain_transfer_record(ID0, LOSING_ID, SECOND_NEW_HOLDER_KP, HOLDER_KP, AT)
+    # Log order: early_record first (leaf_index 0), late_record second (1).
+    early_bundle, late_bundle = _chain_log_bundle([early_record, late_record], hk)
+    view = [
+        {"record": early_record, "evidence": early_bundle},
+        {"record": late_record, "evidence": late_bundle},
+    ]
+    rev_view = [_chain_transferred_revocation(ID0, AT)]
+
+    res = transfer.audit_chain(
+        [p0, p1], view, rev_view, _key_manifest(), [_transfer_log_key(hk)], _no_horizon_policy()
+    )
+
+    assert res.link_status == ("invalid",)
+    assert "chain link 1: losing branch of a double assignment" in res.errors
+
+
+def test_audit_chain_missing_transferred_revocation() -> None:
+    hk = pq.HybridSigningKeys(ed=keys.generate(), mldsa=pq.generate())
+    p0 = _chain_payload(ID0, HOLDER_KP)
+    p1 = _chain_payload(ID1, NEW_HOLDER_KP)
+
+    record1 = _chain_transfer_record(ID0, ID1, NEW_HOLDER_KP, HOLDER_KP, AT)
+    bundle1 = _chain_log_bundle([record1], hk)[0]
+    view = [{"record": record1, "evidence": bundle1}]
+
+    res = transfer.audit_chain(
+        [p0, p1], view, [], _key_manifest(), [_transfer_log_key(hk)], _no_horizon_policy()
+    )
+
+    assert res.link_status == ("invalid",)
+    assert (
+        "chain link 1: previous receipt lacks a backed transferred-class revocation" in res.errors
+    )
+
+
+def test_audit_chain_unlogged_record() -> None:
+    p0 = _chain_payload(ID0, HOLDER_KP)
+    p1 = _chain_payload(ID1, NEW_HOLDER_KP)
+
+    record1 = _chain_transfer_record(ID0, ID1, NEW_HOLDER_KP, HOLDER_KP, AT)
+    view = [{"record": record1, "evidence": None}]
+    rev_view = [_chain_transferred_revocation(ID0, AT)]
+    hk = pq.HybridSigningKeys(ed=keys.generate(), mldsa=pq.generate())
+
+    res = transfer.audit_chain(
+        [p0, p1], view, rev_view, _key_manifest(), [_transfer_log_key(hk)], _no_horizon_policy()
+    )
+
+    assert res.link_status == ("invalid",)
+    assert "chain link 1: transfer record not logged" in res.errors
+
+
+def test_audit_chain_no_record_for_link() -> None:
+    p0 = _chain_payload(ID0, HOLDER_KP)
+    p1 = _chain_payload(ID1, NEW_HOLDER_KP)
+    hk = pq.HybridSigningKeys(ed=keys.generate(), mldsa=pq.generate())
+    rev_view = [_chain_transferred_revocation(ID0, AT)]
+
+    res = transfer.audit_chain(
+        [p0, p1], [], rev_view, _key_manifest(), [_transfer_log_key(hk)], _no_horizon_policy()
+    )
+
+    assert res.link_status == ("invalid",)
+    assert res.errors == ("chain link 1: no transfer record",)
+
+
+def test_audit_chain_self_inconsistent_manifest_marks_every_link_invalid() -> None:
+    """Hoisted `manifests.verify_key_manifest` check (Step 4): a manifest
+    that does not self-verify marks EVERY link invalid with the
+    issuer-signature literal, without evaluating anything else."""
+    hk = pq.HybridSigningKeys(ed=keys.generate(), mldsa=pq.generate())
+    p0 = _chain_payload(ID0, HOLDER_KP)
+    p1 = _chain_payload(ID1, NEW_HOLDER_KP)
+    p2 = _chain_payload(ID2, SECOND_NEW_HOLDER_KP)
+    broken_manifest = dict(_key_manifest())
+    broken_manifest["manifest_signature"] = {"kid": KID, "sig": "!" * 86}
+
+    res = transfer.audit_chain(
+        [p0, p1, p2], [], [], broken_manifest, [_transfer_log_key(hk)], _no_horizon_policy()
+    )
+
+    assert res.valid is False
+    assert res.link_status == ("invalid", "invalid")
+    assert res.errors == (
+        "chain link 1: issuer signature invalid",
+        "chain link 2: issuer signature invalid",
+    )
