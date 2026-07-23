@@ -89,7 +89,7 @@ won't adopt voluntarily, the lever is regulation and market pressure, not forger
 
 Spec v0.1 is complete and v0.2 is specified and implemented on `main`, with two
 independent implementations — a Python reference implementation and a TypeScript
-verifier — that agree on all 95 conformance vector leaves across 36 groups: 51 of
+verifier — that agree on all 97 conformance vector leaves across 36 groups: 51 of
 them the v0.1 corpus, the rest exercising v0.2's hybrid signature profile,
 transparency/anchoring behaviour, the upgrade-policy hardening (mixed-keyset
 prohibition, artifact-manifest currency, anchor profile v2, logged revocation
@@ -220,8 +220,8 @@ Non-normative, and deliberately undated — these are directions, not commitment
   at weaker-than-issuer-signed trust. Legal review is required before any of this
   is built.
 - **Registry / replication layer.** An optional layer for replicating verification
-  material, with optional Merkle-root transparency anchoring — the only place a
-  chain will ever appear in this project, and even then strictly optional.
+  material, with optional Merkle-root transparency anchoring — separate from the
+  shipped §17.5 chain-of-title audit surface, and still strictly optional.
 
 ## Licensing, contributing, contact
 
@@ -238,7 +238,7 @@ registration — real trademark enforcement would require actually registering t
 mark, which has not happened.
 
 **Contributing.** See [`CONTRIBUTING.md`](CONTRIBUTING.md). Implementation pull
-requests must pass all 95 conformance vector leaves and keep both the Python and
+requests must pass all 97 conformance vector leaves and keep both the Python and
 TypeScript suites green.
 
 **Contact.** Use GitHub Issues for technical bugs, GitHub Discussions for

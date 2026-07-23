@@ -319,14 +319,14 @@ def test_vectors_directory_is_nonempty() -> None:
     # leaves (28, 2026-07-18) + 2 normative-ceiling leaves (29, 2026-07-22) +
     # 2 mixed-keyset leaves (30, 2026-07-22) + 5 manifest-currency leaves
     # (31, 2026-07-22) + 3 anchor-profile-v2 leaves (32, 2026-07-22, G4) +
-    # 4 logged-revocation leaves (33, 2026-07-23, G5/TM-47) + 10 transfer
-    # leaves (35, 2026-07-23, §17 Stage 3) + 3 transfer-chain leaves (36,
+    # 4 logged-revocation leaves (33, 2026-07-23, G5/TM-47) + 11 transfer
+    # leaves (35, 2026-07-23, §17 Stage 3) + 4 transfer-chain leaves (36,
     # 2026-07-23, §17.5):
     # 19 a/b, 20 a-c, 21 a-g, 22 a-c, 23 a/b, 24, 25 a/b, 26 a-h, 28 a-n,
-    # 29 a/c, 30 a/b, 31 a-e, 32 a-c, 33 a-d, 35 a-j, 36 a-c. Counted over
+    # 29 a/c, 30 a/b, 31 a-e, 32 a-c, 33 a-d, 35 a-k, 36 a-d. Counted over
     # `_LEAF_DIRS` (ALL leaves, groups 35/36's chain-audit leaves included) —
     # `_VECTOR_DIRS` alone (the `verify()`-routed subset) excludes them.
-    assert len(_LEAF_DIRS) >= 95
+    assert len(_LEAF_DIRS) >= 97
 
 
 _CANONICAL_DIRS = [p for p in _VECTOR_DIRS if (p / "canonical.json").exists()]

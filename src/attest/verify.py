@@ -786,7 +786,7 @@ def _resolve_transfer_backing(
         if warning not in warnings:
             warnings.append(warning)
 
-    survivors: list[tuple[int, dict[str, Any]]] = []
+    survivors: dict[str, tuple[int, dict[str, Any]]] = {}
     for claim in materialized:
         if not isinstance(claim, dict):
             continue
@@ -839,13 +839,16 @@ def _resolve_transfer_backing(
             _append_once(_WARN_TRANSFER_RECORD_UNLOGGED)
             continue
 
-        survivors.append((leaf_index, record))
+        record_hash = transfer.record_hash(record)
+        previous = survivors.get(record_hash)
+        if previous is None or leaf_index < previous[0]:
+            survivors[record_hash] = (leaf_index, record)
 
     if not survivors:
         return None
     if len(survivors) > 1:
         _append_once(_WARN_TRANSFER_DOUBLE_ASSIGNMENT)
-    return min(survivors, key=lambda item: item[0])[1]
+    return min(survivors.values(), key=lambda item: item[0])[1]
 
 
 def _classify_revocation(

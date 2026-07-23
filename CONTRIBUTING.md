@@ -31,9 +31,9 @@ Any implementation PR (reference or a new independent implementation) MUST pass
 the full conformance suite before review:
 
 - reproduce the expected `VerificationResult` for **every** vector under
-  `docs/spec/vectors/` — 95 leaf vectors across 36 groups, zero skipped;
-- keep both existing suites green: `.venv/bin/pytest -q` (Python, 1106 tests) and
-  `npm test` in `verifiers/ts/` (678 tests, including the full 95-leaf conformance corpus);
+  `docs/spec/vectors/` — 97 leaf vectors across 36 groups, zero skipped;
+- keep both existing suites green: `.venv/bin/pytest -q` (Python, 1118 tests) and
+  `npm test` in `verifiers/ts/` (683 tests, including the full 97-leaf conformance corpus);
 - `ruff` + `mypy` clean for Python, `tsc --noEmit` clean for TypeScript.
 
 The conformance vectors — not any single implementation's wording — are the

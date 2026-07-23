@@ -1,4 +1,4 @@
-// The conformance merge gate (36 vector groups / 95 leaves): this suite discovers every leaf under
+// The conformance merge gate (36 vector groups / 97 leaves): this suite discovers every leaf under
 // `docs/spec/vectors/` and asserts the produced VerificationResult matches
 // its `expected.json`, using the exact same match rules as the Python
 // reference's `tests/test_vectors.py`. Passing this suite in full IS the
@@ -20,8 +20,8 @@ const leaves = allLeaves.filter((d) => V.chainInput(d) === null)
 const canonicalLeaves = leaves.filter((d) => existsSync(join(d, 'canonical.json')))
 
 describe('attest conformance vectors', () => {
-  it('discovers the full vector suite (>= 95 leaves)', () => {
-    expect(allLeaves.length).toBeGreaterThanOrEqual(95)
+  it('discovers the full vector suite (>= 97 leaves)', () => {
+    expect(allLeaves.length).toBeGreaterThanOrEqual(97)
   })
 
   it.each(leaves.map((d) => [V.vectorId(d), d] as const))('%s', (_id, dir) => {

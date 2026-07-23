@@ -533,6 +533,21 @@ describe('auditChain', () => {
     expect(res.errors).toContain('chain link 1: losing branch of a double assignment')
   })
 
+  it('rejects a transfer before the previous receipt floor', () => {
+    const hk = generateHybridLogKeys()
+    const p0 = parse({ receipt_id: ID0, buyer: { pubkey: b64uEncode(holderPub) }, license: { not_transferable_before: '2026-07-24T00:00:00Z' } })
+    const p1 = chainPayload(ID1, newHolderPub)
+    const record1 = chainTransferRecord(ID0, ID1, newHolderPub, holderSeed, AT)
+    const bundle1 = chainLogBundle([record1], hk)[0]
+    const view = parse([{ record: record1, evidence: bundle1 }])
+    const revView = parse([chainTransferredRevocation(ID0, AT)])
+
+    const res = auditChain([p0, p1], view, revView, keyManifest(), [transferLogKey(hk)], noHorizonPolicy())
+
+    expect(res.linkStatus).toEqual(['invalid'])
+    expect(res.errors).toContain('chain link 1: transferred before not_transferable_before')
+  })
+
   it('flags a missing backed transferred-class revocation', () => {
     const hk = generateHybridLogKeys()
     const p0 = chainPayload(ID0, holderPub)

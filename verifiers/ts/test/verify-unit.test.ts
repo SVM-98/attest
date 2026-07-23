@@ -364,6 +364,41 @@ describe('verify(): Stage 3 transferred-class backing (§17.3)', () => {
     expect(result.warnings).toContain('transfer_double_assignment_conflict')
   })
 
+  it('treats duplicate valid transfer claims as one survivor', () => {
+    const hk = generateHybridLogKeys()
+    const record = tTransferRecord()
+    const bundle = tLogBundle([record], hk)[0]
+    const claim = parse({ record, evidence: bundle })
+
+    const result = verifyWith({
+      revocationView: parse([tTransferredRevocationRecord()]),
+      transferView: [claim, claim],
+      logKeys: [tLogKey(hk)],
+      anchorPolicy: noHorizonPolicy(),
+      revocability: 'policy',
+    })
+
+    expect(result.revocation).toBe('transferred')
+    expect(result.warnings).not.toContain('transfer_double_assignment_conflict')
+  })
+
+  it('keeps distinct valid transfer claims as a double assignment', () => {
+    const hk = generateHybridLogKeys()
+    const earlyRecord = tTransferRecord(T_NEW_ID)
+    const lateRecord = tTransferRecord(T_LATE_NEW_ID)
+    const [earlyBundle, lateBundle] = tLogBundle([earlyRecord, lateRecord], hk)
+
+    const result = verifyWith({
+      revocationView: parse([tTransferredRevocationRecord()]),
+      transferView: [parse({ record: earlyRecord, evidence: earlyBundle }), parse({ record: lateRecord, evidence: lateBundle })],
+      logKeys: [tLogKey(hk)],
+      anchorPolicy: noHorizonPolicy(),
+      revocability: 'policy',
+    })
+
+    expect(result.warnings).toContain('transfer_double_assignment_conflict')
+  })
+
   it('ignores a transfer_at earlier than not_transferable_before', () => {
     const hk = generateHybridLogKeys()
     const record = tTransferRecord(T_NEW_ID, T_NEW_HOLDER_PUBKEY, T_AT)

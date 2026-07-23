@@ -74,6 +74,20 @@ def _minimal_spec_v02() -> str:
         + "`transferred_revocation_unbacked` `transfer_record_unlogged` "
         + "`transfer_not_yet_transferable` `transfer_double_assignment_conflict` "
         + '`revocation: "transferred"`\n'
+        + "\n### 17.5 Chain of title (separate audit surface)\n\n"
+        + "\n".join(
+            (
+                "chain link {i}: no transfer record",
+                "chain link {i}: issuer signature invalid",
+                "chain link {i}: holder authorization invalid",
+                "chain link {i}: transfer record not logged",
+                "chain link {i}: transferred before not_transferable_before",
+                "chain link {i}: losing branch of a double assignment",
+                "chain link {i}: new receipt buyer.pubkey != new_holder_pubkey",
+                "chain link {i}: previous receipt lacks a backed transferred-class revocation",
+            )
+        )
+        + "\n"
     )
 
 
@@ -471,7 +485,7 @@ def test_pc_08_corpus_pin_includes_json_parsed_chain_payloads() -> None:
 
     assert check_spec_docs.check_pc08_corpus_claim(rows, SPEC_DIR / "vectors") == []
 
-    drifted_privacy = privacy.replace("166 payload objects", "165 payload objects")
+    drifted_privacy = privacy.replace("170 payload objects", "169 payload objects")
     drifted_rows = check_spec_docs.parse_pc_rows(drifted_privacy)
     errors = check_spec_docs.check_pc08_corpus_claim(drifted_rows, SPEC_DIR / "vectors")
 
@@ -554,6 +568,19 @@ def test_v02_stage3_section_removal_is_flagged_by_collect_errors() -> None:
     )
 
     assert errors
+
+
+def test_v02_chain_audit_literal_table_mutation_is_flagged_by_collect_errors() -> None:
+    docs = _base_docs()
+    docs["spec_v02"] = docs["spec_v02"].replace(
+        "chain link {i}: losing branch of a double assignment",
+        "chain link {i}: losing branch removed",
+        1,
+    )
+
+    errors = collect_errors(**docs)
+
+    assert any("chain link {i}: losing branch of a double assignment" in error for error in errors)
 
 
 def test_v01_not_transferable_before_row_removal_is_flagged_by_collect_errors() -> None:

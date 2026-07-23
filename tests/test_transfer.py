@@ -554,6 +554,27 @@ def test_audit_chain_losing_branch_rejected() -> None:
     assert "chain link 1: losing branch of a double assignment" in res.errors
 
 
+def test_audit_chain_rejects_transfer_before_previous_receipt_floor() -> None:
+    hk = pq.HybridSigningKeys(ed=keys.generate(), mldsa=pq.generate())
+    p0 = _chain_payload(ID0, HOLDER_KP)
+    p0["license"] = {"not_transferable_before": "2026-07-24T00:00:00Z"}
+    p1 = _chain_payload(ID1, NEW_HOLDER_KP)
+    record1 = _chain_transfer_record(ID0, ID1, NEW_HOLDER_KP, HOLDER_KP, AT)
+    bundle1 = _chain_log_bundle([record1], hk)[0]
+
+    res = transfer.audit_chain(
+        [p0, p1],
+        [{"record": record1, "evidence": bundle1}],
+        [_chain_transferred_revocation(ID0, AT)],
+        _key_manifest(),
+        [_transfer_log_key(hk)],
+        _no_horizon_policy(),
+    )
+
+    assert res.link_status == ("invalid",)
+    assert "chain link 1: transferred before not_transferable_before" in res.errors
+
+
 def test_audit_chain_missing_transferred_revocation() -> None:
     hk = pq.HybridSigningKeys(ed=keys.generate(), mldsa=pq.generate())
     p0 = _chain_payload(ID0, HOLDER_KP)

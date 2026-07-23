@@ -4002,6 +4002,42 @@ def gen_35_transfer() -> None:
         anchor_policy=_empty_anchor_policy(),
     )
 
+    # --- (k) not-transferable-before-boundary: equality is honored. The
+    # transfer time is EXACTLY the old receipt's floor, so an implementation
+    # must reject only strictly-earlier transfers. ---
+    payload_k = issue.build_payload(
+        **_base_payload_kwargs(
+            attest_version="0.2",
+            transferable=True,
+            buyer_pubkey=BUYER_KP.pub,
+            revocability="policy",
+        )
+    )
+    payload_k["license"]["not_transferable_before"] = TRANSFERRED_AT
+    _assert_schema_valid(payload_k)
+    envelope_k = _hybrid_envelope(payload_k, ISSUER_KP, ISSUER_KID)
+    write_vector(
+        "35-transfer/k-not-transferable-before-boundary",
+        payload=payload_k,
+        envelope=envelope_k,
+        envelope_raw=None,
+        trust=hybrid_trust,
+        expected={
+            "signature": "valid",
+            "schema": "valid",
+            "revocation": "transferred",
+            "binding": "not_checked",
+            "trust": "verified",
+            "ok": False,
+            "errors": [],
+            "warnings": [],
+        },
+        revocation_record=rev_transferred,
+        transfer_view=[{"record": record_valid, "evidence": evidence_valid}],
+        log_keys=[_log_key()],
+        anchor_policy=_empty_anchor_policy(),
+    )
+
     # --- (h) classical-only-record-hybrid-key: the transfer record's
     # holder-authorization is genuine (BUYER_KP), but the ISSUER side is
     # signed Ed25519-ONLY (`transfer.build_record` with a plain
@@ -4314,6 +4350,29 @@ def gen_36_transfer_chain() -> None:
             "chain_valid": False,
             "link_status": ["invalid"],
             "errors_contains": ["chain link 1: losing branch of a double assignment"],
+            "warnings": [],
+        },
+        log_keys=[_log_key()],
+        anchor_policy=_empty_anchor_policy(),
+    )
+
+    # --- (d) floor-violation-no-link: the otherwise valid R0 -> R1 link
+    # predates R0's own floor. This is intentionally a two-receipt, one-link
+    # chain so the expected status is unambiguous. ---
+    r0_floor = copy.deepcopy(r0)
+    r0_floor["license"]["not_transferable_before"] = "2025-08-01T00:00:00Z"
+    write_chain_vector(
+        "36-transfer-chain/d-floor-violation-no-link",
+        chain={
+            "payloads": [r0_floor, r1],
+            "transfer_view": [{"record": tr1, "evidence": ev_tr1_b}],
+            "revocation_view": [rev_r0],
+        },
+        trust=plain_trust,
+        expected={
+            "chain_valid": False,
+            "link_status": ["invalid"],
+            "errors_contains": ["chain link 1: transferred before not_transferable_before"],
             "warnings": [],
         },
         log_keys=[_log_key()],
