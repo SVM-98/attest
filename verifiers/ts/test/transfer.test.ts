@@ -533,6 +533,27 @@ describe('auditChain', () => {
     expect(res.errors).toContain('chain link 1: losing branch of a double assignment')
   })
 
+  it('ignores a pre-floor competing claim', () => {
+    const hk = generateHybridLogKeys()
+    const p0 = parse({ receipt_id: ID0, buyer: { pubkey: b64uEncode(holderPub) }, license: { not_transferable_before: '2026-07-24T00:00:00Z' } })
+    const p1 = chainPayload(ID1, newHolderPub)
+
+    const preFloorRecord = chainTransferRecord(ID0, LOSING_ID, secondNewHolderPub, holderSeed, AT)
+    const validRecord = chainTransferRecord(ID0, ID1, newHolderPub, holderSeed, AT2)
+    const [preFloorBundle, validBundle] = chainLogBundle([preFloorRecord, validRecord], hk)
+    const view = parse([
+      { record: preFloorRecord, evidence: preFloorBundle },
+      { record: validRecord, evidence: validBundle },
+    ])
+    const revView = parse([chainTransferredRevocation(ID0, AT2)])
+
+    const res = auditChain([p0, p1], view, revView, keyManifest(), [transferLogKey(hk)], noHorizonPolicy())
+
+    expect(res.valid).toBe(true)
+    expect(res.linkStatus).toEqual(['valid'])
+    expect(res.errors).toEqual([])
+  })
+
   it('rejects a transfer before the previous receipt floor', () => {
     const hk = generateHybridLogKeys()
     const p0 = parse({ receipt_id: ID0, buyer: { pubkey: b64uEncode(holderPub) }, license: { not_transferable_before: '2026-07-24T00:00:00Z' } })
@@ -576,6 +597,22 @@ describe('auditChain', () => {
 
     expect(res.linkStatus).toEqual(['invalid'])
     expect(res.errors).toContain('chain link 1: transfer record not logged')
+  })
+
+  it('flags an invalid holder authorization', () => {
+    const hk = generateHybridLogKeys()
+    const p0 = chainPayload(ID0, holderPub)
+    const p1 = chainPayload(ID1, newHolderPub)
+    const unrelatedHolderSeed = new Uint8Array(32).fill(27)
+    const record1 = chainTransferRecord(ID0, ID1, newHolderPub, unrelatedHolderSeed, AT)
+    const bundle1 = chainLogBundle([record1], hk)[0]
+    const view = parse([{ record: record1, evidence: bundle1 }])
+    const revView = parse([chainTransferredRevocation(ID0, AT)])
+
+    const res = auditChain([p0, p1], view, revView, keyManifest(), [transferLogKey(hk)], noHorizonPolicy())
+
+    expect(res.linkStatus).toEqual(['invalid'])
+    expect(res.errors).toContain('chain link 1: holder authorization invalid')
   })
 
   it('reports no transfer record for the link', () => {

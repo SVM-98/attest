@@ -554,6 +554,34 @@ def test_audit_chain_losing_branch_rejected() -> None:
     assert "chain link 1: losing branch of a double assignment" in res.errors
 
 
+def test_audit_chain_ignores_pre_floor_competing_claim() -> None:
+    """A pre-floor claim is not established and cannot win the audit's race."""
+    hk = pq.HybridSigningKeys(ed=keys.generate(), mldsa=pq.generate())
+    p0 = _chain_payload(ID0, HOLDER_KP)
+    p0["license"] = {"not_transferable_before": "2026-07-24T00:00:00Z"}
+    p1 = _chain_payload(ID1, NEW_HOLDER_KP)
+
+    pre_floor_record = _chain_transfer_record(ID0, LOSING_ID, SECOND_NEW_HOLDER_KP, HOLDER_KP, AT)
+    valid_record = _chain_transfer_record(ID0, ID1, NEW_HOLDER_KP, HOLDER_KP, AT2)
+    pre_floor_bundle, valid_bundle = _chain_log_bundle([pre_floor_record, valid_record], hk)
+
+    res = transfer.audit_chain(
+        [p0, p1],
+        [
+            {"record": pre_floor_record, "evidence": pre_floor_bundle},
+            {"record": valid_record, "evidence": valid_bundle},
+        ],
+        [_chain_transferred_revocation(ID0, AT2)],
+        _key_manifest(),
+        [_transfer_log_key(hk)],
+        _no_horizon_policy(),
+    )
+
+    assert res.valid is True
+    assert res.link_status == ("valid",)
+    assert res.errors == ()
+
+
 def test_audit_chain_rejects_transfer_before_previous_receipt_floor() -> None:
     hk = pq.HybridSigningKeys(ed=keys.generate(), mldsa=pq.generate())
     p0 = _chain_payload(ID0, HOLDER_KP)
@@ -609,6 +637,27 @@ def test_audit_chain_unlogged_record() -> None:
 
     assert res.link_status == ("invalid",)
     assert "chain link 1: transfer record not logged" in res.errors
+
+
+def test_audit_chain_invalid_holder_authorization() -> None:
+    hk = pq.HybridSigningKeys(ed=keys.generate(), mldsa=pq.generate())
+    p0 = _chain_payload(ID0, HOLDER_KP)
+    p1 = _chain_payload(ID1, NEW_HOLDER_KP)
+    unrelated_holder = keys.generate()
+    record1 = _chain_transfer_record(ID0, ID1, NEW_HOLDER_KP, unrelated_holder, AT)
+    bundle1 = _chain_log_bundle([record1], hk)[0]
+
+    res = transfer.audit_chain(
+        [p0, p1],
+        [{"record": record1, "evidence": bundle1}],
+        [_chain_transferred_revocation(ID0, AT)],
+        _key_manifest(),
+        [_transfer_log_key(hk)],
+        _no_horizon_policy(),
+    )
+
+    assert res.link_status == ("invalid",)
+    assert "chain link 1: holder authorization invalid" in res.errors
 
 
 def test_audit_chain_no_record_for_link() -> None:

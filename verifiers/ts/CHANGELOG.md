@@ -57,8 +57,8 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `verify()`. A v0.2 receipt with `license.transferable: true` and a null/absent
   `buyer.pubkey` is now a schema error (v0.1 receipts untouched). Closed a
   Python/TypeScript parity divergence in Stage 3 date validation during review. New
-  conformance leaf groups `35-transfer` (10 leaves) and `36-transfer-chain` (3 leaves),
-  bringing the corpus this package runs to 95 leaves across 36 groups.
+  conformance leaf groups `35-transfer` (11 leaves) and `36-transfer-chain` (4 leaves),
+  bringing the corpus this package runs to 97 leaves across 36 groups.
 
 ## [0.1.2] — 2026-07-13
 
