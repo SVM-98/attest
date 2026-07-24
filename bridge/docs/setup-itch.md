@@ -56,9 +56,21 @@ title = "Nebula Drifters"
 publisher = "Example Games Store"
 artifact_series = "store.example.com/works/nebula-drifters"
 terms_uri = "https://store.example.com/attest/license-templates/standard-v1"
-legal_text_sha256 = "…"   # sha256 of your license terms text, lowercase hex
+legal_text_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
 [products.itch_123456.identifiers]
 itch_game_id = "123456"
+```
+
+`legal_text_sha256` must be exactly 64 lowercase hex characters (the schema
+rejects anything else, including a placeholder like `"…"` — every issuance
+for a product table with a malformed hash fails before signing, not after).
+The all-zeros value above is a format-valid placeholder, matching the
+shipped [`bridge/examples/bridge.toml`](../examples/bridge.toml); replace it
+with the real SHA-256 of your license terms text:
+
+```sh
+shasum -a 256 license.txt | cut -d' ' -f1      # macOS/BSD
+sha256sum license.txt | cut -d' ' -f1          # Linux
 ```
 
 `poll_interval_seconds` is how often the poller checks due claims;
@@ -109,6 +121,7 @@ and verify:
 
 ```sh
 curl "https://<your-bridge-host>/r/<download-token>" -o receipt.attest
+chmod 600 receipt.attest   # the envelope carries delivery.salt, a buyer-binding secret
 attest verify receipt.attest --trust-dir <dir-containing-key-manifest.json>
 ```
 

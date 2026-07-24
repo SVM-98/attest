@@ -197,10 +197,7 @@ See [demo/README.md](demo/README.md) for what each step of the demo proves, and
 specification. [docs/spec/vectors/](docs/spec/vectors/) holds the conformance
 corpus every implementation is checked against.
 
-For merchants who'd rather not hand-sign anything: [bridge/README.md](bridge/README.md)
-is a self-hosted webhook bridge that turns a Stripe or itch.io purchase into
-a signed attest receipt automatically, with its own zero-to-verified-receipt
-setup guides.
+For merchants who'd rather not hand-sign anything, see [bridge/README.md](bridge/README.md).
 
 [docs/spec/attest-v0.2.md](docs/spec/attest-v0.2.md) is an additive delta
 specification defining the v0.2 hybrid Ed25519+ML-DSA-65 signature profile

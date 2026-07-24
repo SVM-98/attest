@@ -1,15 +1,35 @@
 # attest-bridge on Render (Blueprint). From the Render dashboard: New -> Blueprint
 # -> point at this repo -> Render finds this file at bridge/deploy/render.yaml
 # once you pick it in the "Blueprint file" field (it does not need to live at
-# the repo root). See bridge/docs/deploy.md for the one manual step Render
-# can't do from YAML: after the service exists, upload the four merchant
-# files below as "Secret Files" from the dashboard (Environment tab) — each
-# lands at /etc/secrets/<filename> at runtime:
-#   bridge.toml, key-manifest.json, issuer.seed, issuer.mldsa.json
-# bridge.toml itself is uploaded as a Secret File here (not because its
-# content is secret — it isn't, once *_env values are stripped — but because
-# that's the one path every other Secret File also lands under, so
-# `--config` can point at all of them with a single mount).
+# the repo root). See bridge/docs/deploy.md for the manual steps Render can't
+# do from YAML:
+#   - fill in the four `sync: false` env vars below from the dashboard
+#   - upload issuer.seed and issuer.mldsa.json as "Secret Files" (Environment
+#     tab) — each lands at /etc/secrets/<filename> at runtime; your
+#     bridge.toml's seed_path/mldsa_key_path should point at
+#     /etc/secrets/issuer.seed and /etc/secrets/issuer.mldsa.json
+#   - after the service's first (failing) deploy, SCP or magic-wormhole
+#     bridge.toml and key-manifest.json onto the disk below, at
+#     /etc/attest-bridge/bridge.toml and /etc/attest-bridge/key-manifest.json
+#     — the disk starts empty and this is the one thing a Blueprint can't
+#     populate for you, so the service will crash-loop (missing config) until
+#     you do this once
+#
+# No `dockerCommand` here, deliberately: Render's dockerCommand overrides the
+# Dockerfile's CMD, not its ENTRYPOINT, so anything set here would be
+# appended as extra argv after the Dockerfile's pinned
+# `ENTRYPOINT ["attest-bridge", "serve", "--config", "/etc/attest-bridge/bridge.toml", ...]`
+# — which `attest-bridge serve` rejects as unrecognized arguments (startup
+# failure). The ENTRYPOINT governs unmodified, so `--config` is always
+# `/etc/attest-bridge/bridge.toml` on this target.
+#
+# Render allows only ONE persistent disk per service, so it can't hold a
+# separate config volume AND a separate Ledger volume the way Fly/Compose do.
+# This Blueprint mounts the one disk at /etc/attest-bridge and uses a file
+# inside that same disk for `ledger_path` — set your bridge.toml's
+# `ledger_path` to `/etc/attest-bridge/ledger.sqlite3` for this target
+# specifically (the shipped example config's default, `/var/lib/attest-bridge/...`,
+# has nothing mounted there on Render).
 services:
   - type: web
     name: attest-bridge
@@ -18,12 +38,9 @@ services:
     dockerContext: .
     plan: starter
     healthCheckPath: /healthz
-    # Overrides the Dockerfile's ENTRYPOINT: bridge.toml (and everything it
-    # points at) lives under /etc/secrets on Render, not /etc/attest-bridge.
-    dockerCommand: "attest-bridge serve --config /etc/secrets/bridge.toml --host 0.0.0.0 --port 8080"
     disk:
-      name: attest-bridge-ledger
-      mountPath: /var/lib/attest-bridge
+      name: attest-bridge-config
+      mountPath: /etc/attest-bridge
       sizeGB: 1
     envVars:
       - key: STRIPE_WEBHOOK_SECRET
