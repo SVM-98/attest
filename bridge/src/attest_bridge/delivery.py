@@ -20,10 +20,10 @@ path that sends over a cleartext channel. `smtp_factory` injection (defaults
 to the real dispatch above) is what makes this testable without a network.
 
 `DeliveryResult.detail` never carries the envelope, the salt, or
-`smtp_password` — only a sanitized summary (the exception CATEGORY and, for an
-SMTP response error, its numeric reply code). It never includes `str(exc)`,
-whose text can echo a server-returned response or the submitted message and so
-could carry a secret back to the caller and into the Ledger's
+`smtp_password` — only a hardcoded failure label (see `_safe_detail`) plus an
+exact-int SMTP reply code. It is derived from a trusted type table, never from
+the exception's own text or metadata, so no server-returned response or
+submitted message can leak into the caller or the Ledger's
 `last_delivery_error`.
 """
 
@@ -56,30 +56,51 @@ def _default_smtp_factory(host: str, port: int) -> smtplib.SMTP:
     return smtplib.SMTP(host, port)
 
 
+_GENERIC_FAILURE = "delivery failed"
+
+# Hardcoded (type -> label) table, most-specific first. `_safe_detail` returns
+# ONLY a literal from this table (optionally plus an exact-int SMTP code) —
+# never anything derived from the exception object's own __name__/__str__/
+# __format__, which a hostile exception class or metaclass could control to
+# raise or echo server-returned secret text.
+_FAILURE_LABELS: tuple[tuple[type[BaseException], str], ...] = (
+    (smtplib.SMTPAuthenticationError, "smtp auth failed"),
+    (smtplib.SMTPServerDisconnected, "smtp server disconnected"),
+    (smtplib.SMTPResponseException, "smtp error"),
+    (smtplib.SMTPException, "smtp error"),
+    (ssl.SSLError, "tls error"),
+    (ConnectionRefusedError, "connection refused"),
+    (TimeoutError, "timeout"),
+    (OSError, "network error"),
+    (ValueError, "invalid message"),
+    (TypeError, "invalid message"),
+)
+
+
 def _safe_detail(exc: Exception) -> str:
     """A delivery-failure summary safe to surface and persist.
 
-    Only the exception category and, for an SMTP response error, its numeric
-    reply code (a fixed protocol integer). NEVER `str(exc)`: on smtplib/ssl
-    errors that text can echo a server-returned response or the message this
-    module submitted, so it could carry `smtp_password` or envelope content
-    back to the caller and into the Ledger.
-
-    Bulletproof: this runs from send()'s except handler, so it must never raise
-    and never surface attacker-controlled content. A hostile exception could
-    make `smtp_code` a property that raises, or an `int` subclass whose
-    `__format__`/`__str__` raises or emits secret text — so the whole body is
-    guarded with a constant fallback and only an EXACT built-in `int` is
-    formatted (`type(code) is int`, never `isinstance`).
+    Runs from send()'s except handler, so it must NEVER raise and NEVER surface
+    attacker-controlled content. It returns only a hardcoded label chosen by
+    isinstance-matching `exc` against a fixed table of trusted stdlib types,
+    optionally suffixed with an EXACT built-in `int` SMTP code — never
+    `str(exc)`, and never the exception's own `__name__`/`__str__`/`__format__`
+    (a hostile class or metaclass could make those raise or echo a
+    server-returned response carrying `smtp_password` or envelope content). Any
+    surprise falls back to the generic constant.
     """
     try:
-        category = type(exc).__name__
+        label = _GENERIC_FAILURE
+        for known, known_label in _FAILURE_LABELS:
+            if isinstance(exc, known):
+                label = known_label
+                break
         code = getattr(exc, "smtp_code", None)
         if type(code) is int:
-            return f"{category} (SMTP code {code})"
-        return category
+            return f"{label} (SMTP code {code})"
+        return label
     except Exception:
-        return "delivery failed"
+        return _GENERIC_FAILURE
 
 
 def _build_message(
