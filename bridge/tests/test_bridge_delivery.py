@@ -65,6 +65,30 @@ class _RaisingSMTP(_FakeSMTP):
         raise self._exc
 
 
+class _RaisingSmtpCode(smtplib.SMTPException):
+    """An SMTP exception whose `smtp_code` accessor itself raises — _safe_detail
+    must not let that new exception escape send()."""
+
+    @property
+    def smtp_code(self) -> int:
+        raise RuntimeError("hostile accessor")
+
+
+class _HostileInt(int):
+    """An int subclass whose formatting emits attacker-controlled text — must
+    never reach the sanitized detail (only an EXACT built-in int is formatted)."""
+
+    def __format__(self, spec: str) -> str:
+        return "HOSTILE-FORMAT-LEAK"
+
+    def __str__(self) -> str:
+        return "HOSTILE-FORMAT-LEAK"
+
+
+class _HostileCodeException(smtplib.SMTPException):
+    smtp_code = _HostileInt(535)
+
+
 def _config(*, port: int = 587) -> DeliveryConfig:
     return DeliveryConfig(
         smtp_host="smtp.example.com",
@@ -325,6 +349,31 @@ def test_message_construction_failure_becomes_failed_result_not_a_raise() -> Non
     assert result.status == "failed"
     assert result.detail == "TypeError"
     assert fakes == []
+
+
+def test_safe_detail_hostile_smtp_code_accessor_never_escapes() -> None:
+    # A hostile exception whose smtp_code property raises must not turn into a
+    # raise out of send() — _safe_detail falls back to a constant.
+    def factory(host: str, port: int) -> _RaisingSMTP:
+        return _RaisingSMTP(host, port, _RaisingSmtpCode("auth failed"))
+
+    result = _send(_config(), factory)
+    assert result.status == "failed"
+    assert result.detail == "delivery failed"
+
+
+def test_safe_detail_hostile_int_subclass_code_is_not_formatted() -> None:
+    # An int-subclass smtp_code with attacker-controlled formatting must never
+    # reach the detail: only an EXACT built-in int is formatted, so this falls
+    # back to the bare category.
+    def factory(host: str, port: int) -> _RaisingSMTP:
+        return _RaisingSMTP(host, port, _HostileCodeException("auth failed"))
+
+    result = _send(_config(), factory)
+    assert result.status == "failed"
+    assert result.detail is not None
+    assert "HOSTILE-FORMAT-LEAK" not in result.detail
+    assert result.detail == "_HostileCodeException"
 
 
 # -- zero-config fallback ---------------------------------------------------

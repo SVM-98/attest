@@ -64,12 +64,22 @@ def _safe_detail(exc: Exception) -> str:
     errors that text can echo a server-returned response or the message this
     module submitted, so it could carry `smtp_password` or envelope content
     back to the caller and into the Ledger.
+
+    Bulletproof: this runs from send()'s except handler, so it must never raise
+    and never surface attacker-controlled content. A hostile exception could
+    make `smtp_code` a property that raises, or an `int` subclass whose
+    `__format__`/`__str__` raises or emits secret text — so the whole body is
+    guarded with a constant fallback and only an EXACT built-in `int` is
+    formatted (`type(code) is int`, never `isinstance`).
     """
-    category = type(exc).__name__
-    code = getattr(exc, "smtp_code", None)
-    if isinstance(code, int):
-        return f"{category} (SMTP code {code})"
-    return category
+    try:
+        category = type(exc).__name__
+        code = getattr(exc, "smtp_code", None)
+        if type(code) is int:
+            return f"{category} (SMTP code {code})"
+        return category
+    except Exception:
+        return "delivery failed"
 
 
 def _build_message(
