@@ -28,6 +28,10 @@ htmlcov/
 docs/superpowers/
 .hypothesis/
 
+# Internet-Draft local build output (already matched by the generic
+# `build/` rule above; named explicitly for discoverability).
+ietf/build/
+
 # Node (TS verifier)
 node_modules/
 
