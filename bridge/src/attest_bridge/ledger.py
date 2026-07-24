@@ -17,9 +17,12 @@ correct without parsing a single string into a datetime.
 
 One `sqlite3.Connection` per `Ledger`, shared by the WSGI request thread and
 the itch poller thread (T8/T9): `check_same_thread=False` disables sqlite3's
-default single-thread guard, and every write path takes `_lock` for the
-duration of its statement + commit so the two threads never interleave a
-write. Every statement is parametrized — never string-formatted — SQL.
+default single-thread guard, and EVERY access — reads and writes alike — takes
+`_lock` for the full duration of its statement (plus commit, for writes). A
+shared connection yields undefined results if a write steps a cursor a read is
+mid-iteration on (SQLite same-connection isolation), so the lock serializes
+whole read+fetch operations, not just writes. Every statement is parametrized —
+never string-formatted — SQL.
 """
 
 from __future__ import annotations
@@ -153,25 +156,31 @@ class Ledger:
     # -- webhook-event idempotency ----------------------------------------
 
     def seen_event(self, platform: str, event_id: str) -> bool:
-        row = self._conn.execute(
-            "SELECT 1 FROM events WHERE platform = ? AND event_id = ?", (platform, event_id)
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM events WHERE platform = ? AND event_id = ?", (platform, event_id)
+            ).fetchone()
         return row is not None
 
-    def mark_event(self, platform: str, event_id: str) -> None:
+    def mark_event(self, platform: str, event_id: str, *, now: str) -> None:
+        # `now` mirrors the other state-recording methods (enqueue_claim,
+        # add_dead_letter, resolve_dead_letter): the caller supplies the RFC3339
+        # timestamp so events.received_at holds a real value (the Ledger never
+        # reads a clock) rather than an empty sentinel.
         with self._lock, self._conn:
             self._conn.execute(
                 "INSERT INTO events (platform, event_id, received_at) VALUES (?, ?, ?)",
-                (platform, event_id, ""),
+                (platform, event_id, now),
             )
 
     # -- receipts -----------------------------------------------------------
 
     def get_receipt(self, platform: str, purchase_id: str) -> StoredReceipt | None:
-        row = self._conn.execute(
-            "SELECT * FROM receipts WHERE platform = ? AND purchase_id = ?",
-            (platform, purchase_id),
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM receipts WHERE platform = ? AND purchase_id = ?",
+                (platform, purchase_id),
+            ).fetchone()
         return None if row is None else _receipt_from_row(row)
 
     def record_receipt(
@@ -208,9 +217,10 @@ class Ledger:
             )
 
     def by_download_token(self, token: str) -> StoredReceipt | None:
-        row = self._conn.execute(
-            "SELECT * FROM receipts WHERE download_token = ?", (token,)
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM receipts WHERE download_token = ?", (token,)
+            ).fetchone()
         return None if row is None else _receipt_from_row(row)
 
     def mark_delivered(self, platform: str, purchase_id: str, at: str) -> None:
@@ -232,7 +242,10 @@ class Ledger:
             )
 
     def undelivered(self) -> list[StoredReceipt]:
-        rows = self._conn.execute("SELECT * FROM receipts WHERE delivered_at IS NULL").fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM receipts WHERE delivered_at IS NULL"
+            ).fetchall()
         return [_receipt_from_row(row) for row in rows]
 
     # -- itch claims queue (the poller "cursor") -----------------------------
@@ -251,18 +264,20 @@ class Ledger:
         return token
 
     def get_claim(self, token: str) -> Claim | None:
-        row = self._conn.execute("SELECT * FROM claims WHERE token = ?", (token,)).fetchone()
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM claims WHERE token = ?", (token,)).fetchone()
         return None if row is None else _claim_from_row(row)
 
     def due_claims(self, now: str) -> list[Claim]:
         # RFC3339 strings sort lexicographically, so this is a plain string
         # comparison — a future `next_attempt_at` is correctly not due. Only
         # 'pending' claims are ever due: 'confirmed'/'exhausted' are terminal.
-        rows = self._conn.execute(
-            "SELECT * FROM claims WHERE status = 'pending' AND next_attempt_at <= ? "
-            "ORDER BY next_attempt_at",
-            (now,),
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM claims WHERE status = 'pending' AND next_attempt_at <= ? "
+                "ORDER BY next_attempt_at",
+                (now,),
+            ).fetchall()
         return [_claim_from_row(row) for row in rows]
 
     def complete_claim(self, token: str) -> None:
@@ -295,9 +310,10 @@ class Ledger:
             )
 
     def unresolved_dead_letters(self) -> list[DeadLetter]:
-        rows = self._conn.execute(
-            "SELECT * FROM dead_letters WHERE resolved_at IS NULL ORDER BY id"
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM dead_letters WHERE resolved_at IS NULL ORDER BY id"
+            ).fetchall()
         return [_dead_letter_from_row(row) for row in rows]
 
     def resolve_dead_letter(self, dead_letter_id: int, *, now: str) -> None:
