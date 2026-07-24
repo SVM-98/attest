@@ -201,6 +201,21 @@ def test_stripe_itch_delivery_tables_are_all_optional(tmp_path: Path) -> None:
     assert config.delivery is None
 
 
+def test_itch_requires_smtp_delivery_at_config_load(tmp_path: Path) -> None:
+    delivery_section = """[delivery]
+smtp_host = "smtp.example.com"
+smtp_port = 587
+smtp_username = "receipts@example.com"
+smtp_password_env = "SMTP_PASSWORD"
+from_address = "receipts@example.com"
+info_url = "https://store.example.com/what-is-this-file"
+
+"""
+    content = _VALID_TOML.replace(delivery_section, "")
+    with pytest.raises(ConfigError, match=r"\[itch\].*\[delivery\]"):
+        load_config(_write(tmp_path, content), env=_SECRET_ENV)
+
+
 def test_missing_required_product_field_raises_config_error_naming_key_and_field(
     tmp_path: Path,
 ) -> None:

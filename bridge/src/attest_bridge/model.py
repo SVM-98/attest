@@ -28,6 +28,10 @@ class ConfigError(BridgeError):
     """Bad or missing configuration/secret — fail at startup, before serving."""
 
 
+class ClaimQueueFull(BridgeError):
+    """The bounded itch claim queue cannot accept another pending claim."""
+
+
 @dataclass(frozen=True, slots=True)
 class NormalizedPurchase:
     platform: str

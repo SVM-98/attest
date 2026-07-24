@@ -53,14 +53,24 @@ from urllib.parse import parse_qs
 
 from attest_bridge.config import BridgeConfig
 from attest_bridge.core import IssuingCore
+from attest_bridge.delivery import Delivery
 from attest_bridge.itch_adapter import ItchAdapter
 from attest_bridge.ledger import Ledger, StoredReceipt
-from attest_bridge.model import NormalizedPurchase, PurchaseRejected, UnmappedProduct
+from attest_bridge.model import (
+    ClaimQueueFull,
+    NormalizedPurchase,
+    PurchaseRejected,
+    UnmappedProduct,
+)
 from attest_bridge.stripe_adapter import StripeAdapter, StripeSignatureError
 
 _RFC3339 = "%Y-%m-%dT%H:%M:%SZ"
 _NOT_FOUND_BODY = b'{"error":"not found"}'
 _ITCH_PRODUCT_PREFIX = "itch_"
+_ITCH_PROCESSED_DETAIL = (
+    "If a matching itch.io purchase exists, its receipt has been emailed to the address you "
+    "submitted."
+)
 
 WSGIApp = Callable[[dict[str, Any], Any], Iterable[bytes]]
 
@@ -79,6 +89,7 @@ class BridgeDeps:
     # Default None so existing (pre-T9) `BridgeDeps(...)` construction sites
     # keep working unchanged — purely additive, mirrors `stripe`'s optionality.
     itch: ItchAdapter | None = None
+    delivery: Delivery | None = None
 
 
 # -- WSGI response helpers ---------------------------------------------------
@@ -176,6 +187,19 @@ def _handle_stripe_webhook(
         deps.log.error("stripe webhook: signature valid but body is not parseable JSON")
         return _plain_response(start_response, "400 Bad Request", b"malformed body")
 
+    if not isinstance(event, dict) or not isinstance(event.get("id"), str) or not event["id"]:
+        # There is no usable event id to persist in `events`, but this validly
+        # signed malformed input can never succeed. Dead-letter it and return
+        # 200 so Stripe does not retry it forever.
+        raw_event = event if isinstance(event, dict) else {"event": event}
+        deps.ledger.add_dead_letter(
+            "stripe",
+            _best_effort_purchase_id(raw_event),
+            "stripe event id is missing or not a non-empty string",
+            json.dumps(event),
+            now=_now_rfc3339(),
+        )
+        return _json_response(start_response, "200 OK", {"ok": True})
     event_id = event["id"]
     # Serialize the check-then-act critical section (seen_event -> issue/record
     # -> mark_event, and the delivery inside `core.process`) across the server's
@@ -186,23 +210,22 @@ def _handle_stripe_webhook(
     # a self-hosted merchant bridge is single-process and low-volume; the sig
     # verify + JSON parse above stay outside the lock (read-only, no shared
     # state). Cross-process concurrency is out of scope (see `cli.py`).
-    with lock:
-        purchase: NormalizedPurchase | None = None
-        try:
-            if deps.ledger.seen_event("stripe", event_id):
-                # Replay of an event we already processed (Stripe retries on any
-                # non-2xx, or the same event legitimately arrives twice): already
-                # marked, nothing to redo.
-                return _json_response(start_response, "200 OK", {"ok": True})
+    # Advisory pre-check only. It avoids needless API fetches on ordinary
+    # replays but may race; the lock below remains authoritative.
+    if deps.ledger.seen_event("stripe", event_id):
+        return _json_response(start_response, "200 OK", {"ok": True})
 
-            if not stripe.wants(event):
-                deps.log.info("stripe event %s: not actionable (type/payment_status)", event_id)
-                deps.ledger.mark_event("stripe", event_id, now=_now_rfc3339())
-                return _json_response(start_response, "200 OK", {"ok": True})
-
+    purchase: NormalizedPurchase | None = None
+    try:
+        actionable = stripe.wants(event)
+        if actionable:
+            # This may fetch Stripe line items. It must stay outside the
+            # webhook lock so a slow upstream cannot stall every webhook.
             purchase = stripe.normalize(event)
-            outcome = deps.core.process(purchase)
-        except (PurchaseRejected, UnmappedProduct) as exc:
+    except (PurchaseRejected, UnmappedProduct, KeyError, TypeError, AttributeError) as exc:
+        with lock:
+            if deps.ledger.seen_event("stripe", event_id):
+                return _json_response(start_response, "200 OK", {"ok": True})
             # Permanently-bad input: dead-letter for operator triage and mark the
             # event seen — Stripe must not retry something that will never
             # succeed. `raw_json` is the whole event, so `retry-failed` can
@@ -214,6 +237,28 @@ def _handle_stripe_webhook(
             )
             deps.ledger.add_dead_letter(
                 "stripe", purchase_id, str(exc), json.dumps(event), now=_now_rfc3339()
+            )
+            deps.ledger.mark_event("stripe", event_id, now=_now_rfc3339())
+            deps.log.error("stripe event %s: dead-lettered (%s)", event_id, exc)
+            return _json_response(start_response, "200 OK", {"ok": True})
+
+    with lock:
+        if deps.ledger.seen_event("stripe", event_id):
+            return _json_response(start_response, "200 OK", {"ok": True})
+        if not actionable:
+            deps.log.info("stripe event %s: not actionable (type/payment_status)", event_id)
+            deps.ledger.mark_event("stripe", event_id, now=_now_rfc3339())
+            return _json_response(start_response, "200 OK", {"ok": True})
+        assert purchase is not None
+        try:
+            outcome = deps.core.process(purchase)
+        except (PurchaseRejected, UnmappedProduct) as exc:
+            deps.ledger.add_dead_letter(
+                "stripe",
+                purchase.platform_purchase_id,
+                str(exc),
+                json.dumps(event),
+                now=_now_rfc3339(),
             )
             deps.ledger.mark_event("stripe", event_id, now=_now_rfc3339())
             deps.log.error("stripe event %s: dead-lettered (%s)", event_id, exc)
@@ -305,6 +350,12 @@ def _handle_itch_claim_form(deps: BridgeDeps, start_response: Any) -> Iterable[b
         # No [itch] section configured: this route simply doesn't exist —
         # mirrors `/stripe/webhook`'s 404 when `deps.stripe is None`.
         return _not_found(start_response)
+    if deps.config.delivery is None:
+        return _json_response(
+            start_response,
+            "503 Service Unavailable",
+            {"error": "receipt delivery is not configured"},
+        )
     options = "".join(
         f'<option value="{html.escape(gid)}">{html.escape(gid)}</option>'
         for gid in _itch_game_ids(deps)
@@ -327,29 +378,62 @@ def _handle_itch_claim_post(
 ) -> Iterable[bytes]:
     if deps.itch is None:
         return _not_found(start_response)
+    if deps.config.delivery is None:
+        return _json_response(
+            start_response,
+            "503 Service Unavailable",
+            {"error": "receipt delivery is not configured"},
+        )
     fields = _parse_claim_fields(environ)
     email = fields.get("email", "").strip()
     game_id = fields.get("game_id", "").strip()
-    if not email or not game_id or f"{_ITCH_PRODUCT_PREFIX}{game_id}" not in deps.config.products:
+    local, separator, domain = email.partition("@")
+    if (
+        not email
+        or len(email) > 254
+        or separator != "@"
+        or not local
+        or not domain
+        or "@" in domain
+        or not game_id
+        or f"{_ITCH_PRODUCT_PREFIX}{game_id}" not in deps.config.products
+    ):
         return _json_response(
             start_response, "400 Bad Request", {"error": "invalid email or game_id"}
         )
-    token = deps.ledger.enqueue_claim(email, game_id, now=_now_rfc3339())
+    try:
+        token = deps.ledger.enqueue_claim(email, game_id, now=_now_rfc3339())
+    except ClaimQueueFull:
+        return _json_response(
+            start_response, "503 Service Unavailable", {"error": "claim queue is full, retry later"}
+        )
     return _json_response(start_response, "202 Accepted", {"claim": token})
 
 
 def _handle_itch_claim_status(
     deps: BridgeDeps, start_response: Any, *, token: str
 ) -> Iterable[bytes]:
+    if deps.itch is not None and deps.config.delivery is None:
+        return _json_response(
+            start_response,
+            "503 Service Unavailable",
+            {"error": "receipt delivery is not configured"},
+        )
     # Works regardless of whether `[itch]`/the poller is configured in THIS
     # process — a claim's status only ever depends on the Ledger.
     claim = deps.ledger.get_claim(token)
     if claim is None:
         return _not_found(start_response)
-    payload: dict[str, Any] = {"status": claim.status}
-    if claim.status == "confirmed" and claim.result_download_token:
-        payload["download_url"] = f"{deps.config.public_base_url}/r/{claim.result_download_token}"
-    return _json_response(start_response, "200 OK", payload)
+    if claim.status == "pending":
+        return _json_response(start_response, "200 OK", {"status": "pending"})
+    return _json_response(
+        start_response,
+        "200 OK",
+        {
+            "status": "processed",
+            "detail": _ITCH_PROCESSED_DETAIL,
+        },
+    )
 
 
 # -- app ------------------------------------------------------------------

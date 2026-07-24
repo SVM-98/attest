@@ -16,7 +16,9 @@ import stat
 from pathlib import Path
 
 import pytest
+from attest_bridge import ledger as ledger_mod
 from attest_bridge.ledger import Claim, DeadLetter, Ledger, StoredReceipt
+from attest_bridge.model import ClaimQueueFull
 
 NOW = "2026-07-24T10:00:00Z"
 FUTURE = "2026-07-25T10:00:00Z"
@@ -201,6 +203,24 @@ def test_due_claims_excludes_a_future_claim(ledger: Ledger) -> None:
     assert due == []
 
 
+def test_enqueue_claim_deduplicates_a_pending_email_and_game(ledger: Ledger) -> None:
+    first = ledger.enqueue_claim("buyer@example.com", "game_1", now=NOW)
+    second = ledger.enqueue_claim("buyer@example.com", "game_1", now=FUTURE)
+
+    assert second == first
+    assert len(ledger.due_claims(FUTURE)) == 1
+
+
+def test_enqueue_claim_rejects_at_pending_cap(
+    ledger: Ledger, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(ledger_mod, "MAX_PENDING_CLAIMS", 1)
+    ledger.enqueue_claim("one@example.com", "game_1", now=NOW)
+
+    with pytest.raises(ClaimQueueFull):
+        ledger.enqueue_claim("two@example.com", "game_1", now=NOW)
+
+
 def test_defer_claim_increments_attempts_and_updates_next_attempt_at(ledger: Ledger) -> None:
     token = ledger.enqueue_claim("buyer@example.com", "game_1", now=NOW)
 
@@ -216,7 +236,7 @@ def test_defer_claim_increments_attempts_and_updates_next_attempt_at(ledger: Led
 def test_complete_claim_drops_it_from_due_claims(ledger: Ledger) -> None:
     token = ledger.enqueue_claim("buyer@example.com", "game_1", now=PAST)
 
-    ledger.complete_claim(token)
+    ledger.complete_claim(token, receipts_issued=0)
 
     assert ledger.due_claims(NOW) == []
     claim = ledger.get_claim(token)
@@ -224,28 +244,25 @@ def test_complete_claim_drops_it_from_due_claims(ledger: Ledger) -> None:
     assert claim.status == "confirmed"
 
 
-def test_complete_claim_without_download_token_leaves_it_none(ledger: Ledger) -> None:
+def test_complete_claim_records_zero_receipts(ledger: Ledger) -> None:
     token = ledger.enqueue_claim("buyer@example.com", "game_1", now=PAST)
 
-    ledger.complete_claim(token)
+    ledger.complete_claim(token, receipts_issued=0)
 
     claim = ledger.get_claim(token)
     assert claim is not None
-    assert claim.result_download_token is None
+    assert claim.receipts_issued == 0
 
 
-def test_complete_claim_records_result_download_token(ledger: Ledger) -> None:
+def test_complete_claim_records_receipts_issued(ledger: Ledger) -> None:
     token = ledger.enqueue_claim("buyer@example.com", "game_1", now=PAST)
 
-    ledger.complete_claim(
-        token,
-        result_download_token="dl-token-abc",  # noqa: S106 - test fixture value
-    )
+    ledger.complete_claim(token, receipts_issued=2)
 
     claim = ledger.get_claim(token)
     assert claim is not None
     assert claim.status == "confirmed"
-    assert claim.result_download_token == "dl-token-abc"  # noqa: S105 - test fixture value
+    assert claim.receipts_issued == 2
 
 
 def test_exhaust_claim_drops_it_from_due_claims(ledger: Ledger) -> None:
@@ -319,6 +336,7 @@ def test_stored_receipt_claim_dead_letter_are_frozen_dataclasses() -> None:
         attempts=0,
         next_attempt_at=NOW,
         created_at=NOW,
+        receipts_issued=0,
     )
     dead_letter = DeadLetter(
         id=1,
