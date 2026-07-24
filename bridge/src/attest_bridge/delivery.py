@@ -20,9 +20,11 @@ path that sends over a cleartext channel. `smtp_factory` injection (defaults
 to the real dispatch above) is what makes this testable without a network.
 
 `DeliveryResult.detail` never carries the envelope, the salt, or
-`smtp_password` — only the exception class name/message from smtplib/ssl/
-OSError, which by construction echoes server responses and socket errors,
-never the secrets this module submitted.
+`smtp_password` — only a sanitized summary (the exception CATEGORY and, for an
+SMTP response error, its numeric reply code). It never includes `str(exc)`,
+whose text can echo a server-returned response or the submitted message and so
+could carry a secret back to the caller and into the Ledger's
+`last_delivery_error`.
 """
 
 from __future__ import annotations
@@ -52,6 +54,22 @@ def _default_smtp_factory(host: str, port: int) -> smtplib.SMTP:
     if port == _SMTP_SSL_PORT:
         return smtplib.SMTP_SSL(host, port, context=ssl.create_default_context())
     return smtplib.SMTP(host, port)
+
+
+def _safe_detail(exc: Exception) -> str:
+    """A delivery-failure summary safe to surface and persist.
+
+    Only the exception category and, for an SMTP response error, its numeric
+    reply code (a fixed protocol integer). NEVER `str(exc)`: on smtplib/ssl
+    errors that text can echo a server-returned response or the message this
+    module submitted, so it could carry `smtp_password` or envelope content
+    back to the caller and into the Ledger.
+    """
+    category = type(exc).__name__
+    code = getattr(exc, "smtp_code", None)
+    if isinstance(code, int):
+        return f"{category} (SMTP code {code})"
+    return category
 
 
 def _build_message(
@@ -123,28 +141,32 @@ class Delivery:
         if config is None:
             return DeliveryResult(status="skipped_no_smtp", detail=None)
 
-        message = _build_message(
-            config=config,
-            to_email=to_email,
-            receipt_id=receipt_id,
-            work_title=work_title,
-            envelope=envelope,
-            download_url=download_url,
-            info_url=info_url,
-        )
+        # NEVER-RAISE contract (load-bearing): the receipt is already durably
+        # recorded before this runs (Global Constraint 9), so EVERY failure —
+        # message construction (a header-injecting title/address -> ValueError,
+        # a non-serializable envelope -> TypeError), the SMTP factory, TLS,
+        # login, or send, INCLUDING exceptions outside SMTPException/OSError —
+        # is converted to a failed result, never propagated. `except Exception`
+        # is deliberate; BaseException (KeyboardInterrupt/SystemExit) still
+        # propagates.
         try:
+            message = _build_message(
+                config=config,
+                to_email=to_email,
+                receipt_id=receipt_id,
+                work_title=work_title,
+                envelope=envelope,
+                download_url=download_url,
+                info_url=info_url,
+            )
             smtp = self._smtp_factory(config.smtp_host, config.smtp_port)
             with smtp:
                 if config.smtp_port != _SMTP_SSL_PORT:
-                    # Mandatory STARTTLS on every non-465 port: never a bare
-                    # cleartext connection carries the salt-bearing envelope.
+                    # Mandatory STARTTLS on every non-465 port: no cleartext
+                    # channel ever carries the salt-bearing envelope.
                     smtp.starttls(context=ssl.create_default_context())
                 smtp.login(config.smtp_username, config.smtp_password)
                 smtp.send_message(message)
-        except (smtplib.SMTPException, OSError) as exc:
-            # `ssl.SSLError` is an `OSError` subclass, so it is covered here.
-            # `str(exc)` on these exception classes surfaces socket/server
-            # detail, never the credentials or envelope content this module
-            # submitted — nothing secret is ever passed back to the caller.
-            return DeliveryResult(status="failed", detail=f"{type(exc).__name__}: {exc}")
+        except Exception as exc:
+            return DeliveryResult(status="failed", detail=_safe_detail(exc))
         return DeliveryResult(status="sent", detail=None)
