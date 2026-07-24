@@ -189,7 +189,7 @@ class StripeAdapter:
         if not isinstance(platform_purchase_id, str) or not platform_purchase_id:
             raise PurchaseRejected("stripe session id is missing or not a non-empty string")
 
-        customer_details = session.get("customer_details") or {}
+        customer_details = session.get("customer_details") if "customer_details" in session else {}
         if not isinstance(customer_details, dict):
             raise PurchaseRejected(
                 f"stripe session {platform_purchase_id!r} customer_details is not an object"
@@ -209,7 +209,7 @@ class StripeAdapter:
         amount = str(amount_total) if amount_total is not None else None
         currency = session.get("currency")
 
-        metadata = session.get("metadata") or {}
+        metadata = session.get("metadata") if "metadata" in session else {}
         if not isinstance(metadata, dict):
             raise PurchaseRejected(
                 f"stripe session {platform_purchase_id!r} metadata is not an object"
@@ -221,9 +221,19 @@ class StripeAdapter:
                 f"stripe session {platform_purchase_id!r} metadata must contain string keys "
                 "and values"
             )
-        product_key = metadata.get("attest_product_key") or self._line_items_product_key(
-            platform_purchase_id
+        metadata_product_key = metadata.get("attest_product_key")
+        # With an API key, line items are always fetched to enforce the
+        # single-item invariant. Metadata still decides the catalog mapping.
+        # Without an API key that count is unknowable, so metadata-only is the
+        # explicitly documented merchant assertion of a single-item session.
+        line_items_product_key = (
+            self._line_items_product_key(platform_purchase_id) if self._api_key else None
         )
+        product_key = metadata_product_key or line_items_product_key
+        if not product_key:
+            raise PurchaseRejected(
+                "no product key: set metadata.attest_product_key or configure stripe.api_key_env"
+            )
 
         # OI-1 precedence: metadata carrier wins over the buyer-typed custom field.
         pubkey_str = metadata.get("attest_buyer_pubkey") or self._custom_field_pubkey(session)
