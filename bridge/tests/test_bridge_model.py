@@ -53,6 +53,19 @@ def test_decode_buyer_pubkey_malformed_rejects(bad: str) -> None:
         decode_buyer_pubkey(bad)
 
 
+def test_decode_buyer_pubkey_rejects_non_canonical_alphabet_decoding_to_32_bytes() -> None:
+    # `keys.b64u_decode` silently drops out-of-alphabet chars, so a valid 32-byte
+    # key with injected "!" still decodes to 32 bytes and would pass a length-only
+    # gate. gate #1 must reject it via the canonical round-trip check (security review).
+    valid = keys.b64u(bytes(range(32)))
+    injected = valid[:4] + "!!!!" + valid[4:]
+    assert (
+        len(keys.b64u_decode(injected)) == 32
+    )  # sanity: permissive decoder accepts it back to 32B
+    with pytest.raises(PurchaseRejected):
+        decode_buyer_pubkey(injected)
+
+
 def test_rfc3339_from_unix_matches_attest_format() -> None:
     # Epoch literal independently recomputed (brief's the task brief literal
     # "2026-07-13T16:53:20Z" did not match `datetime.fromtimestamp(1_784_000_000,
