@@ -1,19 +1,26 @@
-"""attest-bridge CLI: `serve`, `check-config`, `retry-failed` (task-8-brief.md).
+"""attest-bridge CLI: `serve`, `check-config`, `retry-failed`, `itch-import`
+(task-8-brief.md, task-9-brief.md).
 
 `check-config` deliberately stops at config + issuer + catalog validation —
 it never touches the Ledger (no sqlite file is created just to validate a
-config) and never contacts a platform. `serve`/`retry-failed` need the full
-runtime (Ledger, Delivery, IssuingCore, the platform adapters), assembled by
-`_build_deps`.
+config) and never contacts a platform. `serve`/`retry-failed`/`itch-import`
+need the full runtime (Ledger, Delivery, IssuingCore, the platform adapters),
+assembled by `_build_deps`. `serve` additionally starts the itch
+`ItchPoller` on its own daemon thread when `[itch]` is configured (T9) — see
+`itch_adapter.py`'s module docstring for why that poller, not this CLI's
+`itch-import` or `http.py`'s `/itch/claim`, is the only code path that can
+ever issue an itch receipt.
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import logging
 import socketserver
 import sys
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from wsgiref.simple_server import WSGIServer, make_server
@@ -23,6 +30,7 @@ from attest_bridge.config import load_config
 from attest_bridge.core import IssuingCore
 from attest_bridge.delivery import Delivery
 from attest_bridge.http import BridgeDeps, make_app
+from attest_bridge.itch_adapter import ItchAdapter, ItchPoller
 from attest_bridge.ledger import Ledger
 from attest_bridge.model import ConfigError
 from attest_bridge.signing import load_issuer
@@ -50,6 +58,15 @@ class _ThreadingWSGIServer(socketserver.ThreadingMixIn, WSGIServer):
        but NOT that whole workflow, so without this second lock two concurrent
        deliveries of the same event would both pass `seen_event` and
        double-issue / double-deliver.
+
+    The itch `ItchPoller` (T9), when running, adds a THIRD thread (its own
+    daemon thread, started in `_cmd_serve`) but needs no additional lock:
+    it is the only code path that ever processes `platform="itch"`
+    purchases (no itch webhook exists), so it can never race the webhook
+    lock above, which only ever guards `platform="stripe"` work — the two
+    platforms are disjoint in the Ledger's `(platform, purchase_id)` key
+    space. See `itch_adapter.py`'s `ItchPoller` docstring for the full
+    argument.
     """
 
     daemon_threads = True
@@ -69,6 +86,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
     retry_parser = sub.add_parser("retry-failed", help="re-drive unresolved dead letters")
     retry_parser.add_argument("--config", required=True)
+
+    itch_import_parser = sub.add_parser(
+        "itch-import", help="CSV backfill: enqueue itch claims for a merchant's buyer list"
+    )
+    itch_import_parser.add_argument("--config", required=True)
+    itch_import_parser.add_argument("--game-id", required=True)
+    itch_import_parser.add_argument("csv_path")
 
     return parser
 
@@ -96,7 +120,8 @@ def _build_deps(config_path: Path, *, log: logging.Logger) -> BridgeDeps:
         if config.stripe is not None
         else None
     )
-    return BridgeDeps(config=config, core=core, ledger=ledger, stripe=stripe, log=log)
+    itch = ItchAdapter(api_key=config.itch.api_key) if config.itch is not None else None
+    return BridgeDeps(config=config, core=core, ledger=ledger, stripe=stripe, log=log, itch=itch)
 
 
 def _cmd_serve(args: argparse.Namespace) -> int:
@@ -111,9 +136,40 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     app = make_app(deps)
     host: str = args.host
     port: int = args.port
-    with make_server(host, port, app, server_class=_ThreadingWSGIServer) as httpd:
-        log.info("attest-bridge serving on %s:%d", host, port)
-        httpd.serve_forever()
+
+    # itch has no webhook (see itch_adapter.py) -- when [itch] is configured,
+    # the ONLY thing that ever drains its claim queue is this single daemon
+    # thread's ItchPoller, ticking against the live API on its own schedule.
+    stop_event = threading.Event()
+    poller_thread: threading.Thread | None = None
+    if deps.itch is not None and deps.config.itch is not None:
+        poller = ItchPoller(
+            adapter=deps.itch,
+            ledger=deps.ledger,
+            core=deps.core,
+            max_attempts=deps.config.itch.max_attempts,
+        )
+        poller_thread = threading.Thread(
+            target=poller.run_forever,
+            args=(stop_event, deps.config.itch.poll_interval_seconds),
+            daemon=True,
+            name="itch-poller",
+        )
+        poller_thread.start()
+        log.info(
+            "itch poller started (interval=%ds, max_attempts=%d)",
+            deps.config.itch.poll_interval_seconds,
+            deps.config.itch.max_attempts,
+        )
+
+    try:
+        with make_server(host, port, app, server_class=_ThreadingWSGIServer) as httpd:
+            log.info("attest-bridge serving on %s:%d", host, port)
+            httpd.serve_forever()
+    finally:
+        stop_event.set()
+        if poller_thread is not None:
+            poller_thread.join(timeout=5)
     return _RC_OK
 
 
@@ -165,6 +221,51 @@ def _cmd_retry_failed(args: argparse.Namespace) -> int:
     return _RC_OK
 
 
+def _cmd_itch_import(args: argparse.Namespace) -> int:
+    """CSV backfill: enqueue an itch claim per unique buyer email.
+
+    OI-4: intake is never issuance — this command only ever calls
+    `Ledger.enqueue_claim`. Actual issuance still requires
+    `ItchPoller.tick` to confirm each purchase against the live itch API
+    (T9's `ItchAdapter.fetch_purchases`), same as a buyer-submitted claim.
+    """
+    log = logging.getLogger("attest_bridge")
+    try:
+        deps = _build_deps(Path(args.config), log=log)
+    except ConfigError as exc:
+        print(f"config error: {exc}", file=sys.stderr)
+        return _RC_CONFIG_ERROR
+
+    csv_path = Path(args.csv_path)
+    try:
+        with csv_path.open(newline="", encoding="utf-8") as fh:
+            reader = csv.DictReader(fh)
+            fieldnames = reader.fieldnames or []
+            email_field = next(
+                (name for name in fieldnames if name.strip().lower() == "email"), None
+            )
+            if email_field is None:
+                print("itch-import: CSV has no 'email' column", file=sys.stderr)
+                return _RC_CONFIG_ERROR
+
+            now = _now_rfc3339()
+            seen_emails: set[str] = set()
+            enqueued = 0
+            for row in reader:
+                email = (row.get(email_field) or "").strip()
+                if not email or email in seen_emails:
+                    continue
+                seen_emails.add(email)
+                deps.ledger.enqueue_claim(email, args.game_id, now=now)
+                enqueued += 1
+    except OSError as exc:
+        print(f"itch-import: cannot read {csv_path}: {exc}", file=sys.stderr)
+        return _RC_CONFIG_ERROR
+
+    print(f"enqueued: {enqueued}")
+    return _RC_OK
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -175,6 +276,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_check_config(args)
     if args.command == "retry-failed":
         return _cmd_retry_failed(args)
+    if args.command == "itch-import":
+        return _cmd_itch_import(args)
     parser.error(
         f"unknown command: {args.command}"
     )  # pragma: no cover - argparse exits before this

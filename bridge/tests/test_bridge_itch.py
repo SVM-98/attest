@@ -1,0 +1,824 @@
+"""itch.io claim-queue poller tests (task-9-brief.md; OI-4, source-verified
+2026-07-24): itch.io has no purchase webhook and no purchase-enumeration
+endpoint, so issuance is a claim-queue poller whose SOLE issuance authority is
+the live `GET /games/{game_id}/purchases?email=...` API response -- a claim
+or a CSV row never causes issuance on its own. Every test below either pins
+that invariant directly (the E2E oracle, the dead-letter-but-claim-completes
+case) or pins the backoff/exhaustion arithmetic and HTTP/CLI surface around
+it.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import urllib.error
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlencode
+
+import pytest
+from attest_bridge import cli
+from attest_bridge.catalog import ProductCatalog, ProductTemplate
+from attest_bridge.config import BridgeConfig, IssuerConfig, ItchConfig
+from attest_bridge.core import IssuingCore
+from attest_bridge.delivery import Delivery
+from attest_bridge.http import BridgeDeps, make_app
+from attest_bridge.itch_adapter import ItchAdapter, ItchApiError, ItchPoller, _default_http_get
+from attest_bridge.ledger import Ledger
+from attest_bridge.model import NormalizedPurchase, PurchaseRejected
+from attest_bridge.signing import IssuerIdentity
+from conftest import DISPLAY_NAME, ISSUER, KID
+from test_bridge_http import call_app
+
+from attest import keys, pq
+from attest import verify as verify_mod
+
+_RFC3339 = "%Y-%m-%dT%H:%M:%SZ"
+# Same convention as conftest.py's own _LEGAL_TEXT_SHA256 -- a realistic
+# 64-lowercase-hex digest, never a hand-typed placeholder.
+_LEGAL_TEXT_SHA256 = hashlib.sha256(b"attest-bridge-itch-test-license-terms-v1").hexdigest()
+
+
+# -- shared fixtures/helpers -------------------------------------------------
+
+
+def _purchase_json(
+    *,
+    id: int = 1001,  # mirrors the itch API's own field name
+    email: str = "buyer@example.com",
+    created_at: str = "2016-11-18 21:07:03",
+    source: str = "download_page",
+    currency: str = "USD",
+    price: str = "5.00",
+    quantity: int = 1,
+    status: str = "settled",
+    purchase_type: str = "default",
+    game_id: int = 123456,
+) -> dict[str, Any]:
+    return {
+        "id": id,
+        "email": email,
+        "created_at": created_at,
+        "source": source,
+        "currency": currency,
+        "price": price,
+        "quantity": quantity,
+        "status": status,
+        "purchase_type": purchase_type,
+        "game_id": game_id,
+    }
+
+
+def _fake_http_get(
+    purchases: list[dict[str, Any]],
+) -> tuple[Any, list[tuple[str, dict[str, str]]]]:
+    calls: list[tuple[str, dict[str, str]]] = []
+
+    def fake(url: str, headers: dict[str, str]) -> bytes:
+        calls.append((url, headers))
+        return json.dumps({"purchases": purchases}).encode("utf-8")
+
+    return fake, calls
+
+
+def _failing_http_get(status: int = 500) -> Any:
+    def fake(url: str, headers: dict[str, str]) -> bytes:
+        raise urllib.error.HTTPError(url, status, "itch API error", {}, None)  # type: ignore[arg-type]
+
+    return fake
+
+
+# -- fetch_purchases: URL/auth/parse -----------------------------------------
+
+
+def test_fetch_purchases_builds_url_with_bearer_auth_and_returns_purchases_list() -> None:
+    purchases = [_purchase_json(id=1001), _purchase_json(id=1002)]
+    fake, calls = _fake_http_get(purchases)
+    adapter = ItchAdapter(api_key="itch_secret_key", http_get=fake)
+
+    result = adapter.fetch_purchases("123456", "buyer@example.com")
+
+    assert result == purchases
+    assert len(calls) == 1
+    url, headers = calls[0]
+    assert url == "https://api.itch.io/games/123456/purchases?email=buyer%40example.com"
+    assert headers == {"Authorization": "Bearer itch_secret_key"}
+
+
+def test_fetch_purchases_uses_configured_api_base() -> None:
+    fake, calls = _fake_http_get([])
+    adapter = ItchAdapter(api_key="key", api_base="https://itch.example.test", http_get=fake)
+
+    adapter.fetch_purchases("999", "a@b.com")
+
+    url, _ = calls[0]
+    assert url == "https://itch.example.test/games/999/purchases?email=a%40b.com"
+
+
+def test_fetch_purchases_non_200_raises_itch_api_error() -> None:
+    adapter = ItchAdapter(api_key="key", http_get=_failing_http_get(404))
+    with pytest.raises(ItchApiError):
+        adapter.fetch_purchases("123456", "buyer@example.com")
+
+
+def test_fetch_purchases_bad_json_raises_itch_api_error() -> None:
+    def fake(url: str, headers: dict[str, str]) -> bytes:
+        return b"not json at all"
+
+    adapter = ItchAdapter(api_key="key", http_get=fake)
+    with pytest.raises(ItchApiError):
+        adapter.fetch_purchases("123456", "buyer@example.com")
+
+
+def test_fetch_purchases_missing_purchases_key_raises_itch_api_error() -> None:
+    def fake(url: str, headers: dict[str, str]) -> bytes:
+        return json.dumps({"unexpected": "shape"}).encode("utf-8")
+
+    adapter = ItchAdapter(api_key="key", http_get=fake)
+    with pytest.raises(ItchApiError):
+        adapter.fetch_purchases("123456", "buyer@example.com")
+
+
+def test_default_http_get_refuses_a_non_https_url_before_opening() -> None:
+    with pytest.raises(ValueError, match="non-https"):
+        _default_http_get("http://api.itch.io/games/1/purchases", {})
+
+
+# -- normalize ----------------------------------------------------------------
+
+
+def test_normalize_maps_space_separated_timestamp_and_all_fields() -> None:
+    raw = _purchase_json(
+        id=1001, created_at="2016-11-18 21:07:03", price="5.00", currency="USD", game_id=123456
+    )
+    purchase = ItchAdapter(api_key="key").normalize(raw, email="buyer@example.com")
+    assert purchase == NormalizedPurchase(
+        platform="itch",
+        platform_purchase_id="1001",
+        buyer_identifier="buyer@example.com",
+        identifier_type="email",
+        buyer_pubkey=None,
+        product_key="itch_123456",
+        purchased_at="2016-11-18T21:07:03Z",
+        amount="5.00",
+        currency="USD",
+    )
+
+
+def test_normalize_accepts_iso_form_with_z_suffix() -> None:
+    raw = _purchase_json(created_at="2016-11-18T21:07:03Z")
+    purchase = ItchAdapter(api_key="key").normalize(raw, email="buyer@example.com")
+    assert purchase.purchased_at == "2016-11-18T21:07:03Z"
+
+
+def test_normalize_iso_form_with_offset_converts_to_utc() -> None:
+    raw = _purchase_json(created_at="2016-11-18T23:07:03+02:00")
+    purchase = ItchAdapter(api_key="key").normalize(raw, email="buyer@example.com")
+    assert purchase.purchased_at == "2016-11-18T21:07:03Z"
+
+
+def test_normalize_garbage_timestamp_raises_purchase_rejected() -> None:
+    raw = _purchase_json(created_at="not-a-timestamp-at-all")
+    with pytest.raises(PurchaseRejected):
+        ItchAdapter(api_key="key").normalize(raw, email="buyer@example.com")
+
+
+def test_normalize_missing_price_and_currency_are_none() -> None:
+    raw = _purchase_json()
+    del raw["price"]
+    del raw["currency"]
+    purchase = ItchAdapter(api_key="key").normalize(raw, email="buyer@example.com")
+    assert purchase.amount is None
+    assert purchase.currency is None
+
+
+def test_normalize_buyer_pubkey_is_always_none() -> None:
+    raw = _purchase_json()
+    purchase = ItchAdapter(api_key="key").normalize(raw, email="buyer@example.com")
+    assert purchase.buyer_pubkey is None
+
+
+def test_normalize_uses_email_argument_not_raw_email_field() -> None:
+    # The poller always supplies the claim's own email -- normalize must never
+    # trust raw["email"] instead (they should agree, but the contract is
+    # pinned on the explicit kwarg).
+    raw = _purchase_json(email="someone-else@example.com")
+    purchase = ItchAdapter(api_key="key").normalize(raw, email="claimant@example.com")
+    assert purchase.buyer_identifier == "claimant@example.com"
+
+
+# -- ItchPoller.tick: the E2E oracle (OI-4) -----------------------------------
+
+
+def test_e2e_claim_tick_issues_api_confirmed_receipt_that_verifies_offline(
+    ledger: Ledger, core: IssuingCore, trust_store: verify_mod.TrustStore
+) -> None:
+    now = datetime(2026, 7, 24, 10, 0, 0, tzinfo=UTC)
+    token = ledger.enqueue_claim("buyer@example.com", "123456", now=now.strftime(_RFC3339))
+    purchases = [
+        _purchase_json(id=5001, email="buyer@example.com", game_id=123456, status="settled")
+    ]
+    fake_http_get, calls = _fake_http_get(purchases)
+    adapter = ItchAdapter(api_key="itch_key", http_get=fake_http_get)
+    poller = ItchPoller(adapter=adapter, ledger=ledger, core=core)
+
+    poller.tick(now=now)
+
+    assert len(calls) == 1
+    stored = ledger.get_receipt("itch", "5001")
+    assert stored is not None
+    result = verify_mod.verify(stored.envelope_json.encode(), trust_store)
+    assert result.ok is True
+
+    claim = ledger.get_claim(token)
+    assert claim is not None
+    assert claim.status == "confirmed"
+    assert claim.result_download_token == stored.download_token
+
+
+def test_e2e_repoll_after_reenqueue_does_not_reissue_dedups_on_purchase_id(
+    ledger: Ledger, core: IssuingCore
+) -> None:
+    now = datetime(2026, 7, 24, 10, 0, 0, tzinfo=UTC)
+    ledger.enqueue_claim("buyer@example.com", "123456", now=now.strftime(_RFC3339))
+    purchases = [
+        _purchase_json(id=5002, email="buyer@example.com", game_id=123456, status="settled")
+    ]
+    fake_http_get, _ = _fake_http_get(purchases)
+    adapter = ItchAdapter(api_key="itch_key", http_get=fake_http_get)
+    poller = ItchPoller(adapter=adapter, ledger=ledger, core=core)
+
+    poller.tick(now=now)
+    first = ledger.get_receipt("itch", "5002")
+    assert first is not None
+
+    # Buyer re-submits the claim form (or the merchant re-imports the same
+    # email/game) -- the SAME purchase must never be issued twice.
+    token2 = ledger.enqueue_claim("buyer@example.com", "123456", now=now.strftime(_RFC3339))
+    poller.tick(now=now)
+
+    second = ledger.get_receipt("itch", "5002")
+    assert second == first  # unchanged -- never re-issued
+    claim2 = ledger.get_claim(token2)
+    assert claim2 is not None
+    assert claim2.status == "confirmed"
+    assert claim2.result_download_token == first.download_token
+
+
+def test_purchase_rejected_dead_letters_but_claim_still_completes(
+    ledger: Ledger, core: IssuingCore
+) -> None:
+    # The purchase provably existed on the API (OI-4 is satisfied) even
+    # though its shape can't be normalized -- it must be dead-lettered for
+    # operator triage, and the claim must still complete (never left
+    # pending forever for something the API confirmed happened).
+    now = datetime(2026, 7, 24, 10, 0, 0, tzinfo=UTC)
+    token = ledger.enqueue_claim("buyer@example.com", "123456", now=now.strftime(_RFC3339))
+    purchases = [
+        _purchase_json(id=5003, game_id=123456, status="settled", created_at="garbage-timestamp")
+    ]
+    fake_http_get, _ = _fake_http_get(purchases)
+    adapter = ItchAdapter(api_key="itch_key", http_get=fake_http_get)
+    poller = ItchPoller(adapter=adapter, ledger=ledger, core=core)
+
+    poller.tick(now=now)
+
+    assert ledger.get_receipt("itch", "5003") is None
+    dead_letters = ledger.unresolved_dead_letters()
+    assert len(dead_letters) == 1
+    assert dead_letters[0].platform == "itch"
+    assert dead_letters[0].purchase_id == "5003"
+    claim = ledger.get_claim(token)
+    assert claim is not None
+    assert claim.status == "confirmed"
+    assert claim.result_download_token is None  # nothing to download
+
+
+# -- ItchPoller.tick: backoff/exhaustion arithmetic ---------------------------
+
+
+def test_api_error_defers_claim_with_exponential_backoff(ledger: Ledger, core: IssuingCore) -> None:
+    now = datetime(2026, 7, 24, 10, 0, 0, tzinfo=UTC)
+    token = ledger.enqueue_claim("buyer@example.com", "123456", now=now.strftime(_RFC3339))
+    adapter = ItchAdapter(api_key="key", http_get=_failing_http_get())
+    poller = ItchPoller(adapter=adapter, ledger=ledger, core=core, backoff_base_seconds=60)
+
+    poller.tick(now=now)
+
+    claim = ledger.get_claim(token)
+    assert claim is not None
+    assert claim.status == "pending"
+    assert claim.attempts == 1
+    assert claim.next_attempt_at == (now + timedelta(seconds=60)).strftime(_RFC3339)
+
+    # second consecutive failure: backoff doubles (base * 2**attempts)
+    poller.tick(now=now + timedelta(seconds=60))
+    claim2 = ledger.get_claim(token)
+    assert claim2 is not None
+    assert claim2.attempts == 2
+    assert claim2.next_attempt_at == (
+        now + timedelta(seconds=60) + timedelta(seconds=120)
+    ).strftime(_RFC3339)
+
+
+def test_claim_is_exhausted_after_reaching_max_attempts(ledger: Ledger, core: IssuingCore) -> None:
+    now = datetime(2026, 7, 24, 10, 0, 0, tzinfo=UTC)
+    token = ledger.enqueue_claim("buyer@example.com", "123456", now=now.strftime(_RFC3339))
+    adapter = ItchAdapter(api_key="key", http_get=_failing_http_get())
+    poller = ItchPoller(
+        adapter=adapter, ledger=ledger, core=core, max_attempts=2, backoff_base_seconds=1
+    )
+
+    poller.tick(now=now)
+    poller.tick(now=now + timedelta(seconds=10))
+    poller.tick(now=now + timedelta(seconds=100))
+
+    claim = ledger.get_claim(token)
+    assert claim is not None
+    assert claim.status == "exhausted"
+    assert ledger.due_claims((now + timedelta(seconds=1000)).strftime(_RFC3339)) == []
+
+
+def test_api_success_with_zero_purchases_is_treated_like_a_miss(
+    ledger: Ledger, core: IssuingCore
+) -> None:
+    now = datetime(2026, 7, 24, 10, 0, 0, tzinfo=UTC)
+    token = ledger.enqueue_claim("buyer@example.com", "123456", now=now.strftime(_RFC3339))
+    fake_http_get, _ = _fake_http_get([])
+    adapter = ItchAdapter(api_key="key", http_get=fake_http_get)
+    poller = ItchPoller(adapter=adapter, ledger=ledger, core=core, backoff_base_seconds=60)
+
+    poller.tick(now=now)
+
+    claim = ledger.get_claim(token)
+    assert claim is not None
+    assert claim.status == "pending"
+    assert claim.attempts == 1
+    assert claim.next_attempt_at == (now + timedelta(seconds=60)).strftime(_RFC3339)
+
+
+def test_refunded_purchase_is_skipped_and_claim_is_not_confirmed(
+    ledger: Ledger, core: IssuingCore
+) -> None:
+    now = datetime(2026, 7, 24, 10, 0, 0, tzinfo=UTC)
+    token = ledger.enqueue_claim("buyer@example.com", "123456", now=now.strftime(_RFC3339))
+    purchases = [_purchase_json(id=6001, game_id=123456, status="refunded")]
+    fake_http_get, _ = _fake_http_get(purchases)
+    adapter = ItchAdapter(api_key="key", http_get=fake_http_get)
+    poller = ItchPoller(adapter=adapter, ledger=ledger, core=core, backoff_base_seconds=60)
+
+    poller.tick(now=now)
+
+    assert ledger.get_receipt("itch", "6001") is None
+    claim = ledger.get_claim(token)
+    assert claim is not None
+    assert claim.status == "pending"  # not confirmed -- nothing settled yet
+    assert claim.attempts == 1
+
+
+def test_canceled_purchase_is_skipped_same_as_refunded(ledger: Ledger, core: IssuingCore) -> None:
+    now = datetime(2026, 7, 24, 10, 0, 0, tzinfo=UTC)
+    ledger.enqueue_claim("buyer@example.com", "123456", now=now.strftime(_RFC3339))
+    purchases = [_purchase_json(id=6002, game_id=123456, status="canceled")]
+    fake_http_get, _ = _fake_http_get(purchases)
+    adapter = ItchAdapter(api_key="key", http_get=fake_http_get)
+    poller = ItchPoller(adapter=adapter, ledger=ledger, core=core)
+
+    poller.tick(now=now)
+
+    assert ledger.get_receipt("itch", "6002") is None
+
+
+def test_only_pending_due_claims_are_processed_confirmed_ones_are_untouched(
+    ledger: Ledger, core: IssuingCore
+) -> None:
+    now = datetime(2026, 7, 24, 10, 0, 0, tzinfo=UTC)
+    past = (now - timedelta(hours=1)).strftime(_RFC3339)
+    already_confirmed_token = ledger.enqueue_claim("done@example.com", "123456", now=past)
+    ledger.complete_claim(
+        already_confirmed_token,
+        result_download_token="already-there",  # noqa: S106 - test fixture value
+    )
+
+    fake_http_get, calls = _fake_http_get([])
+    adapter = ItchAdapter(api_key="key", http_get=fake_http_get)
+    poller = ItchPoller(adapter=adapter, ledger=ledger, core=core)
+
+    poller.tick(now=now)
+
+    assert calls == []  # never even called the API for an already-confirmed claim
+    claim = ledger.get_claim(already_confirmed_token)
+    assert claim is not None
+    assert claim.status == "confirmed"
+    assert claim.result_download_token == "already-there"  # noqa: S105 - test fixture value
+
+
+# -- run_forever --------------------------------------------------------------
+
+
+def test_run_forever_ticks_until_stop_is_set(ledger: Ledger, core: IssuingCore) -> None:
+    import threading
+
+    fake_http_get, _calls = _fake_http_get([])
+    adapter = ItchAdapter(api_key="key", http_get=fake_http_get)
+    poller = ItchPoller(adapter=adapter, ledger=ledger, core=core)
+    stop = threading.Event()
+
+    tick_count = 0
+    original_tick = poller.tick
+
+    def counting_tick(*, now: datetime) -> None:
+        nonlocal tick_count
+        tick_count += 1
+        original_tick(now=now)
+        if tick_count >= 2:
+            stop.set()
+
+    poller.tick = counting_tick  # type: ignore[method-assign]
+    poller.run_forever(stop, interval_seconds=0)
+
+    assert tick_count == 2
+
+
+# -- HTTP claim routes ---------------------------------------------------------
+
+
+def _product_template(**overrides: Any) -> ProductTemplate:
+    base: dict[str, Any] = dict(
+        title="Nebula Drifters",
+        publisher="Example Games Store",
+        identifiers={"itch_game_id": "123456"},
+        artifact_series=f"{ISSUER}/works/nebula-drifters",
+        terms_uri=f"https://{ISSUER}/attest/license-templates/standard-v1",
+        legal_text_sha256=_LEGAL_TEXT_SHA256,
+    )
+    base.update(overrides)
+    return ProductTemplate(**base)
+
+
+@pytest.fixture
+def itch_bridge_config(tmp_path: Path) -> BridgeConfig:
+    return BridgeConfig(
+        public_base_url="https://receipts.example.com",
+        ledger_path=tmp_path / "unused-ledger-path.sqlite3",
+        issuer=IssuerConfig(
+            id=ISSUER,
+            display_name=DISPLAY_NAME,
+            kid=KID,
+            seed_path=tmp_path / "issuer.seed",
+            mldsa_key_path=tmp_path / "issuer.mldsa.json",
+            manifest_path=tmp_path / "key-manifest.json",
+        ),
+        products={"itch_123456": _product_template()},
+        stripe=None,
+        itch=ItchConfig(api_key="itch_key"),
+        delivery=None,
+    )
+
+
+@pytest.fixture
+def itch_deps(
+    itch_bridge_config: BridgeConfig,
+    catalog: ProductCatalog,
+    issuer_identity: IssuerIdentity,
+    ledger: Ledger,
+) -> BridgeDeps:
+    core = IssuingCore(
+        catalog=catalog,
+        issuer=issuer_identity,
+        ledger=ledger,
+        public_base_url="https://receipts.example.com",
+        delivery=Delivery(None),
+    )
+    adapter = ItchAdapter(api_key="itch_key")
+    return BridgeDeps(
+        config=itch_bridge_config,
+        core=core,
+        ledger=ledger,
+        stripe=None,
+        log=logging.getLogger("test-bridge-itch"),
+        itch=adapter,
+    )
+
+
+@pytest.fixture
+def bridge_deps_no_itch(
+    itch_bridge_config: BridgeConfig,
+    catalog: ProductCatalog,
+    issuer_identity: IssuerIdentity,
+    ledger: Ledger,
+) -> BridgeDeps:
+    core = IssuingCore(
+        catalog=catalog,
+        issuer=issuer_identity,
+        ledger=ledger,
+        public_base_url="https://receipts.example.com",
+        delivery=Delivery(None),
+    )
+    config = BridgeConfig(
+        public_base_url=itch_bridge_config.public_base_url,
+        ledger_path=itch_bridge_config.ledger_path,
+        issuer=itch_bridge_config.issuer,
+        products=itch_bridge_config.products,
+        stripe=None,
+        itch=None,
+        delivery=None,
+    )
+    return BridgeDeps(
+        config=config,
+        core=core,
+        ledger=ledger,
+        stripe=None,
+        log=logging.getLogger("test-bridge-itch-no-itch"),
+        itch=None,
+    )
+
+
+def test_get_itch_claim_form_lists_configured_itch_games(itch_deps: BridgeDeps) -> None:
+    app = make_app(itch_deps)
+    status, headers, body = call_app(app, "GET", "/itch/claim")
+    assert status.startswith("200")
+    assert headers["Content-Type"].startswith("text/html")
+    assert b"123456" in body
+
+
+def test_post_itch_claim_form_encoded_enqueues_and_returns_202(itch_deps: BridgeDeps) -> None:
+    app = make_app(itch_deps)
+    body = urlencode({"email": "buyer@example.com", "game_id": "123456"}).encode()
+    status, _, resp_body = call_app(
+        app,
+        "POST",
+        "/itch/claim",
+        body=body,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert status.startswith("202")
+    payload = json.loads(resp_body)
+    claim = itch_deps.ledger.get_claim(payload["claim"])
+    assert claim is not None
+    assert claim.email == "buyer@example.com"
+    assert claim.game_id == "123456"
+    assert claim.status == "pending"
+
+
+def test_post_itch_claim_json_body_enqueues_and_returns_202(itch_deps: BridgeDeps) -> None:
+    app = make_app(itch_deps)
+    body = json.dumps({"email": "buyer@example.com", "game_id": "123456"}).encode()
+    status, _, resp_body = call_app(
+        app, "POST", "/itch/claim", body=body, headers={"Content-Type": "application/json"}
+    )
+    assert status.startswith("202")
+    payload = json.loads(resp_body)
+    claim = itch_deps.ledger.get_claim(payload["claim"])
+    assert claim is not None
+    assert claim.email == "buyer@example.com"
+    assert claim.game_id == "123456"
+
+
+def test_post_itch_claim_unknown_game_returns_400(itch_deps: BridgeDeps) -> None:
+    app = make_app(itch_deps)
+    body = urlencode({"email": "buyer@example.com", "game_id": "999999"}).encode()
+    status, _, _ = call_app(
+        app,
+        "POST",
+        "/itch/claim",
+        body=body,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert status.startswith("400")
+
+
+def test_post_itch_claim_missing_fields_returns_400(itch_deps: BridgeDeps) -> None:
+    app = make_app(itch_deps)
+    status, _, _ = call_app(
+        app,
+        "POST",
+        "/itch/claim",
+        body=b"",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert status.startswith("400")
+
+
+def test_get_itch_claim_status_pending(itch_deps: BridgeDeps) -> None:
+    token = itch_deps.ledger.enqueue_claim(
+        "buyer@example.com", "123456", now="2026-07-24T10:00:00Z"
+    )
+    app = make_app(itch_deps)
+    status, _, body = call_app(app, "GET", f"/itch/claim/{token}")
+    assert status.startswith("200")
+    assert json.loads(body) == {"status": "pending"}
+
+
+def test_get_itch_claim_status_confirmed_includes_download_url(itch_deps: BridgeDeps) -> None:
+    token = itch_deps.ledger.enqueue_claim(
+        "buyer@example.com", "123456", now="2026-07-24T10:00:00Z"
+    )
+    itch_deps.ledger.complete_claim(
+        token,
+        result_download_token="dl-abc",  # noqa: S106 - test fixture value
+    )
+    app = make_app(itch_deps)
+    status, _, body = call_app(app, "GET", f"/itch/claim/{token}")
+    assert status.startswith("200")
+    payload = json.loads(body)
+    assert payload["status"] == "confirmed"
+    assert payload["download_url"] == "https://receipts.example.com/r/dl-abc"
+
+
+def test_get_itch_claim_status_confirmed_without_download_token_omits_url(
+    itch_deps: BridgeDeps,
+) -> None:
+    token = itch_deps.ledger.enqueue_claim(
+        "buyer@example.com", "123456", now="2026-07-24T10:00:00Z"
+    )
+    itch_deps.ledger.complete_claim(token)  # dead-lettered case: no receipt
+    app = make_app(itch_deps)
+    status, _, body = call_app(app, "GET", f"/itch/claim/{token}")
+    assert status.startswith("200")
+    payload = json.loads(body)
+    assert payload["status"] == "confirmed"
+    assert "download_url" not in payload
+
+
+def test_get_itch_claim_status_unknown_token_returns_uniform_404(itch_deps: BridgeDeps) -> None:
+    app = make_app(itch_deps)
+    status, _, body = call_app(app, "GET", "/itch/claim/does-not-exist-token")
+    assert status.startswith("404")
+    assert b"does-not-exist-token" not in body
+
+
+def test_itch_claim_form_and_post_404_when_itch_not_configured(
+    bridge_deps_no_itch: BridgeDeps,
+) -> None:
+    app = make_app(bridge_deps_no_itch)
+    status, _, _ = call_app(app, "GET", "/itch/claim")
+    assert status.startswith("404")
+    status2, _, _ = call_app(
+        app,
+        "POST",
+        "/itch/claim",
+        body=urlencode({"email": "a@b.com", "game_id": "123456"}).encode(),
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert status2.startswith("404")
+
+
+def test_get_itch_claim_status_works_even_when_itch_not_configured(
+    bridge_deps_no_itch: BridgeDeps,
+) -> None:
+    # The status lookup only needs the Ledger -- it must keep working even if
+    # the poller/adapter isn't wired up in this process.
+    token = bridge_deps_no_itch.ledger.enqueue_claim(
+        "buyer@example.com", "123456", now="2026-07-24T10:00:00Z"
+    )
+    app = make_app(bridge_deps_no_itch)
+    status, _, body = call_app(app, "GET", f"/itch/claim/{token}")
+    assert status.startswith("200")
+    assert json.loads(body) == {"status": "pending"}
+
+
+# -- itch-import CLI ------------------------------------------------------------
+
+
+def _write_minimal_config(
+    tmp_path: Path, hybrid_keys: pq.HybridSigningKeys, key_manifest: Any
+) -> Path:
+    seed_path = tmp_path / "issuer.seed"
+    seed_path.write_text(keys.b64u(hybrid_keys.ed.seed) + "\n", encoding="utf-8")
+
+    mldsa_path = tmp_path / "issuer.mldsa.json"
+    mldsa_path.write_text(
+        json.dumps(
+            {
+                "alg": pq.ML_DSA_65_ALG,
+                "sk": keys.b64u(hybrid_keys.mldsa.sk),
+                "pub": keys.b64u(hybrid_keys.mldsa.pub),
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest_path = tmp_path / "key-manifest.json"
+    manifest_path.write_text(json.dumps(key_manifest), encoding="utf-8")
+    ledger_path = tmp_path / "ledger.sqlite3"
+
+    config_text = f"""
+public_base_url = "https://receipts.example.com"
+ledger_path = "{ledger_path}"
+
+[issuer]
+id = "{ISSUER}"
+display_name = "{DISPLAY_NAME}"
+kid = "{KID}"
+seed_path = "{seed_path}"
+mldsa_key_path = "{mldsa_path}"
+manifest_path = "{manifest_path}"
+"""
+    config_path = tmp_path / "bridge.toml"
+    config_path.write_text(config_text, encoding="utf-8")
+    return config_path
+
+
+def test_itch_import_happy_path_enqueues_one_claim_per_unique_email(
+    tmp_path: Path,
+    hybrid_keys: pq.HybridSigningKeys,
+    key_manifest: dict[str, Any],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    ledger_path = tmp_path / "ledger.sqlite3"
+    ledger = Ledger(ledger_path)  # held open across the CLI run, per T8 convention
+    config_path = _write_minimal_config(tmp_path, hybrid_keys, key_manifest)
+    csv_path = tmp_path / "purchases.csv"
+    csv_path.write_text(
+        "Email,Name\nbuyer1@example.com,A\nbuyer2@example.com,B\nbuyer1@example.com,A2\n",
+        encoding="utf-8",
+    )
+
+    rc = cli.main(
+        ["itch-import", "--config", str(config_path), "--game-id", "123456", str(csv_path)]
+    )
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "2" in out
+
+    due = ledger.due_claims("2099-01-01T00:00:00Z")
+    emails = sorted(c.email for c in due)
+    assert emails == ["buyer1@example.com", "buyer2@example.com"]
+    assert all(c.game_id == "123456" for c in due)
+    assert all(c.status == "pending" for c in due)
+
+
+def test_itch_import_is_case_insensitive_on_email_column_name(
+    tmp_path: Path,
+    hybrid_keys: pq.HybridSigningKeys,
+    key_manifest: dict[str, Any],
+) -> None:
+    ledger_path = tmp_path / "ledger.sqlite3"
+    ledger = Ledger(ledger_path)
+    config_path = _write_minimal_config(tmp_path, hybrid_keys, key_manifest)
+    csv_path = tmp_path / "purchases.csv"
+    csv_path.write_text("EMAIL,Name\nbuyer@example.com,A\n", encoding="utf-8")
+
+    rc = cli.main(
+        ["itch-import", "--config", str(config_path), "--game-id", "123456", str(csv_path)]
+    )
+
+    assert rc == 0
+    due = ledger.due_claims("2099-01-01T00:00:00Z")
+    assert [c.email for c in due] == ["buyer@example.com"]
+
+
+def test_itch_import_missing_email_column_returns_rc_2(
+    tmp_path: Path,
+    hybrid_keys: pq.HybridSigningKeys,
+    key_manifest: dict[str, Any],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path = _write_minimal_config(tmp_path, hybrid_keys, key_manifest)
+    csv_path = tmp_path / "purchases.csv"
+    csv_path.write_text("Name,Foo\nA,1\n", encoding="utf-8")
+
+    rc = cli.main(
+        ["itch-import", "--config", str(config_path), "--game-id", "123456", str(csv_path)]
+    )
+
+    assert rc == 2
+    assert "email" in capsys.readouterr().err.lower()
+
+
+def test_itch_import_csv_alone_never_issues_a_receipt(
+    tmp_path: Path,
+    hybrid_keys: pq.HybridSigningKeys,
+    key_manifest: dict[str, Any],
+) -> None:
+    # OI-4: intake is never issuance -- the CSV import must not touch
+    # IssuingCore/receipts at all, only enqueue claims.
+    ledger_path = tmp_path / "ledger.sqlite3"
+    ledger = Ledger(ledger_path)
+    config_path = _write_minimal_config(tmp_path, hybrid_keys, key_manifest)
+    csv_path = tmp_path / "purchases.csv"
+    csv_path.write_text("email\nbuyer@example.com\n", encoding="utf-8")
+
+    rc = cli.main(
+        ["itch-import", "--config", str(config_path), "--game-id", "123456", str(csv_path)]
+    )
+
+    assert rc == 0
+    assert ledger.get_receipt("itch", "anything") is None
+    due = ledger.due_claims("2099-01-01T00:00:00Z")
+    assert len(due) == 1
+    assert due[0].status == "pending"
+
+
+def test_itch_import_rc_2_on_config_error(tmp_path: Path) -> None:
+    missing_config = tmp_path / "does-not-exist.toml"
+    csv_path = tmp_path / "purchases.csv"
+    csv_path.write_text("email\na@b.com\n", encoding="utf-8")
+    rc = cli.main(
+        ["itch-import", "--config", str(missing_config), "--game-id", "123456", str(csv_path)]
+    )
+    assert rc == 2

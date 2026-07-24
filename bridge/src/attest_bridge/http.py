@@ -1,10 +1,17 @@
-"""Stdlib WSGI app: Stripe webhook endpoint + receipt-download routes.
+"""Stdlib WSGI app: Stripe webhook endpoint + receipt-download routes + the
+itch claim-queue endpoints (task-9-brief.md).
 
 Contract (task-8-brief.md): this module is the integration point between the
 platform adapters (T7's `StripeAdapter`) and `IssuingCore` (T5) — it owns the
 webhook error-handling policy (the design's "what happens on every kind of
 failure" section, made executable) and never invents behavior the policy
 table doesn't pin.
+
+The `/itch/claim*` routes (T9, OI-4) are a different shape entirely: itch has
+no webhook, so these routes only ever enqueue/read Ledger claim rows — never
+call `IssuingCore.process`. See `itch_adapter.py`'s module docstring for the
+full claim-queue design and why the API response (fetched later, by
+`ItchPoller.tick`) is the sole issuance authority.
 
 Webhook handler policy (PINNED — `mark_event` only on the rows marked with a
 side effect other than "already"/none):
@@ -34,6 +41,7 @@ and may be logged freely.
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import threading
@@ -45,12 +53,14 @@ from urllib.parse import parse_qs
 
 from attest_bridge.config import BridgeConfig
 from attest_bridge.core import IssuingCore
+from attest_bridge.itch_adapter import ItchAdapter
 from attest_bridge.ledger import Ledger, StoredReceipt
 from attest_bridge.model import NormalizedPurchase, PurchaseRejected, UnmappedProduct
 from attest_bridge.stripe_adapter import StripeAdapter, StripeSignatureError
 
 _RFC3339 = "%Y-%m-%dT%H:%M:%SZ"
 _NOT_FOUND_BODY = b'{"error":"not found"}'
+_ITCH_PRODUCT_PREFIX = "itch_"
 
 WSGIApp = Callable[[dict[str, Any], Any], Iterable[bytes]]
 
@@ -66,6 +76,9 @@ class BridgeDeps:
     ledger: Ledger
     stripe: StripeAdapter | None
     log: logging.Logger
+    # Default None so existing (pre-T9) `BridgeDeps(...)` construction sites
+    # keep working unchanged — purely additive, mirrors `stripe`'s optionality.
+    itch: ItchAdapter | None = None
 
 
 # -- WSGI response helpers ---------------------------------------------------
@@ -243,6 +256,102 @@ def _handle_stripe_receipt(
     return _receipt_response(start_response, stored)
 
 
+# -- itch claim queue (task-9-brief.md; OI-4) --------------------------------
+#
+# There is no itch webhook (see `itch_adapter.py`'s module docstring) — these
+# routes only ever touch the Ledger's claim queue. Enqueuing a claim NEVER
+# calls `IssuingCore.process`; only `ItchPoller.tick` (running on its own
+# daemon thread, wired up in `cli.py`'s `serve`) does that, gated on a live
+# `GET /games/{game_id}/purchases` response. Nothing here is issuance-capable.
+
+
+def _parse_claim_fields(environ: dict[str, Any]) -> dict[str, str]:
+    """Accept both form-encoded and JSON claim submissions (task-9-brief.md).
+
+    A body this function can't make sense of (wrong content type, malformed
+    JSON, non-UTF-8 bytes) degrades to an empty mapping — the caller's own
+    required-field check turns that into a uniform 400, never a 500.
+    """
+    body = _read_body(environ)
+    content_type = (environ.get("CONTENT_TYPE") or "").split(";")[0].strip().lower()
+    if content_type == "application/json":
+        try:
+            data = json.loads(body)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return {
+            key: str(value) for key, value in data.items() if isinstance(value, str | int | float)
+        }
+    try:
+        text = body.decode("utf-8")
+    except UnicodeDecodeError:
+        return {}
+    return _parse_query(text)
+
+
+def _itch_game_ids(deps: BridgeDeps) -> list[str]:
+    """Configured itch game ids, derived from catalog keys `itch_<game_id>`."""
+    return sorted(
+        key[len(_ITCH_PRODUCT_PREFIX) :]
+        for key in deps.config.products
+        if key.startswith(_ITCH_PRODUCT_PREFIX)
+    )
+
+
+def _handle_itch_claim_form(deps: BridgeDeps, start_response: Any) -> Iterable[bytes]:
+    if deps.itch is None:
+        # No [itch] section configured: this route simply doesn't exist —
+        # mirrors `/stripe/webhook`'s 404 when `deps.stripe is None`.
+        return _not_found(start_response)
+    options = "".join(
+        f'<option value="{html.escape(gid)}">{html.escape(gid)}</option>'
+        for gid in _itch_game_ids(deps)
+    )
+    body = (
+        "<!doctype html><html><body>"
+        '<form method="post" action="/itch/claim">'
+        '<label>Email <input type="email" name="email" required></label>'
+        f'<label>Game <select name="game_id">{options}</select></label>'
+        '<button type="submit">Claim my receipt</button>'
+        "</form></body></html>"
+    ).encode()
+    headers = [("Content-Type", "text/html; charset=utf-8"), ("Content-Length", str(len(body)))]
+    start_response("200 OK", headers)
+    return [body]
+
+
+def _handle_itch_claim_post(
+    deps: BridgeDeps, environ: dict[str, Any], start_response: Any
+) -> Iterable[bytes]:
+    if deps.itch is None:
+        return _not_found(start_response)
+    fields = _parse_claim_fields(environ)
+    email = fields.get("email", "").strip()
+    game_id = fields.get("game_id", "").strip()
+    if not email or not game_id or f"{_ITCH_PRODUCT_PREFIX}{game_id}" not in deps.config.products:
+        return _json_response(
+            start_response, "400 Bad Request", {"error": "invalid email or game_id"}
+        )
+    token = deps.ledger.enqueue_claim(email, game_id, now=_now_rfc3339())
+    return _json_response(start_response, "202 Accepted", {"claim": token})
+
+
+def _handle_itch_claim_status(
+    deps: BridgeDeps, start_response: Any, *, token: str
+) -> Iterable[bytes]:
+    # Works regardless of whether `[itch]`/the poller is configured in THIS
+    # process — a claim's status only ever depends on the Ledger.
+    claim = deps.ledger.get_claim(token)
+    if claim is None:
+        return _not_found(start_response)
+    payload: dict[str, Any] = {"status": claim.status}
+    if claim.status == "confirmed" and claim.result_download_token:
+        payload["download_url"] = f"{deps.config.public_base_url}/r/{claim.result_download_token}"
+    return _json_response(start_response, "200 OK", payload)
+
+
 # -- app ------------------------------------------------------------------
 
 
@@ -266,6 +375,13 @@ def make_app(deps: BridgeDeps) -> WSGIApp:
         if method == "GET" and path == "/stripe/receipt":
             params = _parse_query(environ.get("QUERY_STRING", ""))
             return _handle_stripe_receipt(deps, start_response, session_id=params.get("session_id"))
+        if method == "GET" and path == "/itch/claim":
+            return _handle_itch_claim_form(deps, start_response)
+        if method == "POST" and path == "/itch/claim":
+            return _handle_itch_claim_post(deps, environ, start_response)
+        if method == "GET" and path.startswith("/itch/claim/"):
+            token = path[len("/itch/claim/") :]
+            return _handle_itch_claim_status(deps, start_response, token=token)
         return _not_found(start_response)
 
     return cast(WSGIApp, app)

@@ -224,6 +224,30 @@ def test_complete_claim_drops_it_from_due_claims(ledger: Ledger) -> None:
     assert claim.status == "confirmed"
 
 
+def test_complete_claim_without_download_token_leaves_it_none(ledger: Ledger) -> None:
+    token = ledger.enqueue_claim("buyer@example.com", "game_1", now=PAST)
+
+    ledger.complete_claim(token)
+
+    claim = ledger.get_claim(token)
+    assert claim is not None
+    assert claim.result_download_token is None
+
+
+def test_complete_claim_records_result_download_token(ledger: Ledger) -> None:
+    token = ledger.enqueue_claim("buyer@example.com", "game_1", now=PAST)
+
+    ledger.complete_claim(
+        token,
+        result_download_token="dl-token-abc",  # noqa: S106 - test fixture value
+    )
+
+    claim = ledger.get_claim(token)
+    assert claim is not None
+    assert claim.status == "confirmed"
+    assert claim.result_download_token == "dl-token-abc"  # noqa: S105 - test fixture value
+
+
 def test_exhaust_claim_drops_it_from_due_claims(ledger: Ledger) -> None:
     token = ledger.enqueue_claim("buyer@example.com", "game_1", now=PAST)
 
