@@ -15,7 +15,13 @@ from typing import Any
 
 import pytest
 from attest_bridge.config import DeliveryConfig
-from attest_bridge.delivery import Delivery, DeliveryResult
+from attest_bridge.delivery import (
+    MAX_DELIVERY_ATTEMPTS,
+    Delivery,
+    DeliveryResult,
+    sweep_undelivered,
+)
+from attest_bridge.ledger import Ledger
 
 _ENVELOPE: dict[str, Any] = {
     "payload": {"receipt_id": "r_test_0001", "work": {"title": "Stardrift Chronicles"}},
@@ -197,6 +203,69 @@ def test_send_never_puts_the_smtp_password_in_the_outgoing_message() -> None:
     _send(config, _fake_factory(fakes))
     raw = bytes(fakes[0].sent_messages[0]).decode("utf-8", errors="replace")
     assert config.smtp_password not in raw
+
+
+def _record_undelivered(ledger: Ledger, purchase_id: str) -> None:
+    ledger.record_receipt(
+        "stripe",
+        purchase_id,
+        f"r_{purchase_id}",
+        _ENVELOPE,
+        "buyer@example.com",
+        f"token_{purchase_id}",
+        "2026-07-24T10:00:00Z",
+    )
+
+
+def test_sweep_resends_an_undelivered_receipt_and_marks_it_delivered(tmp_path: Any) -> None:
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    _record_undelivered(ledger, "cs_retry")
+    fakes: list[_FakeSMTP] = []
+
+    delivered, failures = sweep_undelivered(
+        ledger=ledger,
+        delivery=Delivery(_config(), smtp_factory=_fake_factory(fakes)),
+        public_base_url="https://receipts.example.com",
+    )
+
+    assert (delivered, failures) == (1, 0)
+    assert len(fakes[0].sent_messages) == 1
+    assert ledger.get_receipt("stripe", "cs_retry").delivered_at is not None  # type: ignore[union-attr]
+
+
+def test_sweep_skips_receipts_at_the_delivery_attempt_cap(tmp_path: Any) -> None:
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    _record_undelivered(ledger, "cs_capped")
+    for _ in range(MAX_DELIVERY_ATTEMPTS):
+        ledger.record_delivery_failure("stripe", "cs_capped", "failed")
+    fakes: list[_FakeSMTP] = []
+
+    assert sweep_undelivered(
+        ledger=ledger,
+        delivery=Delivery(_config(), smtp_factory=_fake_factory(fakes)),
+        public_base_url="https://receipts.example.com",
+    ) == (0, 0)
+    assert fakes == []
+
+
+def test_a_raising_sweep_send_does_not_abort_later_rows(tmp_path: Any) -> None:
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    _record_undelivered(ledger, "cs_bad")
+    _record_undelivered(ledger, "cs_good")
+
+    class RaisingDelivery:
+        def send(self, **kwargs: Any) -> DeliveryResult:
+            if kwargs["receipt_id"] == "r_cs_bad":
+                raise RuntimeError("broken transport")
+            return DeliveryResult("sent", None)
+
+    delivered, failures = sweep_undelivered(
+        ledger=ledger,
+        delivery=RaisingDelivery(),  # type: ignore[arg-type]
+        public_base_url="https://receipts.example.com",
+    )
+    assert (delivered, failures) == (1, 1)
+    assert ledger.get_receipt("stripe", "cs_good").delivered_at is not None  # type: ignore[union-attr]
 
 
 # -- transport policy: TLS-only, mandatory STARTTLS on non-465 ------------

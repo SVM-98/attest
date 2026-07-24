@@ -30,7 +30,7 @@ from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
 from attest_bridge.catalog import ProductCatalog
 from attest_bridge.config import load_config
 from attest_bridge.core import IssuingCore
-from attest_bridge.delivery import Delivery
+from attest_bridge.delivery import DELIVERY_SWEEP_SECONDS, Delivery, sweep_undelivered
 from attest_bridge.http import BridgeDeps, make_app
 from attest_bridge.itch_adapter import ItchAdapter, ItchPoller
 from attest_bridge.ledger import Ledger
@@ -137,7 +137,33 @@ def _build_deps(config_path: Path, *, log: logging.Logger) -> BridgeDeps:
         else None
     )
     itch = ItchAdapter(api_key=config.itch.api_key) if config.itch is not None else None
-    return BridgeDeps(config=config, core=core, ledger=ledger, stripe=stripe, log=log, itch=itch)
+    return BridgeDeps(
+        config=config,
+        core=core,
+        ledger=ledger,
+        stripe=stripe,
+        log=log,
+        itch=itch,
+        delivery=delivery,
+    )
+
+
+def _sweep_deliveries(deps: BridgeDeps) -> tuple[int, int]:
+    """Run the shared, crash-tolerant at-least-once delivery retry sweep."""
+    delivery = deps.delivery if deps.delivery is not None else Delivery(deps.config.delivery)
+    return sweep_undelivered(
+        ledger=deps.ledger, delivery=delivery, public_base_url=deps.config.public_base_url
+    )
+
+
+def _run_delivery_sweeper(stop: threading.Event, deps: BridgeDeps, log: logging.Logger) -> None:
+    """Keep retry delivery alive even if an iteration unexpectedly raises."""
+    while not stop.is_set():
+        try:
+            _sweep_deliveries(deps)
+        except Exception:
+            log.exception("delivery sweep failed; continuing")
+        stop.wait(DELIVERY_SWEEP_SECONDS)
 
 
 def _cmd_serve(args: argparse.Namespace) -> int:
@@ -158,6 +184,14 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     # thread's ItchPoller, ticking against the live API on its own schedule.
     stop_event = threading.Event()
     poller_thread: threading.Thread | None = None
+    sweeper_thread = threading.Thread(
+        target=_run_delivery_sweeper,
+        args=(stop_event, deps, log),
+        daemon=True,
+        name="delivery-sweeper",
+    )
+    sweeper_thread.start()
+    log.info("delivery sweeper started (interval=%ds)", DELIVERY_SWEEP_SECONDS)
     if deps.itch is not None and deps.config.itch is not None:
         poller = ItchPoller(
             adapter=deps.itch,
@@ -192,6 +226,7 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         stop_event.set()
         if poller_thread is not None:
             poller_thread.join(timeout=5)
+        sweeper_thread.join(timeout=5)
     return _RC_OK
 
 
@@ -239,7 +274,11 @@ def _cmd_retry_failed(args: argparse.Namespace) -> int:
         deps.ledger.resolve_dead_letter(dead_letter.id, now=_now_rfc3339())
         resolved += 1
 
-    print(f"resolved: {resolved}, still failing: {still_failing}")
+    delivered, delivery_failures = _sweep_deliveries(deps)
+    print(
+        f"resolved: {resolved}, still failing: {still_failing}, "
+        f"deliveries retried: {delivered}, delivery failures: {delivery_failures}"
+    )
     return _RC_OK
 
 
