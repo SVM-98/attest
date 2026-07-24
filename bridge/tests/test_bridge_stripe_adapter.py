@@ -11,10 +11,16 @@ import json
 from typing import Any
 
 import pytest
-from attest_bridge.model import NormalizedPurchase, PurchaseRejected, rfc3339_from_unix
+from attest_bridge.model import (
+    ConfigError,
+    NormalizedPurchase,
+    PurchaseRejected,
+    rfc3339_from_unix,
+)
 from attest_bridge.stripe_adapter import (
     StripeAdapter,
     StripeSignatureError,
+    _default_http_get,
     verify_stripe_signature,
 )
 
@@ -161,6 +167,61 @@ def test_replayed_valid_signature_parses_successfully_every_time() -> None:
 def test_malformed_signature_header_is_rejected(header: str) -> None:
     with pytest.raises(StripeSignatureError):
         _adapter().parse_event(_BODY, header, now=_T)
+
+
+@pytest.mark.parametrize("secret", ["", "   "], ids=["empty", "whitespace_only"])
+def test_empty_webhook_secret_rejected_at_construction(secret: str) -> None:
+    # config.py permits an empty env-var value; this trust boundary must not
+    # rely on it — an empty HMAC key makes every inbound signature forgeable.
+    with pytest.raises(ConfigError):
+        StripeAdapter(webhook_secret=secret, api_key=None)
+
+
+def test_verify_stripe_signature_refuses_an_empty_secret() -> None:
+    # Even bypassing the constructor, the primitive must never authenticate
+    # against an empty key: an attacker can compute the empty-key MAC of any
+    # body, so accepting it would forge an issuance-adjacent event.
+    forged_header = sign_stripe(_BODY, "", _T)
+    with pytest.raises(StripeSignatureError):
+        verify_stripe_signature(_BODY, forged_header, "", now=_T)
+
+
+def test_duplicate_timestamp_key_is_rejected() -> None:
+    # A malformed duplicate `t` appended to an otherwise-valid header must fail
+    # closed — it must not be silently skipped while the earlier valid `t`
+    # survives, which would let a crafted header pass verification.
+    header = sign_stripe(_BODY, _SECRET, _T) + ",t=abc"
+    with pytest.raises(StripeSignatureError):
+        _adapter().parse_event(_BODY, header, now=_T)
+
+
+@pytest.mark.parametrize(
+    "ts_field",
+    [
+        f" {_T} ",
+        f"+{_T}",
+        "1_784_000_000",
+        "١٧٨٤٠٠٠٠٠٠",
+    ],
+    ids=["whitespace", "leading_sign", "digit_underscores", "unicode_digits"],
+)
+def test_non_canonical_timestamp_is_rejected(ts_field: str) -> None:
+    # `int()` would accept all of these and reconstruct the canonical integer
+    # 1_784_000_000, sliding past the staleness gate. The MAC below is computed
+    # over the canonical `f"{_T}."`, so if the parser normalized `ts_field` to
+    # _T the signature would match — the header must be rejected on the
+    # timestamp form itself, before any MAC is computed.
+    mac = hmac.new(_SECRET.encode(), f"{_T}.".encode() + _BODY, hashlib.sha256).hexdigest()
+    header = f"t={ts_field},v1={mac}"
+    with pytest.raises(StripeSignatureError):
+        _adapter().parse_event(_BODY, header, now=_T)
+
+
+def test_default_http_get_refuses_a_non_https_url_before_opening() -> None:
+    # The injectable `http_get` is replaced in every other test; this pins the
+    # real default's https guard directly (no network — it raises before open).
+    with pytest.raises(ValueError, match="non-https"):
+        _default_http_get("http://api.stripe.com/v1/checkout/sessions/cs/line_items", {})
 
 
 # -- normalize ---------------------------------------------------------------
