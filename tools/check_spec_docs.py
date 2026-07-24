@@ -24,6 +24,10 @@ _SPEC_V02_PATH = _REPO_ROOT / "docs/spec/attest-v0.2.md"
 _SCHEMA_PATH = _REPO_ROOT / "docs/spec/schema/attest-receipt.schema.json"
 _VERSIONING_PATH = _REPO_ROOT / "docs/spec/attest-versioning.md"
 _VECTORS_PATH = _REPO_ROOT / "docs/spec/vectors"
+_STANDARDS_RELATIONSHIP_PATH = _REPO_ROOT / "docs/spec/attest-standards-relationship.md"
+_INTERNET_DRAFT_DIR = _REPO_ROOT / "ietf"
+_INTERNET_DRAFT_BASENAME = "draft-martinalli-open-purchase-receipts"
+_CONFORMANCE_DOC_PATH = _REPO_ROOT / "docs/conformance.md"
 
 # The six normative sections attest-versioning.md's amendment procedure
 # requires (§5) every reader be able to find by exact heading.
@@ -92,6 +96,9 @@ _CANONICAL_TM_REF_RE = re.compile(r"TM-\d+")
 _ANY_SPEC_VERSION_RE = re.compile(r"\bv\d+\.\d+(?=\s*§)")
 # CommonMark opens a fence with ``` or ~~~, indented up to three spaces.
 _FENCED_BLOCK_RE = re.compile(r"^ {0,3}(```|~~~).*?^ {0,3}\1", re.MULTILINE | re.DOTALL)
+# XML comments (used only by check_internet_draft_snapshot(), which scans
+# the .xml source rather than Markdown).
+_XML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 _PC_ROW_RE = re.compile(r"^\| PC-(\d+) \| ([^|]*) \| ([^|]*) \| ([^|]*) \|\s*$", re.MULTILINE)
 _PC01_PIN_RE = re.compile(r"key set exactly `?\{([^}]*)\}")
 _PC01_REQUIRED_PIN_RE = re.compile(r"`properties\.buyer\.required` equals `?(\[[^`]*\])`?")
@@ -173,6 +180,18 @@ def parse_pc_rows(privacy: str) -> list[PcRow]:
 def _strip_fenced_blocks(text: str) -> str:
     """Blank out fenced code blocks, preserving line count so nothing shifts."""
     return _FENCED_BLOCK_RE.sub(lambda m: "\n" * m.group(0).count("\n"), text)
+
+
+def _strip_xml_comments(text: str) -> str:
+    """Blank out XML comments, preserving line count so nothing shifts.
+
+    An XML comment is never rendered, operative content; a snapshot-revision
+    declaration or required literal appearing only inside one must not
+    satisfy the Internet-Draft checker (2026-07-23 fix, finding 5b) -- the
+    same non-operative-content rationale `_strip_fenced_blocks` already
+    applies to fenced Markdown blocks.
+    """
+    return _XML_COMMENT_RE.sub(lambda m: "\n" * m.group(0).count("\n"), text)
 
 
 def check_ids(tm_ids: list[int]) -> list[str]:
@@ -696,6 +715,213 @@ def check_revision_logs(spec_v01: str, spec_v02: str) -> list[str]:
     )
 
 
+# The seven H2 headings docs/spec/attest-standards-relationship.md pins verbatim.
+# The Internet-Draft appendix (a later phase task) distills this same list, so a
+# heading rename here would silently orphan that appendix's pointer.
+_STANDARDS_RELATIONSHIP_REQUIRED_HEADINGS: tuple[str, ...] = (
+    "## 1. W3C Verifiable Credentials",
+    "## 2. eIDAS 2.0 and the EUDI Wallet",
+    "## 3. JOSE/JWS and COSE",
+    "## 4. RFC 8785 (JCS)",
+    "## 5. C2PA",
+    "## 6. SCITT and RFC 9943",
+    "## 7. RATS (RFC 9334): a terminology note",
+)
+
+# RFC 9943 (SCITT) and RFC 9334 (RATS) are the two vocabulary-collision entries
+# the annex exists to defuse; RFC 8785 is the JCS base entry 4 builds on. All
+# three must be citable by number, not just implied in prose.
+_STANDARDS_RELATIONSHIP_REQUIRED_LITERALS: tuple[str, ...] = ("RFC 9943", "RFC 9334", "RFC 8785")
+
+
+def check_standards_relationship() -> list[str]:
+    """Fail-closed existence/shape guard for the standards-relationship annex.
+
+    Checks the file exists, carries its seven pinned H2 headings verbatim (the
+    Internet-Draft appendix and this checker both depend on them), and cites
+    the three RFCs the SCITT/RATS defusal and the JCS entry require by number.
+    Fenced code blocks are stripped before either scan (a heading or literal
+    appearing only inside an illustrative fence is never operative content
+    and must not satisfy this guard, 2026-07-23 fix, finding 5a). Not wired
+    into `collect_errors()`: unlike the threat-model/privacy/spec quintet it
+    does not cross-reference another document's parsed structure, so it is
+    called directly from `main()`.
+    """
+    if not _STANDARDS_RELATIONSHIP_PATH.exists():
+        return ["attest-standards-relationship.md: file is missing"]
+    # Illustrative fenced examples read exactly like the real thing (see
+    # collect_errors()'s identical rationale for the threat-model/privacy
+    # docs); a required heading or literal appearing only inside one must
+    # not satisfy this fail-closed guard (2026-07-23 fix, finding 5a).
+    text = _strip_fenced_blocks(_STANDARDS_RELATIONSHIP_PATH.read_text(encoding="utf-8"))
+    errors: list[str] = []
+    for heading in _STANDARDS_RELATIONSHIP_REQUIRED_HEADINGS:
+        if re.search(rf"^{re.escape(heading)}$", text, re.MULTILINE) is None:
+            errors.append(f"attest-standards-relationship.md: missing required heading {heading!r}")
+    for literal in _STANDARDS_RELATIONSHIP_REQUIRED_LITERALS:
+        if literal not in text:
+            errors.append(f"attest-standards-relationship.md: missing required literal {literal!r}")
+    return errors
+
+
+# The Internet-Draft (P1.6 T2) is a snapshot-profile mirror of the living
+# specs, never their replacement: its Introduction MUST declare, in one
+# physical line per spec, which attest-v0.1.md/attest-v0.2.md revision it
+# mirrors. Each regex is deliberately anchored to a single line (`[^\n]*`,
+# no DOTALL) so the two declarations can never bleed into each other when
+# both appear in the same paragraph -- a greedy `.*` spanning newlines could
+# otherwise let the v0.1 regex capture the v0.2 sentence's revision number.
+# Each is matched with `findall`, not `search`, and the checker requires
+# EXACTLY ONE match in the whole source: a source carrying a valid
+# declaration AND a second, conflicting one used to pass silently, because
+# `search` only ever validated the first match (2026-07-23 fix, finding 8).
+_DRAFT_V01_SNAPSHOT_RE = re.compile(r"attest-v0\.1\.md[^\n]*revision (\d+)")
+_DRAFT_V02_SNAPSHOT_RE = re.compile(r"attest-v0\.2\.md[^\n]*revision (\d+)")
+
+# RFC 9943 (SCITT) and RFC 9334 (RATS) are the terminology-defusal citations
+# (v0.1 §2/§3-equivalent Conventions and Terminology section); RFC 8785 is
+# the JCS base the Canonicalization section cites. Mirrors the annex's own
+# _STANDARDS_RELATIONSHIP_REQUIRED_LITERALS choice of exactly these three.
+_DRAFT_REQUIRED_LITERALS: tuple[str, ...] = ("9943", "9334", "8785")
+
+# Any `(rev N)` token, used to scan a spec's own "## Revision log" section
+# for declared-revision EXISTENCE (never latest-equality -- a later spec
+# bump must never redden this check, only make drift detectable to a reader
+# who compares the draft's declared revision against the living log).
+_REV_LOG_ENTRY_REV_RE = re.compile(r"\(rev (\d+)\)")
+
+
+def _internet_draft_source_path() -> Path | None:
+    """The single `ietf/draft-martinalli-open-purchase-receipts.{md,xml}`
+    source, or None if zero or more than one candidate exists."""
+    candidates = [
+        path
+        for path in (
+            _INTERNET_DRAFT_DIR / f"{_INTERNET_DRAFT_BASENAME}.md",
+            _INTERNET_DRAFT_DIR / f"{_INTERNET_DRAFT_BASENAME}.xml",
+        )
+        if path.exists()
+    ]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _revisions_in_log(spec_text: str) -> set[int]:
+    """Every `(rev N)` integer inside a spec's own `## Revision log` section
+    (never body prose elsewhere, which may mention a revision in passing)."""
+    heading_match = _REVISION_LOG_HEADING_RE.search(spec_text)
+    if heading_match is None:
+        return set()
+    rest = spec_text[heading_match.end() :]
+    next_heading = re.search(r"^## ", rest, re.MULTILINE)
+    section = rest[: next_heading.start()] if next_heading is not None else rest
+    return {int(match.group(1)) for match in _REV_LOG_ENTRY_REV_RE.finditer(section)}
+
+
+def check_internet_draft_snapshot() -> list[str]:
+    """Fail-closed existence/shape guard for the Internet-Draft source.
+
+    Checks that exactly one of `ietf/draft-martinalli-open-purchase-receipts.md`
+    /`.xml` exists, that its text (XML comments stripped first -- a
+    declaration or required literal inside a `<!-- ... -->` comment is
+    never operative content and must not satisfy this guard, 2026-07-23
+    fix, finding 5b) declares (via two pinned per-line regexes) which
+    attest-v0.1.md/attest-v0.2.md revision it mirrors -- EXACTLY ONCE
+    each: a second, conflicting declaration for the same spec is ambiguous
+    and is reported as an error rather than silently validated against
+    whichever match happens to come first (2026-07-23 fix, finding 8) --
+    that each declared revision integer EXISTS in the corresponding spec's
+    own revision log (existence, not latest-equality -- a later spec
+    revision bump alone must never turn this red; drift is instead
+    detectable by a reader comparing the declared revision against the
+    living log), and that the source cites the three RFCs the terminology
+    defusals (RFC 9943, RFC 9334) and the canonicalization section
+    (RFC 8785) require by number. Not wired into `collect_errors()`, same
+    reasoning as check_standards_relationship(): it does not
+    cross-reference another document's parsed structure, so it is called
+    directly from `main()`.
+    """
+    source_path = _internet_draft_source_path()
+    if source_path is None:
+        candidate_count = sum(
+            1
+            for path in (
+                _INTERNET_DRAFT_DIR / f"{_INTERNET_DRAFT_BASENAME}.md",
+                _INTERNET_DRAFT_DIR / f"{_INTERNET_DRAFT_BASENAME}.xml",
+            )
+            if path.exists()
+        )
+        return [
+            "internet-draft: expected exactly one of "
+            f"{_INTERNET_DRAFT_BASENAME}.md/.xml under {_INTERNET_DRAFT_DIR}, "
+            f"found {candidate_count}"
+        ]
+
+    # Strip XML comments before any scan: a snapshot declaration or required
+    # literal inside a `<!-- ... -->` comment is never operative content and
+    # must not satisfy this fail-closed guard (2026-07-23 fix, finding 5b).
+    text = _strip_xml_comments(source_path.read_text(encoding="utf-8"))
+    errors: list[str] = []
+
+    for spec_label, snapshot_re, spec_path in (
+        ("attest-v0.1.md", _DRAFT_V01_SNAPSHOT_RE, _SPEC_V01_PATH),
+        ("attest-v0.2.md", _DRAFT_V02_SNAPSHOT_RE, _SPEC_V02_PATH),
+    ):
+        matches = snapshot_re.findall(text)
+        if len(matches) != 1:
+            errors.append(
+                f"internet-draft: expected exactly one {spec_label} snapshot-revision "
+                f"declaration (expected to match {snapshot_re.pattern!r}), found "
+                f"{len(matches)}"
+            )
+            continue
+        declared = int(matches[0])
+        spec_text = spec_path.read_text(encoding="utf-8")
+        if declared not in _revisions_in_log(spec_text):
+            errors.append(
+                f"internet-draft: declared {spec_label} revision {declared} does not exist "
+                f"as '(rev {declared})' in {spec_label}'s revision log"
+            )
+
+    for literal in _DRAFT_REQUIRED_LITERALS:
+        if literal not in text:
+            errors.append(f"internet-draft: missing required literal {literal!r}")
+
+    return errors
+
+
+# The four anchors the public conformance-program doc must carry: the
+# runner's own path (so a reader can find and run it), the adapter
+# template's placeholder literal, the fixed phrase the claim-sentence
+# template (docs/conformance.md §5) uses, and the self-certification
+# process by name (P1.6 plan Task 4).
+_CONFORMANCE_DOC_REQUIRED_LITERALS: tuple[str, ...] = (
+    "tools/conformance_runner.py",
+    "{leaf}",
+    "attest conformant",
+    "self-certification",
+)
+
+
+def check_conformance_doc() -> list[str]:
+    """Fail-closed existence/content guard for `docs/conformance.md`.
+
+    Checks the file exists and mentions the runner's path, the adapter
+    template placeholder, the claim-sentence's fixed phrase, and the
+    self-certification process by name. Not wired into `collect_errors()`,
+    same reasoning as `check_standards_relationship()`/
+    `check_internet_draft_snapshot()`: it does not cross-reference another
+    document's parsed structure, so it is called directly from `main()`.
+    """
+    if not _CONFORMANCE_DOC_PATH.exists():
+        return ["conformance.md: file is missing"]
+    text = _CONFORMANCE_DOC_PATH.read_text(encoding="utf-8")
+    return [
+        f"conformance.md: missing required literal {literal!r}"
+        for literal in _CONFORMANCE_DOC_REQUIRED_LITERALS
+        if literal not in text
+    ]
+
+
 def collect_errors(
     threat_model: str,
     privacy: str,
@@ -736,9 +962,7 @@ def collect_errors(
     errors += [f"attest-threat-model.md: {e}" for e in check_matrix(threat_model, set(tm_ids))]
     errors += [f"attest-privacy.md: {e}" for e in check_claims(pc_rows)]
     errors += [f"attest-privacy.md: {e}" for e in check_schema_pins(pc_rows, schema)]
-    errors += [
-        f"attest-privacy.md: {e}" for e in check_pc08_corpus_claim(pc_rows, _VECTORS_PATH)
-    ]
+    errors += [f"attest-privacy.md: {e}" for e in check_pc08_corpus_claim(pc_rows, _VECTORS_PATH)]
     errors += [f"attest-versioning.md: {e}" for e in check_versioning_sections(versioning)]
     errors += [f"attest-versioning.md: {e}" for e in check_versioning_suite_names(versioning)]
     errors += [f"attest-versioning.md: {e}" for e in check_versioning_lifecycle_states(versioning)]
@@ -769,6 +993,9 @@ def main() -> int:
     versioning = _VERSIONING_PATH.read_text(encoding="utf-8")
 
     errors = collect_errors(threat_model, privacy, spec_v01, spec_v02, schema, versioning)
+    errors += check_standards_relationship()
+    errors += check_internet_draft_snapshot()
+    errors += check_conformance_doc()
     for error in errors:
         print(f"ERROR {error}")
     return 1 if errors else 0

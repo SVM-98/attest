@@ -98,9 +98,9 @@ to reject v0.2 envelopes, so it is measured against the 51-leaf subset.) There i
 end-to-end demo that deletes a store's entire infrastructure mid-lifecycle and
 proves the receipt still verifies.
 
-The published packages are `0.3.0`, which already ships v0.2 Stages 1 and 2
-(hybrid signatures; transparency and anchoring). Stage 3 — issuer-mediated
-transfer, this document's own §17 — is the remaining piece `0.4.0` ships.
+The published packages are `0.4.0`, which ships all of v0.2 — Stages 1 and 2
+(hybrid signatures; transparency and anchoring) and Stage 3, issuer-mediated
+transfer, this document's own §17.
 
 Three pieces of assurance work go beyond what a test suite can show. They are
 being finished on branches, and are linked here rather than left invisible:
@@ -126,6 +126,28 @@ being finished on branches, and are linked here rather than left invisible:
   profile — resale velocity, the issuer-royalty incentive, and the CJEU case law
   (*UsedSoft*, *Tom Kabinet*) that makes transfer issuer-mediated rather than a
   general resale right. On [`pillar-1`](https://github.com/SVM-98/attest/tree/pillar-1).
+
+Three further pieces make attest citable and checkable, not just built and
+tested, and are likewise linked here rather than left invisible:
+
+- **IETF Internet-Draft.** [`ietf/draft-martinalli-open-purchase-receipts.xml`](https://github.com/SVM-98/attest/blob/pillar-1/ietf/draft-martinalli-open-purchase-receipts.xml)
+  is the source for `draft-martinalli-open-purchase-receipts-00`, a
+  snapshot-profile mirror of the living spec (declares it mirrors v0.1
+  revision 5 and v0.2 revision 6) that builds clean to `-00` txt/html in CI.
+  It is ready to submit; submission to the IETF Datatracker is a deliberate
+  manual step, not something this repo automates. On
+  [`pillar-1`](https://github.com/SVM-98/attest/tree/pillar-1).
+- **[Standards-relationship annex](https://github.com/SVM-98/attest/blob/pillar-1/docs/spec/attest-standards-relationship.md).**
+  Documents attest's boundary against every adjacent standard people compare
+  it to — W3C Verifiable Credentials, eIDAS 2.0/the EUDI Wallet, JOSE/JWS and
+  COSE, RFC 8785 (JCS), C2PA, SCITT/RFC 9943, and RATS (RFC 9334) — so each
+  comparison is answered once instead of re-argued per issue. On
+  [`pillar-1`](https://github.com/SVM-98/attest/tree/pillar-1).
+- **[Conformance program](https://github.com/SVM-98/attest/blob/pillar-1/docs/conformance.md).**
+  One documented command, run with a third party's own adapter against the
+  vector corpus, produces a pass/fail report and a self-certification claim;
+  both in-repo verifiers pass 97/97 through that exact path. On
+  [`pillar-1`](https://github.com/SVM-98/attest/tree/pillar-1).
 
 ## Quickstart
 
@@ -205,6 +227,13 @@ The core protocol properties are machine-checked in Tamarin: [formal/](formal/)
 holds the model, the property↔lemma↔spec map, and the honest scope of what is
 and is not proved, gated in CI by a statement-pinning checker.
 
+[docs/spec/attest-standards-relationship.md](docs/spec/attest-standards-relationship.md)
+(non-normative) is the boundary annex: in terms an expert in each standard
+would accept, it states attest's relationship to W3C Verifiable Credentials,
+eIDAS 2.0/the EUDI Wallet, JOSE/JWS and COSE, RFC 8785 (JCS), C2PA, SCITT
+(RFC 9943), and RATS (RFC 9334) — including what a future bridge to one of
+them could look like, where one exists.
+
 ## Roadmap / north star
 
 Non-normative, and deliberately undated — these are directions, not commitments:
@@ -235,7 +264,8 @@ the required attribution.
 actually conform to it; forks are welcome to use the technology but not the name
 for a divergent derivative. This paragraph is a naming norm, not a trademark
 registration — real trademark enforcement would require actually registering the
-mark, which has not happened.
+mark, which has not happened. Conformance claims follow the self-certification
+process in [docs/conformance.md](docs/conformance.md).
 
 **Contributing.** See [`CONTRIBUTING.md`](CONTRIBUTING.md). Implementation pull
 requests must pass all 97 conformance vector leaves and keep both the Python and
