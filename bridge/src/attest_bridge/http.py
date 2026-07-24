@@ -1,0 +1,251 @@
+"""Stdlib WSGI app: Stripe webhook endpoint + receipt-download routes.
+
+Contract (task-8-brief.md): this module is the integration point between the
+platform adapters (T7's `StripeAdapter`) and `IssuingCore` (T5) — it owns the
+webhook error-handling policy (the design's "what happens on every kind of
+failure" section, made executable) and never invents behavior the policy
+table doesn't pin.
+
+Webhook handler policy (PINNED — `mark_event` only on the rows marked with a
+side effect other than "already"/none):
+
+| Condition                                   | HTTP | mark_event |
+|----------------------------------------------|------|------------|
+| Missing/invalid `Stripe-Signature`            | 400  | no         |
+| Valid sig, unparseable JSON                   | 400  | no         |
+| Event type not handled / not `payment_status  | 200  | yes        |
+|   == "paid"`                                  |      |            |
+| `ledger.seen_event` (replay)                  | 200  | already    |
+| `PurchaseRejected` / `UnmappedProduct`        | 200  | yes (+ dead letter) |
+| Duplicate purchase (receipt exists)          | 200  | yes        |
+| Success                                       | 200  | yes        |
+| `IssueError`/`ConfigError`/unexpected `Exception` | 500 | NO — fail closed, Stripe retries |
+
+The 500 row is the one that matters most: a signing/config/unexpected
+failure must never be acknowledged, or Stripe will never retry it and the
+purchase is silently lost. Every other terminal state — including a
+permanently-bad purchase (dead-lettered) — gets a 200 so Stripe stops
+retrying something that will never succeed.
+
+Never logged, anywhere in this module: a download token, a salt, a secret,
+or a full envelope. Event ids, session ids, and receipt ids are not secrets
+and may be logged freely.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Any, cast
+from urllib.parse import parse_qs
+
+from attest_bridge.config import BridgeConfig
+from attest_bridge.core import IssuingCore
+from attest_bridge.ledger import Ledger, StoredReceipt
+from attest_bridge.model import NormalizedPurchase, PurchaseRejected, UnmappedProduct
+from attest_bridge.stripe_adapter import StripeAdapter, StripeSignatureError
+
+_RFC3339 = "%Y-%m-%dT%H:%M:%SZ"
+_NOT_FOUND_BODY = b'{"error":"not found"}'
+
+WSGIApp = Callable[[dict[str, Any], Any], Iterable[bytes]]
+
+
+def _now_rfc3339() -> str:
+    return datetime.now(UTC).strftime(_RFC3339)
+
+
+@dataclass
+class BridgeDeps:
+    config: BridgeConfig
+    core: IssuingCore
+    ledger: Ledger
+    stripe: StripeAdapter | None
+    log: logging.Logger
+
+
+# -- WSGI response helpers ---------------------------------------------------
+
+
+def _json_response(start_response: Any, status: str, payload: dict[str, Any]) -> Iterable[bytes]:
+    body = json.dumps(payload).encode("utf-8")
+    headers = [("Content-Type", "application/json"), ("Content-Length", str(len(body)))]
+    start_response(status, headers)
+    return [body]
+
+
+def _plain_response(start_response: Any, status: str, body: bytes) -> Iterable[bytes]:
+    headers = [("Content-Type", "text/plain; charset=utf-8"), ("Content-Length", str(len(body)))]
+    start_response(status, headers)
+    return [body]
+
+
+def _not_found(start_response: Any) -> Iterable[bytes]:
+    # Uniform body for every 404 in this module — a download token or Stripe
+    # session_id must never be echoed back, valid or not.
+    headers = [
+        ("Content-Type", "application/json"),
+        ("Content-Length", str(len(_NOT_FOUND_BODY))),
+    ]
+    start_response("404 Not Found", headers)
+    return [_NOT_FOUND_BODY]
+
+
+def _receipt_response(start_response: Any, stored: StoredReceipt) -> Iterable[bytes]:
+    body = stored.envelope_json.encode("utf-8")
+    headers = [
+        ("Content-Type", "application/json"),
+        ("Content-Disposition", f'attachment; filename="receipt-{stored.receipt_id}.attest"'),
+        ("Cache-Control", "no-store"),
+        ("Content-Length", str(len(body))),
+    ]
+    start_response("200 OK", headers)
+    return [body]
+
+
+def _read_body(environ: dict[str, Any]) -> bytes:
+    try:
+        length = int(environ.get("CONTENT_LENGTH") or 0)
+    except ValueError:
+        length = 0
+    if length <= 0:
+        return b""
+    stream: Any = environ.get("wsgi.input")
+    data: bytes = stream.read(length)
+    return data
+
+
+def _parse_query(query_string: str) -> dict[str, str]:
+    parsed = parse_qs(query_string, keep_blank_values=True)
+    return {key: values[0] for key, values in parsed.items() if values}
+
+
+def _best_effort_purchase_id(event: dict[str, Any]) -> str | None:
+    """Extract a session/purchase id from a raw event for dead-letter operator
+    visibility only — never load-bearing (the dead letter's `raw_json` is the
+    authoritative record `retry-failed` re-drives from)."""
+    session = event.get("data", {}).get("object", {})
+    session_id = session.get("id") if isinstance(session, dict) else None
+    return session_id if isinstance(session_id, str) else None
+
+
+# -- stripe webhook -----------------------------------------------------------
+
+
+def _handle_stripe_webhook(
+    deps: BridgeDeps, environ: dict[str, Any], start_response: Any
+) -> Iterable[bytes]:
+    stripe = deps.stripe
+    if stripe is None:
+        # No [stripe] section configured: this route simply doesn't exist.
+        return _not_found(start_response)
+
+    body = _read_body(environ)
+    sig_header = environ.get("HTTP_STRIPE_SIGNATURE") or ""
+    if not sig_header:
+        deps.log.warning("stripe webhook: missing Stripe-Signature header")
+        return _plain_response(start_response, "400 Bad Request", b"missing signature")
+
+    try:
+        event = stripe.parse_event(body, sig_header, now=None)
+    except StripeSignatureError:
+        deps.log.warning("stripe webhook: signature verification failed")
+        return _plain_response(start_response, "400 Bad Request", b"invalid signature")
+    except json.JSONDecodeError:
+        deps.log.error("stripe webhook: signature valid but body is not valid JSON")
+        return _plain_response(start_response, "400 Bad Request", b"malformed body")
+
+    event_id = event["id"]
+    purchase: NormalizedPurchase | None = None
+    try:
+        if deps.ledger.seen_event("stripe", event_id):
+            # Replay of an event we already processed (Stripe retries on any
+            # non-2xx, or the same event legitimately arrives twice): already
+            # marked, nothing to redo.
+            return _json_response(start_response, "200 OK", {"ok": True})
+
+        if not stripe.wants(event):
+            deps.log.info("stripe event %s: not actionable (type/payment_status)", event_id)
+            deps.ledger.mark_event("stripe", event_id, now=_now_rfc3339())
+            return _json_response(start_response, "200 OK", {"ok": True})
+
+        purchase = stripe.normalize(event)
+        outcome = deps.core.process(purchase)
+    except (PurchaseRejected, UnmappedProduct) as exc:
+        # Permanently-bad input: dead-letter for operator triage and mark the
+        # event seen — Stripe must not retry something that will never
+        # succeed. `raw_json` is the whole event, so `retry-failed` can
+        # re-normalize it once the merchant fixes the catalog/config.
+        purchase_id = (
+            purchase.platform_purchase_id
+            if purchase is not None
+            else _best_effort_purchase_id(event)
+        )
+        deps.ledger.add_dead_letter(
+            "stripe", purchase_id, str(exc), json.dumps(event), now=_now_rfc3339()
+        )
+        deps.ledger.mark_event("stripe", event_id, now=_now_rfc3339())
+        deps.log.error("stripe event %s: dead-lettered (%s)", event_id, exc)
+        return _json_response(start_response, "200 OK", {"ok": True})
+    except Exception:
+        # Signing/config/unexpected failure: fail closed. NEVER mark_event —
+        # Stripe must retry, or a transient failure would silently drop a
+        # purchase forever.
+        deps.log.exception("stripe event %s: unexpected error, not acknowledged", event_id)
+        return _plain_response(start_response, "500 Internal Server Error", b"internal error")
+
+    deps.ledger.mark_event("stripe", event_id, now=_now_rfc3339())
+    deps.log.info(
+        "stripe event %s: processed (receipt=%s duplicate=%s)",
+        event_id,
+        outcome.receipt_id,
+        outcome.duplicate,
+    )
+    return _json_response(start_response, "200 OK", {"ok": True})
+
+
+# -- receipt download ---------------------------------------------------------
+
+
+def _handle_download(deps: BridgeDeps, start_response: Any, *, token: str) -> Iterable[bytes]:
+    stored = deps.ledger.by_download_token(token)
+    if stored is None:
+        return _not_found(start_response)
+    return _receipt_response(start_response, stored)
+
+
+def _handle_stripe_receipt(
+    deps: BridgeDeps, start_response: Any, *, session_id: str | None
+) -> Iterable[bytes]:
+    if not session_id:
+        return _not_found(start_response)
+    stored = deps.ledger.get_receipt("stripe", session_id)
+    if stored is None:
+        return _not_found(start_response)
+    return _receipt_response(start_response, stored)
+
+
+# -- app ------------------------------------------------------------------
+
+
+def make_app(deps: BridgeDeps) -> WSGIApp:
+    def app(environ: dict[str, Any], start_response: Any) -> Iterable[bytes]:
+        method = environ.get("REQUEST_METHOD", "GET")
+        path = environ.get("PATH_INFO") or "/"
+
+        if method == "GET" and path == "/healthz":
+            return _json_response(start_response, "200 OK", {"ok": True})
+        if method == "POST" and path == "/stripe/webhook":
+            return _handle_stripe_webhook(deps, environ, start_response)
+        if method == "GET" and path.startswith("/r/"):
+            token = path[len("/r/") :]
+            return _handle_download(deps, start_response, token=token)
+        if method == "GET" and path == "/stripe/receipt":
+            params = _parse_query(environ.get("QUERY_STRING", ""))
+            return _handle_stripe_receipt(deps, start_response, session_id=params.get("session_id"))
+        return _not_found(start_response)
+
+    return cast(WSGIApp, app)

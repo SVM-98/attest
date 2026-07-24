@@ -86,6 +86,36 @@ def _event(
     }
 
 
+def make_session_completed_event(
+    *,
+    session_id: str = "cs_test_123",
+    email: str | None = "buyer@example.com",
+    metadata: dict[str, str] | None = None,
+    custom_fields: list[dict[str, Any]] | None = None,
+    payment_status: str = "paid",
+    amount_total: int | None = 1999,
+    currency: str | None = "usd",
+    event_type: str = "checkout.session.completed",
+    created: int = _T,
+    event_id: str = "evt_test_1",
+) -> dict[str, Any]:
+    """Public event-builder — one source of truth for the `checkout.session.
+    completed`-shaped event fixture, shared with T8 (imported by
+    `test_bridge_http.py`, not duplicated). Delegates to `_session`/`_event`
+    above so this module's existing tests are untouched (purely additive,
+    task-8-brief.md)."""
+    session = _session(
+        session_id=session_id,
+        email=email,
+        metadata=metadata,
+        custom_fields=custom_fields,
+        payment_status=payment_status,
+        amount_total=amount_total,
+        currency=currency,
+    )
+    return _event(session, event_type=event_type, created=created, event_id=event_id)
+
+
 # -- signature verification (the trust boundary) ----------------------------
 
 
