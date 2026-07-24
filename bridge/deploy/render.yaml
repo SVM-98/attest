@@ -1,35 +1,37 @@
 # attest-bridge on Render (Blueprint). From the Render dashboard: New -> Blueprint
 # -> point at this repo -> Render finds this file at bridge/deploy/render.yaml
 # once you pick it in the "Blueprint file" field (it does not need to live at
-# the repo root). See bridge/docs/deploy.md for the manual steps Render can't
-# do from YAML:
-#   - fill in the four `sync: false` env vars below from the dashboard
-#   - upload issuer.seed and issuer.mldsa.json as "Secret Files" (Environment
-#     tab) — each lands at /etc/secrets/<filename> at runtime; your
-#     bridge.toml's seed_path/mldsa_key_path should point at
-#     /etc/secrets/issuer.seed and /etc/secrets/issuer.mldsa.json
-#   - after the service's first (failing) deploy, SCP or magic-wormhole
-#     bridge.toml and key-manifest.json onto the disk below, at
-#     /etc/attest-bridge/bridge.toml and /etc/attest-bridge/key-manifest.json
-#     — the disk starts empty and this is the one thing a Blueprint can't
-#     populate for you, so the service will crash-loop (missing config) until
-#     you do this once
+# the repo root).
+#
+# Render prompts for every `sync: false` env var below DURING Blueprint
+# creation, before the service's first deploy ever runs (confirmed against
+# Render's own docs) — fill in all eight there:
+#   - BRIDGE_TOML_B64 / KEY_MANIFEST_B64 / ISSUER_SEED_B64 / ISSUER_MLDSA_B64:
+#     base64 of bridge.toml / key-manifest.json / issuer.seed /
+#     issuer.mldsa.json (`base64 < bridge.toml`, etc.) — paste the whole,
+#     possibly multi-line, output straight into the dashboard field
+#   - STRIPE_WEBHOOK_SECRET / STRIPE_API_KEY / ITCH_API_KEY / SMTP_PASSWORD:
+#     whichever your bridge.toml actually references
+#
+# There is no shell/SCP step and no crash loop: this image's ENTRYPOINT
+# (bridge/deploy/docker-entrypoint.sh) decodes the four *_B64 env vars to
+# /etc/attest-bridge/bridge.toml, /etc/attest-bridge/key-manifest.json,
+# /secrets/issuer.seed, and /secrets/issuer.mldsa.json on every boot, before
+# `attest-bridge serve` starts — so the very first deploy comes up healthy on
+# /healthz with everything already in place. See bridge/docs/deploy.md.
 #
 # No `dockerCommand` here, deliberately: Render's dockerCommand overrides the
-# Dockerfile's CMD, not its ENTRYPOINT, so anything set here would be
-# appended as extra argv after the Dockerfile's pinned
-# `ENTRYPOINT ["attest-bridge", "serve", "--config", "/etc/attest-bridge/bridge.toml", ...]`
-# — which `attest-bridge serve` rejects as unrecognized arguments (startup
-# failure). The ENTRYPOINT governs unmodified, so `--config` is always
-# `/etc/attest-bridge/bridge.toml` on this target.
+# Dockerfile's CMD, not its ENTRYPOINT (confirmed against Render's docs), and
+# this image sets no CMD at all, so anything set here would be appended as
+# extra argv to the ENTRYPOINT script — which forwards it nowhere and would
+# just be ignored by the shell, or worse, misparsed. Leave it unset.
 #
-# Render allows only ONE persistent disk per service, so it can't hold a
-# separate config volume AND a separate Ledger volume the way Fly/Compose do.
-# This Blueprint mounts the one disk at /etc/attest-bridge and uses a file
-# inside that same disk for `ledger_path` — set your bridge.toml's
-# `ledger_path` to `/etc/attest-bridge/ledger.sqlite3` for this target
-# specifically (the shipped example config's default, `/var/lib/attest-bridge/...`,
-# has nothing mounted there on Render).
+# Render allows only ONE persistent disk per service; it holds the Ledger
+# alone (config + keys are re-materialized from the *_B64 env vars on every
+# boot, so they need no disk). ledger_path in bridge.toml can stay at the
+# shipped example's default, /var/lib/attest-bridge/ledger.sqlite3 — no
+# per-target override needed, unlike config/keys, the Ledger genuinely must
+# survive a restart, so it's the one thing that does need the disk.
 services:
   - type: web
     name: attest-bridge
@@ -39,10 +41,18 @@ services:
     plan: starter
     healthCheckPath: /healthz
     disk:
-      name: attest-bridge-config
-      mountPath: /etc/attest-bridge
+      name: attest-bridge-ledger
+      mountPath: /var/lib/attest-bridge
       sizeGB: 1
     envVars:
+      - key: BRIDGE_TOML_B64
+        sync: false
+      - key: KEY_MANIFEST_B64
+        sync: false
+      - key: ISSUER_SEED_B64
+        sync: false
+      - key: ISSUER_MLDSA_B64
+        sync: false
       - key: STRIPE_WEBHOOK_SECRET
         sync: false
       - key: STRIPE_API_KEY

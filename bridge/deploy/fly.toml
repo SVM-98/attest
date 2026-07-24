@@ -9,11 +9,18 @@
 # boot (the `[[files]]` blocks below). Set them all before the first deploy:
 #
 #   fly secrets set \
-#     BRIDGE_TOML=$(cat bridge.toml | base64) \
-#     KEY_MANIFEST=$(cat key-manifest.json | base64) \
-#     ISSUER_SEED=$(cat issuer.seed | base64) \
-#     ISSUER_MLDSA=$(cat issuer.mldsa.json | base64) \
+#     BRIDGE_TOML="$(base64 < bridge.toml | tr -d '\n')" \
+#     KEY_MANIFEST="$(base64 < key-manifest.json | tr -d '\n')" \
+#     ISSUER_SEED="$(base64 < issuer.seed | tr -d '\n')" \
+#     ISSUER_MLDSA="$(base64 < issuer.mldsa.json | tr -d '\n')" \
 #     STRIPE_WEBHOOK_SECRET=whsec_... STRIPE_API_KEY=sk_... ITCH_API_KEY=... SMTP_PASSWORD=...
+#
+#   (the double quotes and `tr -d '\n'` matter: GNU coreutils `base64` — the
+#   default on Linux — line-wraps its output every 76 characters, and an
+#   unquoted `$(...)` lets a POSIX shell field-split those embedded newlines
+#   into dozens of stray arguments, breaking the command; macOS/BSD `base64`
+#   doesn't wrap, so `tr -d '\n'` is a harmless no-op there — verified on
+#   both coreutils' and BSD's own `base64` behavior)
 #
 #   fly deploy --config bridge/deploy/fly.toml
 #

@@ -10,7 +10,7 @@ You will need: a terminal with Python 3.12+, a Stripe account (test mode is
 enough to complete every step here), and somewhere to run the bridge itself
 once it's configured (see [deploy.md](deploy.md) for that half — the deploy
 image already has `attest`/`attest-bridge` installed for running `serve`;
-you still need both CLIs on your own machine too, for steps 1, 2, 3, and 8
+you still need both CLIs on your own machine too, for steps 1, 2, 3, 4, and 9
 below).
 
 `attest-bridge` is **not published on PyPI** (`Private :: Do Not Upload` —
@@ -24,7 +24,7 @@ pip install ./bridge
 ```
 
 `pip install ./bridge` pulls in `attest-receipts` (the published PyPI
-package that provides the `attest` CLI used in steps 1–2 and 8) as its
+package that provides the `attest` CLI used in steps 1–2, 4, and 9) as its
 declared dependency, so this one command gives you both `attest` and
 `attest-bridge` locally.
 
@@ -91,8 +91,9 @@ Edit it:
   target mounts `issuer.seed` / `issuer.mldsa.json` / `key-manifest.json`
   (see [deploy.md](deploy.md) — the shipped example already uses the
   Docker/Fly/Render convention, `/secrets/...` and `/etc/attest-bridge/...`).
-- `[stripe]`: `webhook_secret_env = "STRIPE_WEBHOOK_SECRET"` (you'll set that
-  env var in step 5). Also set `api_key_env = "STRIPE_API_KEY"` and point it
+- `[stripe]`: `webhook_secret_env = "STRIPE_WEBHOOK_SECRET"` (step 4 exports
+  a throwaway local value to test with; step 6 sets the real one from your
+  Stripe webhook). Also set `api_key_env = "STRIPE_API_KEY"` and point it
   at an env var holding your Stripe **secret** key (Dashboard → Developers →
   API keys) — with this set, the bridge resolves which product was bought by
   calling Stripe's API for you, so you never have to touch Checkout Session
@@ -105,119 +106,84 @@ Edit it:
   is refused, never issued with guessed terms — this is deliberate.
 - Drop the `[itch]` table if you don't also sell on itch.io (see
   [setup-itch.md](setup-itch.md)), and the `[delivery]` table if you're happy
-  with download-link-only (no receipt emails — see step 7).
+  with download-link-only (no receipt emails — see step 8).
 
-Before deploying, validate the config, keys, and product catalog in one
-shot — this catches a typo'd path or a malformed product table before it
-becomes a 500 on your first real webhook:
+`seed_path`, `mldsa_key_path`, and `manifest_path` above point at wherever
+your deploy target mounts these files — `/secrets/...` and
+`/etc/attest-bridge/...`, the convention every target in
+[deploy.md](deploy.md) shares — which don't exist on this machine yet. Step 4
+validates a local copy of this same config against the actual files sitting
+in your current directory, before you deploy anything at all.
 
-```sh
-attest-bridge check-config --config bridge.toml
-```
+## 4. Test locally before you deploy
 
-A clean config prints a short summary — issuer + kid, `public_base_url`,
-the product keys it found, whether `[stripe]` is configured, and whether
-delivery is SMTP or download-link-only — and exits `0`; anything wrong is
-reported as a `config error:` naming the exact field. This step never
-touches the network or creates the Ledger — it's pure local validation,
-safe to run as many times as you like while editing.
+Steps 1–3 all happened on your own machine; step 5 deploys the *bridge
+itself* somewhere else — a container, a VM, a platform. Before that,
+exercise the whole pipeline locally: same commands, same code, just pointed
+at the files already sitting in your current directory instead of wherever
+your deploy target eventually mounts them.
 
-## 4. Deploy
-
-See [deploy.md](deploy.md) for the four deploy targets (Docker Compose,
-Fly.io, Render, Cloud Run) and the four secret env vars
-(`STRIPE_WEBHOOK_SECRET`, `STRIPE_API_KEY`, `ITCH_API_KEY`, `SMTP_PASSWORD` —
-set only the ones your `bridge.toml` references).
-
-## 5. Wire up the Stripe webhook
-
-Stripe Dashboard → Developers → Webhooks → **Add endpoint**:
-
-- Endpoint URL: `https://<your-bridge-host>/stripe/webhook`
-- Events to send: `checkout.session.completed` and
-  `checkout.session.async_payment_succeeded`
-- After creating it, reveal the **Signing secret** (`whsec_...`) and set it
-  as your deploy's `STRIPE_WEBHOOK_SECRET`.
-
-## 6. (Optional) Transfer-ready receipts
-
-By default a receipt is bound to the buyer's email only — perfectly valid
-forever, just not transferable. To let a buyer bind their receipt to a
-public key instead (making it eligible for a future issuer-mediated
-transfer), give Stripe a way to carry it: add a Checkout/Payment-Link custom
-field with key `attest_pubkey`, type `text`, marked optional — or set
-`metadata.attest_buyer_pubkey` yourself if you create Checkout Sessions
-programmatically. A buyer who leaves it blank gets an email-bound,
-non-transferable receipt: exactly as designed, not an error.
-
-## 7. (Optional) Zero-config buyer download
-
-Point your Checkout Session's `success_url` at:
-
-```
-https://<your-bridge-host>/stripe/receipt?session_id={CHECKOUT_SESSION_ID}
-```
-
-Stripe substitutes `{CHECKOUT_SESSION_ID}` itself; the buyer lands on a page
-that downloads their `.attest` receipt directly, with no email step needed.
-
-## 8. Test it
-
-Make a real test-mode purchase (Stripe test card `4242 4242 4242 4242`), let
-the webhook fire, and download the resulting receipt (via step 7's URL, the
-email from step 4's delivery, or your own lookup against the Ledger). Then:
+Copy the config, and point the copy's key/manifest/ledger paths at your
+local files instead of the deploy paths above:
 
 ```sh
-attest verify receipt.attest --trust-dir <dir-containing-key-manifest.json>
+cp bridge.toml bridge.local.toml
 ```
 
-should print `"ok": true`. That's the whole loop: a real Stripe purchase, a
-signed receipt, verified offline with nothing but the file you just
-downloaded and the manifest you published in step 2.
+Edit `bridge.local.toml`:
 
----
+- `seed_path` → `./issuer.seed`
+- `mldsa_key_path` → `./issuer.mldsa.json`
+- `manifest_path` → `./key-manifest.json`
+- `ledger_path` → `./ledger.sqlite3` (a fresh local Ledger — the bridge
+  creates this file itself, 0600, the first time it starts)
 
-## Three things worth knowing before you go live
+`bridge.toml` itself stays untouched, ready for step 5.
 
-> **The salt tradeoff.** Every receipt embeds its own buyer-binding salt —
-> that's what makes the file self-contained and verifiable forever, with no
-> server to ask. The flip side: anyone holding the file can test candidate
-> emails against the buyer commitment offline (it's a commitment, not
-> encryption). If you need to keep the salt separate from the receipt file
-> itself, the underlying `attest issue` CLI supports `--salt-out` for
-> hand-issuance — the bridge always embeds the salt inline, by design, since
-> it has no separate channel to hand a buyer their salt out-of-band.
-
-> **The Ledger database is a secret.** `ledger_path` (a sqlite3 file) stores
-> every issued envelope verbatim, salt included, and is created 0600. Back it
-> up **encrypted**. It is not part of the trust model — nothing `attest
-> verify` depends on it — but losing it loses your replay-dedup memory and
-> buyers' download-token links; a receipt already delivered to a buyer stays
-> valid forever regardless of what happens to this file.
-
-> **Stage 2 transparency is opt-in and off.** Everything this bridge issues
-> is a Stage 1 hybrid-signed receipt (Ed25519 + ML-DSA-65) — strong on its
-> own, but not logged to a public transparency log. If you want Stage 2
-> (an issuer key-transparency log a receipt can be corroborated against),
-> that's the separate `attest log` CLI (`init` / `append` /
-> `sign-checkpoint`), run out-of-band; the bridge doesn't wire it up for you.
-
-## Testing appendix: a local synthetic webhook
-
-You don't need a real Stripe account to exercise the whole pipeline — you can
-sign a fake `checkout.session.completed` event yourself and POST it straight
-at a locally-running bridge, using nothing but the Python standard library.
-
-Start the bridge (in a terminal where `STRIPE_WEBHOOK_SECRET` is set to any
-value — it just has to match what the script below signs with):
+Set the two Stripe env vars this config references. Throwaway values are
+fine for a local check — `check-config` only verifies a variable is *set*,
+not that it holds a real Stripe credential — except `STRIPE_WEBHOOK_SECRET`,
+whose exact value the synthetic webhook test below signs with, so it has to
+match what you export here:
 
 ```sh
-attest-bridge serve --config bridge.toml --host 127.0.0.1 --port 8080
+export STRIPE_WEBHOOK_SECRET=whsec_testsecret123
+export STRIPE_API_KEY=sk_test_dummy
+```
+
+Now validate config, keys, and product catalog in one shot — this catches a
+typo'd path or a malformed product table before it becomes a 500 on your
+first real webhook:
+
+```sh
+attest-bridge check-config --config bridge.local.toml
+```
+
+A clean config prints a short summary and exits `0`:
+
+```
+issuer: store.example.com (kid=store.example.com/keys/2026-07#hybrid-1)
+public_base_url: https://receipts.example.com
+products: price_1PxYzEXAMPLE
+stripe: configured
+delivery: download-link-only
+```
+
+Anything wrong is reported as a `config error:` naming the exact field,
+instead. This step never touches the network or creates the Ledger — it's
+pure local validation, safe to run as many times as you like while editing.
+
+Now exercise the full issue-and-verify path with a synthetic Stripe event —
+you don't need a real Stripe account for this part, just the Python standard
+library. Start the bridge against your local config:
+
+```sh
+attest-bridge serve --config bridge.local.toml --host 127.0.0.1 --port 8080
 ```
 
 Then, in another terminal, save this as `send_test_webhook.py` and run it —
 it builds the `Stripe-Signature` header exactly the way Stripe's own webhook
-sender does (`t=<epoch>,v1=<hex hmac>`, keyed by your `whsec_...` secret,
+sender does (`t=<epoch>,v1=<hex hmac>`, keyed by `STRIPE_WEBHOOK_SECRET`,
 signed over `f"{t}." + <raw body bytes>`):
 
 ```python
@@ -273,13 +239,100 @@ python3 send_test_webhook.py
 
 A `200 {"ok": true}` means the bridge accepted and processed it. Download the
 receipt it just issued (the synthetic event above used session id
-`cs_test_1`):
+`cs_test_1`) and verify it, entirely offline:
 
 ```sh
 curl "http://127.0.0.1:8080/stripe/receipt?session_id=cs_test_1" -o receipt.attest
 chmod 600 receipt.attest   # the envelope carries delivery.salt, a buyer-binding secret
+attest verify receipt.attest --trust-dir .
+```
+
+`"ok": true` closes the loop entirely offline: a signed receipt, issued by
+your own bridge, verified against the manifest you published in step 2 —
+nothing above required reading this repo's source, only the commands
+themselves.
+
+## 5. Deploy
+
+See [deploy.md](deploy.md) for the three deploy targets (Docker Compose,
+Fly.io, Render — plus a caution on why Cloud Run isn't a safe fourth) and
+the four secret env vars (`STRIPE_WEBHOOK_SECRET`, `STRIPE_API_KEY`,
+`ITCH_API_KEY`, `SMTP_PASSWORD` — set only the ones your `bridge.toml`
+references).
+
+## 6. Wire up the Stripe webhook
+
+Stripe Dashboard → Developers → Webhooks → **Add endpoint**:
+
+- Endpoint URL: `https://<your-bridge-host>/stripe/webhook`
+- Events to send: `checkout.session.completed` and
+  `checkout.session.async_payment_succeeded`
+- After creating it, reveal the **Signing secret** (`whsec_...`) and set it
+  as your deploy's `STRIPE_WEBHOOK_SECRET`.
+
+## 7. (Optional) Transfer-ready receipts
+
+By default a receipt is bound to the buyer's email only — perfectly valid
+forever, just not transferable. To let a buyer bind their receipt to a
+public key instead (making it eligible for a future issuer-mediated
+transfer), give Stripe a way to carry it: add a Checkout/Payment-Link custom
+field with key `attest_pubkey`, type `text`, marked optional — or set
+`metadata.attest_buyer_pubkey` yourself if you create Checkout Sessions
+programmatically. A buyer who leaves it blank gets an email-bound,
+non-transferable receipt: exactly as designed, not an error.
+
+## 8. (Optional) Zero-config buyer download
+
+Point your Checkout Session's `success_url` at:
+
+```
+https://<your-bridge-host>/stripe/receipt?session_id={CHECKOUT_SESSION_ID}
+```
+
+Stripe substitutes `{CHECKOUT_SESSION_ID}` itself; the buyer lands on a page
+that downloads their `.attest` receipt directly, with no email step needed.
+
+## 9. Test it
+
+Make a real test-mode purchase (Stripe test card `4242 4242 4242 4242`), let
+the webhook fire, and download the resulting receipt (via step 8's URL, the
+email from step 5's delivery, or your own lookup against the Ledger). Then:
+
+```sh
 attest verify receipt.attest --trust-dir <dir-containing-key-manifest.json>
 ```
 
-`"ok": true` closes the loop entirely offline, with no Stripe account
-involved at all.
+should print `"ok": true`. That's the whole loop: a real Stripe purchase, a
+signed receipt, verified offline with nothing but the file you just
+downloaded and the manifest you published in step 2.
+
+---
+
+## Three things worth knowing before you go live
+
+> **The salt tradeoff.** Every receipt embeds its own buyer-binding salt —
+> that's what makes the file self-contained and verifiable forever, with no
+> server to ask. The flip side: anyone holding the file can test candidate
+> emails against the buyer commitment offline (it's a commitment, not
+> encryption). If you need to keep the salt separate from the receipt file
+> itself, the underlying `attest issue` CLI supports `--salt-out` for
+> hand-issuance — the bridge always embeds the salt inline, by design, since
+> it has no separate channel to hand a buyer their salt out-of-band.
+
+> **The Ledger database is a secret.** `ledger_path` (a sqlite3 file) stores
+> every issued envelope verbatim, salt included, and is created 0600. Back it
+> up **encrypted**. It is not part of the trust model — nothing `attest
+> verify` depends on it — but losing it loses your replay-dedup memory and
+> buyers' download-token links; a receipt already delivered to a buyer stays
+> valid forever regardless of what happens to this file.
+
+> **Stage 2 transparency is opt-in and off.** Everything this bridge issues
+> is a Stage 1 hybrid-signed receipt (Ed25519 + ML-DSA-65) — strong on its
+> own, but not logged to a public transparency log. If you want Stage 2
+> (an issuer key-transparency log a receipt can be corroborated against),
+> that's the separate `attest log` CLI (`init` / `append` /
+> `sign-checkpoint`), run out-of-band; the bridge doesn't wire it up for you.
+
+The local synthetic-webhook test that exercises this same pipeline
+end-to-end — no real Stripe account needed — is step 4, above, not repeated
+here.

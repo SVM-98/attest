@@ -29,9 +29,10 @@ database, or its uptime ever again.
   local synthetic-webhook test you can run before touching a real account.
 - [`docs/setup-itch.md`](docs/setup-itch.md) — the same, for itch.io (a
   claim-queue poller, not a webhook — itch.io exposes neither).
-- [`docs/deploy.md`](docs/deploy.md) — the four deploy targets (Docker
-  Compose, Fly.io, Render, Cloud Run), all built from
-  [`deploy/Dockerfile`](deploy/Dockerfile), plus the TLS requirement common
+- [`docs/deploy.md`](docs/deploy.md) — the three deploy targets (Docker
+  Compose, Fly.io, Render), all built from
+  [`deploy/Dockerfile`](deploy/Dockerfile), plus why Cloud Run isn't a safe
+  fourth, and the TLS requirement common
   to all of them.
 - [`examples/bridge.toml`](examples/bridge.toml) — the annotated config
   template every setup guide above starts from.
