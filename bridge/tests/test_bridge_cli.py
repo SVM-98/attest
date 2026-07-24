@@ -60,6 +60,7 @@ def _write_config(
     key_manifest: dict[str, Any],
     *,
     products_toml: str = "",
+    extra_toml: str = "",
 ) -> Path:
     seed_path, mldsa_path = _write_issuer_key_files(tmp_path, hybrid_keys)
     manifest_path = tmp_path / "key-manifest.json"
@@ -82,6 +83,7 @@ manifest_path = "{manifest_path}"
 webhook_secret_env = "{_STRIPE_ENV_VAR}"
 
 {products_toml}
+{extra_toml}
 """
     config_path = tmp_path / "bridge.toml"
     config_path.write_text(config_text, encoding="utf-8")
@@ -151,6 +153,29 @@ def test_check_config_rc_2_on_corrupt_key_file(
     assert "config error" in capsys.readouterr().err
 
 
+def test_check_config_rejects_product_the_real_receipt_schema_cannot_issue(
+    tmp_path: Path,
+    hybrid_keys: pq.HybridSigningKeys,
+    key_manifest: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv(_STRIPE_ENV_VAR, "whsec_real_test_secret")
+    invalid = _PRICE_TEST_PRODUCT.replace(_LEGAL_TEXT_SHA256, "x")
+
+    assert (
+        cli.main(
+            [
+                "check-config",
+                "--config",
+                str(_write_config(tmp_path, hybrid_keys, key_manifest, products_toml=invalid)),
+            ]
+        )
+        == 2
+    )
+    assert "price_TEST" in capsys.readouterr().err
+
+
 # -- retry-failed -----------------------------------------------------------
 
 
@@ -186,7 +211,7 @@ def test_retry_failed_resolves_dead_letter_after_catalog_gains_the_mapping(
 
     rc = cli.main(["retry-failed", "--config", str(config_path)])
 
-    assert rc == 0
+    assert rc == 1
     assert ledger.unresolved_dead_letters() == []
     stored = ledger.get_receipt("stripe", "cs_retry_1")
     assert stored is not None
@@ -218,9 +243,88 @@ def test_retry_failed_leaves_still_unmapped_dead_letter_unresolved(
 
     rc = cli.main(["retry-failed", "--config", str(config_path)])
 
-    assert rc == 0
+    assert rc == 1
     assert len(ledger.unresolved_dead_letters()) == 1
     assert ledger.get_receipt("stripe", "cs_still_unmapped") is None
+
+
+def test_retry_failed_never_issues_an_unpaid_dead_letter_without_event_id(
+    tmp_path: Path,
+    hybrid_keys: pq.HybridSigningKeys,
+    key_manifest: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(_STRIPE_ENV_VAR, "whsec_real_test_secret")
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    event = make_session_completed_event(
+        session_id="cs_unpaid_retry",
+        payment_status="unpaid",
+        metadata={"attest_product_key": "price_TEST"},
+    )
+    event.pop("id")
+    ledger.add_dead_letter(
+        "stripe", "cs_unpaid_retry", "missing id", json.dumps(event), now="2026-07-24T10:00:00Z"
+    )
+
+    assert (
+        cli.main(
+            [
+                "retry-failed",
+                "--config",
+                str(
+                    _write_config(
+                        tmp_path, hybrid_keys, key_manifest, products_toml=_PRICE_TEST_PRODUCT
+                    )
+                ),
+            ]
+        )
+        == 0
+    )
+    assert ledger.get_receipt("stripe", "cs_unpaid_retry") is None
+    assert ledger.unresolved_dead_letters() == []
+
+
+def test_retry_failed_reenqueues_itch_dead_letter_without_replaying_purchase(
+    tmp_path: Path,
+    hybrid_keys: pq.HybridSigningKeys,
+    key_manifest: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(_STRIPE_ENV_VAR, "whsec_real_test_secret")
+    monkeypatch.setenv("ITCH_API_KEY", "itch-test")
+    monkeypatch.setenv("SMTP_PASSWORD", "smtp-test")
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    ledger.add_dead_letter(
+        "itch",
+        None,
+        "abandoned",
+        json.dumps({"email": "buyer@example.com", "game_id": "123456"}),
+        now="2026-07-24T10:00:00Z",
+    )
+    extra = """
+[itch]
+api_key_env = "ITCH_API_KEY"
+[delivery]
+smtp_host = "smtp.example.com"
+smtp_port = 587
+smtp_username = "merchant"
+smtp_password_env = "SMTP_PASSWORD"
+from_address = "receipts@example.com"
+info_url = "https://merchant.example.com/info"
+"""
+    assert (
+        cli.main(
+            [
+                "retry-failed",
+                "--config",
+                str(_write_config(tmp_path, hybrid_keys, key_manifest, extra_toml=extra)),
+            ]
+        )
+        == 0
+    )
+    assert ledger.unresolved_dead_letters() == []
+    claims = ledger.due_claims("2100-01-01T00:00:00Z")
+    assert [(claim.email, claim.game_id) for claim in claims] == [("buyer@example.com", "123456")]
 
 
 def test_retry_failed_rc_2_on_config_error(tmp_path: Path) -> None:
@@ -249,3 +353,10 @@ def test_redact_tokens_hides_download_tokens() -> None:
     # default WSGI access log must never write it.
     assert cli._redact_tokens("GET /r/abc123 HTTP/1.1") == "GET /r/<redacted> HTTP/1.1"
     assert cli._redact_tokens("GET /healthz HTTP/1.1") == "GET /healthz HTTP/1.1"
+
+
+def test_redact_tokens_hides_stripe_session_capability_from_access_log() -> None:
+    request = "GET /stripe/receipt?session_id=cs_live_secret HTTP/1.1"
+    redacted = cli._redact_tokens(request)
+    assert "cs_live_secret" not in redacted
+    assert "session_id=<redacted>" in redacted
