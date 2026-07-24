@@ -46,6 +46,14 @@ guarantee: your signing key is read into memory only to sign a receipt, and
 is never exported, logged, or written back out by the bridge — the on-disk
 copies you mounted (or backed up) are the only copies that exist.
 
+One deployment-plumbing exception: on platforms that can't mount a file
+before first boot (Render), you supply the key as a base64 environment
+variable and the container entrypoint decodes it to a `0600` file at startup,
+then unsets the variable before starting the server — so the running bridge
+still holds the key only on disk, and the base64 value lives only in your
+platform's secret store (see the Render section of [deploy.md](deploy.md)).
+Prefer a real mounted file (Compose bind mount, Fly `[[files]]`) when you can.
+
 ## 2. Create and publish your key manifest
 
 ```sh
@@ -296,7 +304,8 @@ that downloads their `.attest` receipt directly, with no email step needed.
 
 Make a real test-mode purchase (Stripe test card `4242 4242 4242 4242`), let
 the webhook fire, and download the resulting receipt (via step 8's URL, the
-email from step 5's delivery, or your own lookup against the Ledger). Then:
+email from the `[delivery]` you configured in step 3, or your own lookup
+against the Ledger). Then:
 
 ```sh
 attest verify receipt.attest --trust-dir <dir-containing-key-manifest.json>

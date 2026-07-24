@@ -19,28 +19,42 @@
 # first deploy comes up healthy, with no shell/SCP step and no crash loop.
 set -eu
 
+# Every file materialized below holds secret or trust material. umask 077 makes
+# each created file 0600 from its first byte (not dependent on the image umask),
+# and materialize() decodes to a temp path then atomically renames into place, so
+# a failed/partial `base64 -d` never leaves readable bytes at the real path.
+umask 077
+
+# materialize <dest-path> <base64-content>: decode (tolerant of GNU line-wrapped
+# base64) to a sibling temp file, then atomic rename. No secret is ever printed.
+materialize() {
+    dest="$1"
+    tmp="$dest.tmp.$$"
+    mkdir -p "$(dirname "$dest")"
+    printf '%s' "$2" | base64 -d > "$tmp"
+    mv "$tmp" "$dest"
+}
+
 if [ -n "${BRIDGE_TOML_B64:-}" ]; then
-    mkdir -p /etc/attest-bridge
-    printf '%s' "$BRIDGE_TOML_B64" | base64 -d > /etc/attest-bridge/bridge.toml
-    chmod 600 /etc/attest-bridge/bridge.toml
+    materialize /etc/attest-bridge/bridge.toml "$BRIDGE_TOML_B64"
 fi
 
 if [ -n "${KEY_MANIFEST_B64:-}" ]; then
-    mkdir -p /etc/attest-bridge
-    printf '%s' "$KEY_MANIFEST_B64" | base64 -d > /etc/attest-bridge/key-manifest.json
-    chmod 600 /etc/attest-bridge/key-manifest.json
+    materialize /etc/attest-bridge/key-manifest.json "$KEY_MANIFEST_B64"
 fi
 
 if [ -n "${ISSUER_SEED_B64:-}" ]; then
-    mkdir -p /secrets
-    printf '%s' "$ISSUER_SEED_B64" | base64 -d > /secrets/issuer.seed
-    chmod 600 /secrets/issuer.seed
+    materialize /secrets/issuer.seed "$ISSUER_SEED_B64"
 fi
 
 if [ -n "${ISSUER_MLDSA_B64:-}" ]; then
-    mkdir -p /secrets
-    printf '%s' "$ISSUER_MLDSA_B64" | base64 -d > /secrets/issuer.mldsa.json
-    chmod 600 /secrets/issuer.mldsa.json
+    materialize /secrets/issuer.mldsa.json "$ISSUER_MLDSA_B64"
 fi
+
+# Drop the decoded material from the environment before handing off to the
+# long-lived server: an inherited *_B64 var would otherwise expose full copies
+# of the signing key and config via /proc/<pid>/environ for the service
+# lifetime. After this the bridge reads the signing key only from its 0600 file.
+unset BRIDGE_TOML_B64 KEY_MANIFEST_B64 ISSUER_SEED_B64 ISSUER_MLDSA_B64
 
 exec attest-bridge serve --config /etc/attest-bridge/bridge.toml --host 0.0.0.0 --port 8080
