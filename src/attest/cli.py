@@ -40,7 +40,19 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from attest import anchor, bundle, canon, issue, keys, manifests, pq, tlog, verify
+from attest import (
+    anchor,
+    bundle,
+    canon,
+    issue,
+    keys,
+    manifests,
+    pq,
+    revocation,
+    tlog,
+    transfer,
+    verify,
+)
 
 EXIT_OK = 0
 EXIT_VERIFICATION_FAILED = 1
@@ -92,6 +104,16 @@ _MAX_STAGE2_INPUT_BYTES = {
 
 class CliUsageError(Exception):
     """A usage/IO problem this CLI can explain better than the raw exception."""
+
+
+def _manifest_version_arg(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer >= 1") from exc
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be an integer >= 1")
+    return parsed
 
 
 # --- small I/O helpers -------------------------------------------------------
@@ -264,12 +286,27 @@ def _load_trust_dir(trust_dir: Path) -> verify.TrustStore:
         raise CliUsageError(f"--trust-dir {trust_dir} is not a directory")
 
     by_issuer: dict[str, list[dict[str, Any]]] = {}
+    # G2/G3 (attest-versioning.md rev 4): artifact manifests dropped into the
+    # same --trust-dir are grouped by their own `(issuer, series)` pair — which the
+    # spec requires to equal a receipt's `work.artifact_series` (v0.1 §7.2) —
+    # so `TrustStore.artifact_manifests`/`artifact_manifest_chains` end up
+    # keyed exactly the way `verify()` looks them up. Distinguished from key
+    # manifests by the absence of `keys[]` (a key manifest always carries it;
+    # an artifact manifest never does).
+    by_issuer_series: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for path in sorted(trust_dir.glob("*.json")):
         manifest = _read_json(path)
-        issuer = manifest.get("issuer") if isinstance(manifest, dict) else None
+        if not isinstance(manifest, dict):
+            continue
+        issuer = manifest.get("issuer")
         if not isinstance(issuer, str):
             continue
-        by_issuer.setdefault(issuer, []).append(manifest)
+        if "keys" in manifest:
+            by_issuer.setdefault(issuer, []).append(manifest)
+            continue
+        series = manifest.get("series")
+        if isinstance(series, str):
+            by_issuer_series.setdefault((issuer, series), []).append(manifest)
 
     manifests_map: dict[str, dict[str, Any]] = {}
     provenance: dict[str, str] = {}
@@ -280,7 +317,20 @@ def _load_trust_dir(trust_dir: Path) -> verify.TrustStore:
         provenance[issuer] = _PROVENANCE_BUNDLE
         chains[issuer] = ordered
 
-    return verify.TrustStore(manifests=manifests_map, provenance=provenance, chains=chains)
+    artifact_manifests_map: dict[str, dict[str, dict[str, Any]]] = {}
+    artifact_manifest_chains: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    for (issuer, series), am_versions in by_issuer_series.items():
+        am_ordered = sorted(am_versions, key=lambda m: m.get("manifest_version", 0))
+        artifact_manifests_map.setdefault(issuer, {})[series] = am_ordered[-1]
+        artifact_manifest_chains.setdefault(issuer, {})[series] = am_ordered
+
+    return verify.TrustStore(
+        manifests=manifests_map,
+        provenance=provenance,
+        chains=chains,
+        artifact_manifests=artifact_manifests_map,
+        artifact_manifest_chains=artifact_manifest_chains,
+    )
 
 
 def _safe_name(value: str) -> str:
@@ -739,6 +789,7 @@ def _cmd_manifest_artifacts(args: argparse.Namespace) -> int:
         artifacts,
         signing_kp,
         args.signing_kid,
+        manifest_version=args.manifest_version,
     )
     if not manifests.verify_artifact_manifest(manifest, key_manifest):
         raise CliUsageError(
@@ -752,6 +803,7 @@ def _cmd_manifest_artifacts(args: argparse.Namespace) -> int:
             "issuer": args.issuer,
             "series": args.series,
             "version": args.version,
+            "manifest_version": args.manifest_version,
         }
     )
     return EXIT_OK
@@ -812,6 +864,139 @@ def _cmd_issue(args: argparse.Namespace) -> int:
         _write_secret_text(args.salt_out, keys.b64u(salt))
 
     _print_json({"out": str(args.out), "receipt_id": payload.get("receipt_id")})
+    return EXIT_OK
+
+
+# --- transfer: issuer-mediated transfer operations (v0.2 §17) ----------------
+
+
+def _cmd_transfer_authorize(args: argparse.Namespace) -> int:
+    if _same_file_target(args.receipt, args.out):
+        # Same input-vs-output aliasing hazard as manifest init/issue (finding 18
+        # policy): writing --out would clobber the receipt just read.
+        raise CliUsageError("--receipt and --out must be different paths")
+    if _same_file_target(args.holder_seed, args.out):
+        # Same input-vs-output aliasing hazard as manifest init/issue (finding 18
+        # policy): writing --out would clobber the holder signing seed just read.
+        raise CliUsageError("--holder-seed and --out must be different paths")
+    envelope = _read_json(args.receipt)
+    if not isinstance(envelope, dict):
+        raise CliUsageError(f"{args.receipt} must contain a JSON object")
+    payload = envelope.get("payload")
+    if not isinstance(payload, dict):
+        raise CliUsageError(f"{args.receipt} is missing object member 'payload'")
+    receipt_id = payload.get("receipt_id")
+    if not isinstance(receipt_id, str):
+        raise CliUsageError(f"{args.receipt} payload is missing string 'receipt_id'")
+
+    holder_kp = _load_seed_kp(args.holder_seed)
+    sig = transfer.sign_authorization(
+        receipt_id, args.new_holder_pubkey, args.transferred_at, holder_kp
+    )
+    # Not secret: a holder-authorization signature is meant to be handed to
+    # the issuer to build the transfer record, exactly like any other
+    # signed side-document — unlike a seed or salt, its disclosure is not a
+    # security concern.
+    _write_json_file(args.out, {"sig": keys.b64u(sig)})
+    _print_json({"out": str(args.out), "receipt_id": receipt_id})
+    return EXIT_OK
+
+
+def _cmd_transfer_record(args: argparse.Namespace) -> int:
+    if _same_file_target(args.receipt, args.out):
+        # The issuer must read the old receipt before it can verify the
+        # outgoing holder's authorization; never let --out clobber that input.
+        raise CliUsageError("--receipt and --out must be different paths")
+    if _same_file_target(args.seed, args.out):
+        raise CliUsageError("--seed and --out must be different paths")
+    if args.mldsa_seed is not None and _same_file_target(args.mldsa_seed, args.out):
+        raise CliUsageError("--mldsa-seed and --out must be different paths")
+    if _same_file_target(args.holder_authorization, args.out):
+        # Same input-vs-output aliasing hazard as manifest init/issue (finding 18
+        # policy): writing --out would clobber the holder authorization just read.
+        raise CliUsageError("--holder-authorization and --out must be different paths")
+    if args.revocation_out is not None and (
+        _same_file_target(args.revocation_out, args.seed)
+        or _same_file_target(args.revocation_out, args.receipt)
+        or _same_file_target(args.revocation_out, args.holder_authorization)
+        or _same_file_target(args.revocation_out, args.out)
+        or (
+            args.mldsa_seed is not None
+            and _same_file_target(args.revocation_out, args.mldsa_seed)
+        )
+    ):
+        # Same input-vs-output aliasing hazard as manifest init/issue (finding 18
+        # policy), extended to the second transfer output.
+        raise CliUsageError(
+            "--revocation-out must differ from --receipt, --seed, --mldsa-seed, "
+            "--holder-authorization, and --out"
+        )
+
+    envelope = _read_json(args.receipt)
+    if not isinstance(envelope, dict):
+        raise CliUsageError(f"{args.receipt} must contain a JSON object")
+    payload = envelope.get("payload")
+    if not isinstance(payload, dict):
+        raise CliUsageError(f"{args.receipt} is missing object member 'payload'")
+    receipt_id = payload.get("receipt_id")
+    if not isinstance(receipt_id, str):
+        raise CliUsageError(f"{args.receipt} payload is missing string 'receipt_id'")
+    buyer = payload.get("buyer")
+    holder_pubkey = buyer.get("pubkey") if isinstance(buyer, dict) else None
+    if not isinstance(holder_pubkey, str):
+        raise CliUsageError(
+            f"{args.receipt} payload must carry a non-null buyer.pubkey to transfer"
+        )
+
+    holder_authorization = _read_json(args.holder_authorization)
+    if not isinstance(holder_authorization, dict) or not isinstance(
+        holder_authorization.get("sig"), str
+    ):
+        raise CliUsageError(f"{args.holder_authorization} must be a JSON object {{'sig': <b64u>}}")
+    try:
+        holder_sig = keys.b64u_decode(holder_authorization["sig"])
+    except (TypeError, ValueError) as exc:
+        raise CliUsageError(f"{args.holder_authorization} has a malformed 'sig': {exc}") from exc
+
+    authorization_record = {
+        "receipt_id": receipt_id,
+        "new_holder_pubkey": args.new_holder_pubkey,
+        "transferred_at": args.transferred_at,
+        "holder_authorization": holder_authorization,
+    }
+    if not transfer.verify_authorization(authorization_record, holder_pubkey):
+        raise CliUsageError(
+            "holder authorization does not verify against the old receipt's buyer.pubkey"
+        )
+
+    ed_signing_kp = _load_seed_kp(args.seed)
+    signing_kp: keys.SigningKeyPair | pq.HybridSigningKeys = ed_signing_kp
+    if args.mldsa_seed is not None:
+        mldsa_kp = _load_mldsa_kp(args.mldsa_seed)
+        signing_kp = pq.HybridSigningKeys(ed=ed_signing_kp, mldsa=mldsa_kp)
+
+    record = transfer.build_record(
+        receipt_id,
+        args.new_receipt_id,
+        args.new_holder_pubkey,
+        args.transferred_at,
+        holder_sig,
+        signing_kp,
+        args.kid,
+    )
+    _write_json_file(args.out, record)
+    report = {
+        "out": str(args.out),
+        "receipt_id": receipt_id,
+        "new_receipt_id": args.new_receipt_id,
+    }
+    if args.revocation_out is not None:
+        revocation_record = revocation.build_record(
+            receipt_id, "transferred", args.transferred_at, signing_kp, args.kid
+        )
+        _write_json_file(args.revocation_out, revocation_record)
+        report["revocation_out"] = str(args.revocation_out)
+    _print_json(report)
     return EXIT_OK
 
 
@@ -1120,6 +1305,35 @@ def _cmd_log_anchor(args: argparse.Namespace) -> int:
             f"match this log's origin {origin!r}"
         )
 
+    # G4/I1 (attest-v0.2.md §11.1.1): an anchors evidence bundle carries
+    # exactly one anchor_profile, and every proof in it MUST commit under
+    # that profile — this command only ever produces `signed-note-v2`
+    # proofs (see below), so appending to a bundle that already carries
+    # proofs under a DIFFERENT profile would silently relabel those retained
+    # proofs' profile without re-anchoring them. Refuse instead of
+    # overwriting; check this BEFORE reading --ots-proof at all, since the
+    # append is refused regardless of what it contains.
+    existing_anchors = evidence.get("anchors")
+    existing_proofs: list[Any] = (
+        existing_anchors["proofs"]
+        if isinstance(existing_anchors, dict) and isinstance(existing_anchors.get("proofs"), list)
+        else []
+    )
+    if existing_proofs:
+        existing_profile = (
+            existing_anchors.get("anchor_profile") if isinstance(existing_anchors, dict) else None
+        )
+        if existing_profile is None:
+            existing_profile = "note-v1"
+        if existing_profile != "signed-note-v2":
+            raise CliUsageError(
+                f"{args.evidence} already carries {len(existing_proofs)} proof(s) under "
+                f"anchor_profile {existing_profile!r}; an anchors evidence bundle carries "
+                "exactly one anchor_profile and every proof MUST commit under it "
+                "(attest-v0.2.md §11.1.1) — produce a fresh signed-note-v2 bundle instead, "
+                "or re-anchor every proof in this bundle with v2 tooling"
+            )
+
     ots_proof = _read_json(
         args.ots_proof, max_bytes=_MAX_STAGE2_INPUT_BYTES["json"], input_name="--ots-proof"
     )
@@ -1129,8 +1343,8 @@ def _cmd_log_anchor(args: argparse.Namespace) -> int:
     # its content: this mirrors --attest-version selecting the signing
     # profile elsewhere in this CLI, not the fail-open "trust the artifact's
     # own self-description" antipattern (there is no accept/reject decision
-    # here — attaching is purely mechanical; `verify --transparency` is the
-    # one boundary that actually judges this evidence).
+    # here about `kind` — `verify --transparency` is still the one boundary
+    # that judges the evidence's cryptographic standing).
     new_proofs: list[dict[str, Any]] = [{**ots_proof, "kind": "ots"}]
     if args.rfc3161_token is not None:
         token_b64 = base64.b64encode(
@@ -1142,16 +1356,55 @@ def _cmd_log_anchor(args: argparse.Namespace) -> int:
         ).decode("ascii")
         new_proofs.append({"kind": "rfc3161", "token_b64": token_b64})
 
-    existing_anchors = evidence.get("anchors")
-    existing_proofs: list[Any] = (
-        existing_anchors["proofs"]
-        if isinstance(existing_anchors, dict) and isinstance(existing_anchors.get("proofs"), list)
-        else []
+    # G4/I2 (attest-v0.2.md §11.1.1): this command only ever stamps
+    # `anchor_profile: "signed-note-v2"` (below), so a --ots-proof whose
+    # op-chain does not actually commit over `signed_note_bytes` would
+    # produce evidence that mislabels its own commitment — catch that here,
+    # at attachment time, instead of only failing later inside
+    # `verify --transparency`'s fail-closed op-chain replay.
+    v2_seed = hashlib.sha256(evidence_checkpoint.signed_note_bytes).digest()
+    v2_accumulator, v2_warning = anchor.replay_ots_op_chain(v2_seed, ots_proof.get("ops"))
+    proof_root = ots_proof.get("header_merkle_root")
+    v2_matches = (
+        v2_warning is None
+        and v2_accumulator is not None
+        and isinstance(proof_root, str)
+        and v2_accumulator.hex() == proof_root
     )
+    if not v2_matches:
+        legacy_seed = hashlib.sha256(evidence_checkpoint.note_bytes).digest()
+        legacy_accumulator, legacy_warning = anchor.replay_ots_op_chain(
+            legacy_seed, ots_proof.get("ops")
+        )
+        legacy_matches = (
+            legacy_warning is None
+            and legacy_accumulator is not None
+            and isinstance(proof_root, str)
+            and legacy_accumulator.hex() == proof_root
+        )
+        if legacy_matches:
+            raise CliUsageError(
+                f"{args.ots_proof}'s op-chain was produced by pre-G4 tooling committing "
+                "note_bytes (the unsigned checkpoint header alone); anchor_profile "
+                "signed-note-v2 requires the full signed note (signed_note_bytes) — "
+                "re-produce the OTS proof against the signed checkpoint"
+            )
+        raise CliUsageError(
+            f"{args.ots_proof}'s op-chain does not replay to its own header_merkle_root "
+            f"from the signed-note-v2 seed SHA256(signed_note_bytes)={v2_seed.hex()} — "
+            "re-produce the OTS proof against this evidence's checkpoint"
+        )
+
     updated_evidence = dict(evidence)
     updated_evidence["anchors"] = {
         "checkpoint": checkpoint_text,
         "proofs": [*existing_proofs, *new_proofs],
+        # G4 (attest-v0.2.md §11.1.1): newly-produced anchor evidence MUST
+        # declare the v2 commitment profile; the seed check above already
+        # confirmed --ots-proof's op-chain replays from
+        # SHA-256(checkpoint.signed_note_bytes) (header AND signature
+        # lines), not the legacy SHA-256(checkpoint.note_bytes)-only seed.
+        "anchor_profile": "signed-note-v2",
     }
     serialized = canon.dumps(updated_evidence)
     if len(serialized) > verify._MAX_TRANSPARENCY_EVIDENCE_LEN:
@@ -1547,7 +1800,9 @@ def _cmd_check_artifact(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="attest", description="attest v0.1 operator CLI")
+    parser = argparse.ArgumentParser(
+        prog="attest", description="attest operator CLI (v0.1 and v0.2)"
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("keygen", help="Generate an Ed25519 keypair")
@@ -1636,6 +1891,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--issuer", required=True)
     p.add_argument("--series", required=True)
     p.add_argument("--version", required=True, type=int)
+    p.add_argument(
+        "--manifest-version",
+        required=True,
+        type=_manifest_version_arg,
+        help="G2/G3 currency counter (attest-versioning.md rev 4) — distinct from --version "
+        "(the series' own release number); REQUIRED on every manifest built going forward",
+    )
     p.add_argument("--released-at", required=True)
     p.add_argument("--artifacts", required=True, type=Path, help="JSON file: array of artifacts")
     p.add_argument("--signing-kid", required=True)
@@ -1670,6 +1932,57 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--out", required=True, type=Path, help="output envelope JSON path")
     p.set_defaults(func=_cmd_issue)
+
+    p_transfer = sub.add_parser("transfer", help="Issuer-mediated transfer operations (v0.2 §17)")
+    transfer_sub = p_transfer.add_subparsers(dest="transfer_command", required=True)
+
+    p = transfer_sub.add_parser(
+        "authorize", help="Sign the OUTGOING holder's transfer authorization"
+    )
+    p.add_argument("--receipt", required=True, type=Path, help="OLD receipt envelope JSON")
+    p.add_argument(
+        "--new-holder-pubkey", required=True, help="incoming holder's Ed25519 pubkey, b64u"
+    )
+    p.add_argument("--transferred-at", required=True, help="ISO-8601 UTC signed time")
+    p.add_argument(
+        "--holder-seed", required=True, type=Path, help="OLD receipt's own buyer.pubkey seed"
+    )
+    p.add_argument("--out", required=True, type=Path, help="output {'sig': <b64u>} JSON path")
+    p.set_defaults(func=_cmd_transfer_authorize)
+
+    p = transfer_sub.add_parser(
+        "record", help="Verify holder authorization and sign an issuer-mediated transfer record"
+    )
+    p.add_argument("--receipt", required=True, type=Path, help="OLD receipt envelope JSON")
+    p.add_argument("--new-receipt-id", required=True, help="NEW receipt_id (ULID)")
+    p.add_argument(
+        "--new-holder-pubkey", required=True, help="incoming holder's Ed25519 pubkey, b64u"
+    )
+    p.add_argument("--transferred-at", required=True, help="ISO-8601 UTC signed time")
+    p.add_argument(
+        "--holder-authorization",
+        required=True,
+        type=Path,
+        help="JSON file from `transfer authorize`: {'sig': <b64u>}",
+    )
+    p.add_argument("--seed", required=True, type=Path, help="issuer signing key seed")
+    p.add_argument("--kid", required=True)
+    p.add_argument(
+        "--mldsa-seed",
+        type=Path,
+        default=None,
+        help="ML-DSA-65 key file (from `keygen --hybrid`); makes the record signature hybrid",
+    )
+    p.add_argument(
+        "--revocation-out",
+        type=Path,
+        default=None,
+        help="also write a status:'transferred' revocation record for the old receipt",
+    )
+    p.add_argument(
+        "--out", required=True, type=Path, help="output signed transfer record JSON path"
+    )
+    p.set_defaults(func=_cmd_transfer_record)
 
     p_log = sub.add_parser(
         "log", help="Transparency-log operator/holder commands (offline-signer split)"

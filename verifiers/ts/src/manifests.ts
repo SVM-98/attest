@@ -1,4 +1,4 @@
-import { JsonObject, JsonValue, canonicalBytes } from './canon.js'
+import { JsonObject, JsonValue, canonicalBytes, dumps } from './canon.js'
 import { verifyStrict } from './ed25519.js'
 import { verifyStrict as verifyMldsaStrict } from './mldsa.js'
 import { b64uDecode } from './b64u.js'
@@ -17,11 +17,25 @@ export interface TrustStore {
   manifests: Record<string, JsonObject>
   provenance: Record<string, string>
   chains?: Record<string, JsonObject[]>
+  // G2/G3 manifest currency (attest-versioning.md rev 4; v0.1 §7.2/§7.3
+  // amendment) — the artifact-manifest analog of manifests/chains above,
+  // scoped as issuer -> work.artifact_series -> manifest/history. Both
+  // optional and backward-compatible (mirrors chains?): absent means zero
+  // behavior change.
+  artifact_manifests?: Record<string, Record<string, JsonObject>>
+  artifact_manifest_chains?: Record<string, Record<string, JsonObject[]>>
 }
 
 function asObject(v: JsonValue | undefined): JsonObject | null {
   return v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as JsonObject) : null
 }
+
+// G1 normative ceilings (attest-versioning.md §5 amendment; v0.1 §11/§15,
+// v0.2 §6/§16) — conformance-surface structural bounds a conforming
+// verifier MUST enforce on the untrusted keys[]/artifacts[] arrays before
+// doing any signature work over them. Byte-identical to manifests.py.
+export const MAX_MANIFEST_KEYS = 256
+export const MAX_ARTIFACT_ENTRIES = 4096
 
 export function findKey(manifest: JsonObject, kid: string): JsonObject | null {
   const keys = manifest['keys']
@@ -64,6 +78,10 @@ export function verifySignatureBlock(payload: Uint8Array, sigBlock: JsonObject, 
 
 export function verifyKeyManifest(manifest: JsonObject): boolean {
   try {
+    // Fail closed (never throw) if keys[] exceeds MAX_MANIFEST_KEYS — the
+    // G1 ceiling: an oversized array is not evaluated at all.
+    const entriesForCeiling = manifest['keys']
+    if (Array.isArray(entriesForCeiling) && entriesForCeiling.length > MAX_MANIFEST_KEYS) return false
     const sigBlock = asObject(manifest['manifest_signature'])
     if (!sigBlock) return false
     const kid = sigBlock['kid']
@@ -124,6 +142,42 @@ export function chainContinuous(chain: JsonObject[]): boolean {
   return true
 }
 
+// G3 currency rule (attest-versioning.md rev 4; v0.1 §7.2/§7.3 amendment):
+// true iff `candidate` is currency-conformant for `trusted` on the same
+// issuer/series. Currency is evaluable only when both manifest_version values
+// are bigint >= 1: a regression or an advancing gap is discontinuous. Legacy
+// manifests are warn-only and return true. Mirrors manifests.py.
+//
+// Does NOT verify self-consistency or signer-trust of either manifest
+// (unlike checkContinuity, which can call verifyKeyManifest on both sides
+// with no external input) — verifyArtifactManifest needs a resolving key
+// manifest this function's (trusted, candidate) contract has no room for, so
+// that stays the caller's job. Callers MUST authenticate both sides with
+// verifyArtifactManifest before calling this metadata-only predicate. Fails
+// closed on issuer/series mismatch; a legacy or invalid version is not
+// currency-evaluable and returns true.
+export function checkArtifactContinuity(trusted: JsonObject, candidate: JsonObject): boolean {
+  if (trusted['issuer'] !== candidate['issuer']) return false
+  if (trusted['series'] !== candidate['series']) return false
+  const tv = trusted['manifest_version'], cv = candidate['manifest_version']
+  if (typeof tv !== 'bigint' || tv < 1n || typeof cv !== 'bigint' || cv < 1n) return true
+  // Strict N -> N+1 between two DISTINCT versioned manifests. A same-version
+  // re-delivery is continuous only if the two manifests are value-identical
+  // (canonical-form compare, as the chain tail compare in verify.ts does);
+  // two DIFFERENT manifests at the SAME version is the equivocation shape and
+  // must not be treated as continuous.
+  if (cv === tv) return dumps(trusted) === dumps(candidate)
+  return cv === tv + 1n
+}
+
+export function artifactChainContinuous(chain: JsonObject[]): boolean {
+  if (chain.length < 2) return true
+  for (let i = 0; i < chain.length - 1; i++) {
+    if (!checkArtifactContinuity(chain[i]!, chain[i + 1]!)) return false
+  }
+  return true
+}
+
 // AND rule (v0.2, mirrors verifyKeyManifest/manifests.py's
 // verify_artifact_manifest): if the signer's keyManifest entry is hybrid
 // (carries pub_ml_dsa_65), manifest_signature MUST also carry a valid
@@ -133,6 +187,16 @@ export function chainContinuous(chain: JsonObject[]): boolean {
 // byte-for-byte (Stage 2 Task 6/8 sibling-patch parity).
 export function verifyArtifactManifest(manifest: JsonObject, keyManifest: JsonObject): boolean {
   try {
+    const manifestVersion = manifest['manifest_version']
+    if ('manifest_version' in manifest && (typeof manifestVersion !== 'bigint' || manifestVersion < 1n)) {
+      return false
+    }
+    // G1 ceiling: fail closed if artifacts[] exceeds MAX_ARTIFACT_ENTRIES,
+    // mirroring verifyKeyManifest's MAX_MANIFEST_KEYS check.
+    const artifactsForCeiling = manifest['artifacts']
+    if (Array.isArray(artifactsForCeiling) && artifactsForCeiling.length > MAX_ARTIFACT_ENTRIES) {
+      return false
+    }
     if (!verifyKeyManifest(keyManifest)) return false
     const sigBlock = asObject(manifest['manifest_signature'])
     if (!sigBlock || typeof sigBlock['kid'] !== 'string') return false
@@ -142,4 +206,24 @@ export function verifyArtifactManifest(manifest: JsonObject, keyManifest: JsonOb
     if (!withinReleaseWindow(manifest['released_at'], entry)) return false
     return verifySignatureBlock(signableManifestBytes(manifest), sigBlock, entry)
   } catch { return false }
+}
+
+// G6 mixed-keyset detection (v0.2 §2.3/§13 amendment): True iff `manifest`
+// declares the hybrid profile (at least one keys[] entry carries
+// pub_ml_dsa_65) AND ALSO holds at least one Ed25519-only key (no
+// pub_ml_dsa_65) whose status is "active". See manifests.py's
+// has_active_ed_only_sibling for the full rationale (attack_mixed_keyset_
+// hijack) — never throws, malformed keys[] entries are ignored.
+export function hasActiveEdOnlySibling(manifest: JsonObject): boolean {
+  const entries = manifest['keys']
+  if (!Array.isArray(entries)) return false
+  const hasHybridKey = entries.some((e) => {
+    const o = asObject(e)
+    return o !== null && 'pub_ml_dsa_65' in o
+  })
+  if (!hasHybridKey) return false
+  return entries.some((e) => {
+    const o = asObject(e)
+    return o !== null && !('pub_ml_dsa_65' in o) && o['status'] === 'active'
+  })
 }

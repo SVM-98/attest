@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import importlib.resources
+import json
 from pathlib import Path
 
-from attest import validate
+import pytest
+
+from attest import canon, validate
+from attest.keys import b64u
 
 from .helpers import make_payload
+
+_PUBKEY = b64u(bytes(32))
 
 
 def test_valid_example_payload_passes() -> None:
@@ -71,3 +77,106 @@ def test_attest_version_unknown_rejected() -> None:
     errors = validate.validate_payload(payload)
 
     assert errors
+
+
+# --- D1 holder binding (v0.2 §17.8) ------------------------------------------
+
+
+def test_v02_transferable_true_requires_pubkey() -> None:
+    payload = make_payload(attest_version="0.2")
+    payload["license"]["transferable"] = True
+    payload["buyer"]["pubkey"] = None
+
+    errors = validate.validate_payload(payload)
+
+    assert any("pubkey" in e for e in errors)
+
+
+def test_v01_transferable_true_null_pubkey_still_valid() -> None:
+    payload = make_payload(attest_version="0.1")
+    payload["license"]["transferable"] = True
+    payload["buyer"]["pubkey"] = None
+
+    assert validate.validate_payload(payload) == []
+
+
+def test_v02_transferable_true_with_pubkey_present_is_valid() -> None:
+    payload = make_payload(attest_version="0.2")
+    payload["license"]["transferable"] = True
+    payload["buyer"]["pubkey"] = _PUBKEY
+
+    assert validate.validate_payload(payload) == []
+
+
+def test_v02_transferable_false_null_pubkey_still_valid() -> None:
+    payload = make_payload(attest_version="0.2")
+    payload["license"]["transferable"] = False
+    payload["buyer"]["pubkey"] = None
+
+    assert validate.validate_payload(payload) == []
+
+
+# --- not_transferable_before (v0.2 §17.7) ------------------------------------
+
+
+def test_not_transferable_before_accepts_iso_and_rejects_garbage() -> None:
+    payload = make_payload()
+    payload["license"]["not_transferable_before"] = "2026-07-23T00:00:00Z"
+
+    assert validate.validate_payload(payload) == []
+
+    payload["license"]["not_transferable_before"] = "not-a-date"
+
+    errors = validate.validate_payload(payload)
+
+    assert any("not_transferable_before" in e for e in errors)
+
+
+# --- G1 normative ceilings (attest-versioning.md §5 amendment) --------------
+
+
+def test_validate_envelope_size_accepts_at_ceiling() -> None:
+    assert validate.validate_envelope_size(b"x" * validate.MAX_ENVELOPE_BYTES) == []
+
+
+def test_validate_envelope_size_rejects_over_ceiling() -> None:
+    violations = validate.validate_envelope_size(b"x" * (validate.MAX_ENVELOPE_BYTES + 1))
+
+    assert any(
+        "envelope exceeds" in v and str(validate.MAX_ENVELOPE_BYTES) in v for v in violations
+    )
+
+
+# `validate.validate_json_depth` was deleted in the 2026-07-22 fix wave: it
+# duplicated `canon.py`'s own parse-time nesting-depth cap byte-for-byte (a
+# parsed tree handed to it could never exceed the cap, since `canon.
+# loads_strict` already rejects deeper input before a parsed tree exists) —
+# see `validate.py`'s `MAX_JSON_DEPTH` docstring for the redundant-check
+# deletion rationale. These tests cover the single source of truth directly.
+
+
+def test_max_json_depth_aliases_canon_max_depth() -> None:
+    """`validate.MAX_JSON_DEPTH` is a single-source-of-truth alias of
+    `canon.MAX_DEPTH` (256), not a second, independently-defined ceiling —
+    the previous `MAX_JSON_DEPTH = 32` duplicated and shrank canon.py's own
+    parse-time cap, rejecting two previously-conforming vectors
+    (`21-canon-strict/b-depth-255`, `c-depth-256`) in violation of
+    attest-versioning.md §2's additive-pattern rule."""
+    assert validate.MAX_JSON_DEPTH == canon.MAX_DEPTH == 256
+
+
+def test_json_nesting_accepted_exactly_at_ceiling() -> None:
+    nested: object = "leaf"
+    for _ in range(validate.MAX_JSON_DEPTH):
+        nested = {"n": nested}
+
+    assert canon.loads_strict(json.dumps(nested).encode("utf-8")) is not None
+
+
+def test_json_nesting_rejected_one_past_ceiling() -> None:
+    nested: object = "leaf"
+    for _ in range(validate.MAX_JSON_DEPTH + 1):
+        nested = {"n": nested}
+
+    with pytest.raises(canon.CanonError, match="maximum nesting depth exceeded"):
+        canon.loads_strict(json.dumps(nested).encode("utf-8"))

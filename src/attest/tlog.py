@@ -48,8 +48,12 @@ _NODE_PREFIX = b"\x01"  # RFC 6962 §2.1: MTH(D[n]) = SHA-256(0x01 || left || ri
 
 _TYPE_KEY_MANIFEST = "key-manifest"
 _TYPE_RECEIPT = "receipt"
+_TYPE_REVOCATION_RECORD = "revocation-record"
+_TYPE_TRANSFER_RECORD = "transfer-record"
 _KEY_MANIFEST_FIELDS = frozenset({"type", "issuer", "manifest_version", "manifest_sha256"})
 _RECEIPT_FIELDS = frozenset({"type", "issuer", "core_sha256"})
+_REVOCATION_RECORD_FIELDS = frozenset({"type", "issuer", "record_sha256"})
+_TRANSFER_RECORD_FIELDS = frozenset({"type", "issuer", "record_sha256"})
 
 # Same lowercase-DNS shape as the receipt schema's `issuer.id` pattern
 # (src/attest/schema/attest-receipt.schema.json) — kept in sync by hand,
@@ -356,7 +360,7 @@ def encode_entry(entry: dict[str, Any]) -> bytes:
     """Validate `entry` against a CLOSED schema and return its canonical
     (attest-JCS) bytes — the exact bytes that get leaf-hashed into the log.
 
-    Two entry types, exactly these members each (extras rejected):
+    Exactly four entry types, exactly these members each (extras rejected):
 
     - `key-manifest`: `{"type", "issuer", "manifest_version", "manifest_sha256"}`,
       where `manifest_sha256 = SHA-256(JCS(manifest))` (lowercase hex).
@@ -365,6 +369,22 @@ def encode_entry(entry: dict[str, Any]) -> bytes:
       a NON-authenticated hint only — a convenience for log browsing/
       filtering, never a trust anchor; the receipt's own signature is what
       binds it to an issuer.
+    - `revocation-record` (v0.2 §8, G5): `{"type", "issuer", "record_sha256"}`,
+      where `record_sha256 = attest.revocation.record_hash(record)` —
+      `SHA-256(JCS(record))` over the ENTIRE signed revocation record
+      (including its own `signature` member), the same canonical form
+      `revocation.py` already builds and verifies the record's signature
+      over. `issuer` here is the same NON-authenticated browsing hint as
+      `receipt`'s — the record's own signature is what binds it to an
+      issuer, checked by `revocation.verify_record`, never by this entry.
+    - `transfer-record` (v0.2 §8/§17.1, Stage 3): `{"type", "issuer",
+      "record_sha256"}`, where `record_sha256 = attest.transfer.record_hash(record)` —
+      `SHA-256(JCS(record))` over the ENTIRE signed transfer record
+      (including its own `signature` member), the same canonical form
+      `transfer.py` already builds and verifies the record's signature over.
+      `issuer` here is the same NON-authenticated browsing hint as the other
+      entry types' — the record's own signature is what binds it to an
+      issuer, checked by `transfer.verify_record`, never by this entry.
 
     Raises `TlogError` on an unknown `type`, a missing/extra member, or a
     member with the wrong value shape.
@@ -383,6 +403,14 @@ def encode_entry(entry: dict[str, Any]) -> bytes:
         _require_fields(entry, _RECEIPT_FIELDS)
         _require_issuer(entry)
         _require_hex64(entry, "core_sha256")
+    elif entry_type == _TYPE_REVOCATION_RECORD:
+        _require_fields(entry, _REVOCATION_RECORD_FIELDS)
+        _require_issuer(entry)
+        _require_hex64(entry, "record_sha256")
+    elif entry_type == _TYPE_TRANSFER_RECORD:
+        _require_fields(entry, _TRANSFER_RECORD_FIELDS)
+        _require_issuer(entry)
+        _require_hex64(entry, "record_sha256")
     else:
         raise TlogError(f"unknown entry type: {entry_type!r}")
 
@@ -506,12 +534,26 @@ class Checkpoint:
     `note_bytes` is exactly the bytes a note signature is computed over:
     the three header lines (origin, tree size, base64 root) through their
     final newline, excluding the blank line separating them from signatures.
+
+    `signed_note_bytes` is the FULL checkpoint text as parsed — the same
+    header lines, the blank line, AND every C2SP signature line, byte-for-
+    byte the original input to `parse_checkpoint`/`verify_checkpoint`
+    (never re-serialized). `anchor.py`'s v2 anchor profile
+    (`"signed-note-v2"`, attest-v0.2.md §11.1) commits an OTS op-chain over
+    this instead of `note_bytes` alone: `note_bytes` is unsigned-header-only
+    text that exists identically before and after the note is actually
+    signed, so a v1 (`note_bytes`-only) OTS anchor proves only that SOME
+    note with this header existed by a given time, not that anyone had
+    signed it yet — the pre-anchor-then-sign gap TM-33's residual risk
+    documents. `signed_note_bytes` contains the real signature-line bytes,
+    so a v2 anchor cannot exist before the note was actually signed.
     """
 
     origin: str
     tree_size: int
     root: bytes
     note_bytes: bytes
+    signed_note_bytes: bytes
 
 
 @dataclass(frozen=True)
@@ -695,7 +737,22 @@ def _parse(text: str) -> tuple[Checkpoint, list[tuple[str, bytes]]]:
         raise TlogError(f"root must decode to {_HASH_LEN} bytes, got {len(root)}")
     signatures = _parse_signature_lines(sig_lines)
     note_bytes = _note_bytes(header)
-    checkpoint = Checkpoint(origin=origin, tree_size=tree_size, root=root, note_bytes=note_bytes)
+    # `text` is NOT pure ASCII (each C2SP signature line opens with the
+    # em dash U+2014, a 3-byte UTF-8 sequence) but IS guaranteed valid UTF-8
+    # by this point: `_validate_origin`, `_parse_tree_size`, base64 root
+    # decoding, and `_parse_signature_lines` (key-name grammar + base64 blob
+    # charset) each already constrain their slice of `text` to printable
+    # ASCII, and the em dash itself came from this same already-decoded
+    # `str`, so `.encode()` can't raise here — this is not a
+    # re-serialization, it's the original input bytes back.
+    signed_note_bytes = text.encode()
+    checkpoint = Checkpoint(
+        origin=origin,
+        tree_size=tree_size,
+        root=root,
+        note_bytes=note_bytes,
+        signed_note_bytes=signed_note_bytes,
+    )
     return checkpoint, signatures
 
 

@@ -1,11 +1,14 @@
 import { sha256 } from '@noble/hashes/sha2'
 import { bytesToHex } from '@noble/curves/utils.js'
 import { JsonObject, JsonValue, canonicalBytes, dumps, CanonError, loadsStrict } from './canon.js'
-import { TrustStore, findKey, withinValidity, chainContinuous } from './manifests.js'
+import {
+  TrustStore, findKey, withinValidity, chainContinuous, MAX_MANIFEST_KEYS, hasActiveEdOnlySibling,
+  artifactChainContinuous, verifyArtifactManifest,
+} from './manifests.js'
 import { verifyStrict, Ed25519LengthError } from './ed25519.js'
 import { verifyStrict as verifyMldsaStrict, ML_DSA_65_ALG } from './mldsa.js'
 import { b64uDecode } from './b64u.js'
-import { validatePayload, SCHEMA_TOP_LEVEL_KEYS } from './schema.js'
+import { validatePayload, SCHEMA_TOP_LEVEL_KEYS, validateEnvelopeSize } from './schema.js'
 import { classifyRevocation, MAX_REVOCATION_RECORDS } from './revocation.js'
 import { computeCommitment, verifyChallenge } from './commitment.js'
 import { b64uEncode } from './b64u.js'
@@ -23,7 +26,7 @@ import {
   ERR, WARN, unsupportedAttestVersion, signaturesCount, unsupportedSigAlg, noTrustedManifest,
   noKeyInManifest, keyCompromised, keyRetired, issuedAtOutsideWindow, malformedKeyMaterial,
   malformedSigMaterial, unknownField, unknownEol, keyEntryNotHybrid, pyRepr, codePointLength,
-  VERIFY_TRANSPARENCY_WARN,
+  VERIFY_TRANSPARENCY_WARN, manifestExceedsKeys,
 } from './messages.js'
 
 // attest_version values this verifier's verify() step 1 accepts (v0.1 single-sig,
@@ -74,11 +77,34 @@ export interface VerifyTransparencyOptions {
   transparency?: JsonValue | null
   logKeys?: LogKey[] | null
   anchorPolicy?: AnchorPolicy | null
+  // G5 (v0.2 §8/§15 amendment, TM-47): one untrusted transparency evidence
+  // bundle for a SPECIFIC `refund_window` revocation record in
+  // `revocationView`, reusing the SAME `logKeys`/`anchorPolicy`
+  // configuration — see `classifyRevocation`'s deadline-effectiveness rule.
+  revocationEvidence?: JsonValue | null
+  // v0.2 Stage 3's (§17) evidence channel — the SECOND sanctioned exception
+  // to "Stage 2 is purely informational", after G5's `revocationEvidence`:
+  // an untrusted list of claims, each `{record: <a transfer.ts transfer
+  // record>, evidence: <§10.2 evidence bundle>}`, reusing the SAME
+  // `logKeys`/`anchorPolicy` Stage-2-capability gate (both supplied). A
+  // `status: "transferred"` record in `revocationView` is honored —
+  // `revocation: "transferred"`, capping `ok` the same way `"revoked"`
+  // already does — only when this channel proves a BACKED transfer record
+  // for the same receipt_id; see `classifyRevocation`'s transferred branch
+  // (revocation.ts). A caller that never supplies `transferView` sees ZERO
+  // behavior change, exactly like every other Stage 2/3 addition. Typed as
+  // a list (not a single JsonValue) to match its runtime shape and
+  // `revocationView`'s own sibling convention above.
+  transferView?: JsonValue[] | null
 }
 const KNOWN_EOL = new Set(['artifacts-remain-redownloadable', 'escrow', 'none'])
 
 export function isOk(r: VerificationResult): boolean {
-  return r.signature === 'valid' && r.schema === 'valid' && r.revocation !== 'revoked' && r.errors.length === 0
+  return (
+    r.signature === 'valid' && r.schema === 'valid' &&
+    r.revocation !== 'revoked' && r.revocation !== 'transferred' &&
+    r.errors.length === 0
+  )
 }
 
 function obj(v: JsonValue | undefined): JsonObject | null {
@@ -371,9 +397,16 @@ export function verify(
   const transparencyEvidence = options.transparency ?? null
   const logKeys = options.logKeys ?? null
   const anchorPolicy = options.anchorPolicy ?? null
+  const revocationEvidence = options.revocationEvidence ?? null
+  const transferView = options.transferView ?? null
 
   if (revocationView !== null && !Array.isArray(revocationView))
     throw new TypeError('revocation_view must be a list of records or None')
+  // Same caller-contract enforcement, extended to the Stage 3 channel: a
+  // lone claim OBJECT must fail loud rather than be silently iterated as
+  // dict keys by classifyRevocation's transferred-branch resolver.
+  if (transferView !== null && !Array.isArray(transferView))
+    throw new TypeError('transfer_view must be a list of claims or None')
 
   // Fail loud if the trust store / revocation view was JSON.parse'd (JS numbers) rather
   // than loadsStrict-parsed (bigint). Prevents a silent revocation fail-open. Does NOT
@@ -406,12 +439,35 @@ export function verify(
     }
   }
 
-  // Step 0 — strict parse
+  // --- G1 normative ceiling (attest-versioning.md §5 amendment; v0.1 §11/
+  // §15, v0.2 §6/§16): the raw envelope MUST NOT exceed MAX_ENVELOPE_BYTES.
+  // Checked on the undecoded bytes, before ANY parsing work. Reported as
+  // schema: 'invalid' (not the 'not_checked' default every other
+  // precondition failure below uses): this ceiling is conformance-surface,
+  // not a parse-shape failure.
+  const sizeViolations = validateEnvelopeSize(envelopeBytes)
+  if (sizeViolations.length > 0) return invalid(sizeViolations[0]!, 'invalid')
+
+  // Step 0 — strict parse.
+  //
+  // G1 normative ceiling (attest-versioning.md §5 amendment; v0.1 §11.3):
+  // the parsed envelope tree's nesting depth MUST NOT exceed
+  // schema.ts's MAX_JSON_DEPTH (== canon.ts's MAX_DEPTH, 256). Enforced
+  // entirely by loadsStrict itself during parsing (CanonError, "maximum
+  // nesting depth exceeded") — there is deliberately no separate walk of
+  // the parsed tree here (2026-07-22 fix wave): the parser's own structural
+  // safety cap already IS this ceiling, so a second, redundant check could
+  // never fire (see schema.ts's MAX_JSON_DEPTH doc comment). A receipt that
+  // trips it never produces a parsed object at all, so it is reported the
+  // same way every other malformed-envelope failure is, schema:
+  // 'not_checked' — unlike the byte-size/manifest-array ceilings, which run
+  // AFTER a successful parse and are conformance-surface checks.
   let parsed: JsonValue
   try { parsed = loadsStrict(envelopeBytes) }
   catch (e) { if (e instanceof CanonError) return invalid(e.message); throw e }
   const envelope = obj(parsed)
   if (!envelope) return invalid(ERR.ENVELOPE_NOT_OBJECT)
+
   const payload = obj(envelope['payload'])
   if (!payload) return invalid(ERR.MISSING_PAYLOAD)
   const signatures = envelope['signatures']
@@ -424,6 +480,22 @@ export function verify(
   if (typeof issuerId === 'string') {
     trust = trustStore.provenance[issuerId] === 'tls' ? 'verified' : 'unauthenticated_tofu'
     issuerManifestForTransparency = trustStore.manifests[issuerId]
+
+    // G1 ceiling + G6 detection preflight — moved ABOVE the chain handling
+    // (2026-07-22 fix wave 2 round 2, finding I1 residual): the chain
+    // tail compare below canonicalizes the resolved manifest via dumps(),
+    // which is exactly the unbounded work the ceiling exists to prevent on
+    // a hostile keys[] array. See the block comment further down.
+    if (issuerManifestForTransparency != null) {
+      const preflightKeys = issuerManifestForTransparency['keys']
+      if (Array.isArray(preflightKeys) && preflightKeys.length > MAX_MANIFEST_KEYS) {
+        return invalid(manifestExceedsKeys(MAX_MANIFEST_KEYS), 'invalid')
+      }
+      if (payload['attest_version'] === '0.2' && hasActiveEdOnlySibling(issuerManifestForTransparency)) {
+        warnings.push(WARN.MIXED_KEYSET_ACTIVE_ED_ONLY_SIBLING)
+      }
+    }
+
     const chain = trustStore.chains?.[issuerId]
     if (chain && chain.length > 0) {
       // A chain that doesn't end at the manifest being used proves nothing about
@@ -434,6 +506,65 @@ export function verify(
       if (!chainContinuous(chain) || !tailMatchesUsed) trust = 'unverified_rotation'
     }
   }
+
+  // --- G2/G3 manifest currency (attest-versioning.md rev 4; v0.1 §7.2/§7.3
+  // amendment): resolve currency state per (issuer, series), authenticate the
+  // pinned manifest and every chain member before touching any currency
+  // metadata, then warn legacy manifests or evaluate continuity.
+  const workBlock = obj(payload['work'])
+  const artifactSeries = workBlock ? workBlock['artifact_series'] : undefined
+  if (typeof issuerId === 'string' && typeof artifactSeries === 'string') {
+    const candidateArtifactManifest = trustStore.artifact_manifests?.[issuerId]?.[artifactSeries]
+    if (candidateArtifactManifest != null) {
+      const amChain = trustStore.artifact_manifest_chains?.[issuerId]?.[artifactSeries]
+      const members = [candidateArtifactManifest, ...(amChain ?? [])]
+      const authenticated = issuerManifestForTransparency != null && members.every(
+        member => verifyArtifactManifest(member, issuerManifestForTransparency!),
+      )
+      if (candidateArtifactManifest['issuer'] !== issuerId) {
+        warnings.push(WARN.ARTIFACT_MANIFEST_ISSUER_MISMATCH)
+      } else if (!authenticated) {
+        warnings.push(WARN.ARTIFACT_MANIFEST_UNAUTHENTICATED)
+      } else {
+        if (members.some(member => !('manifest_version' in member))) {
+          // Any legacy member makes currency non-evaluable: warn and SKIP
+          // both continuity and the tail compare — a legacy manifest must
+          // never trigger the currency downgrade (v0.1 §7.3, warn-only;
+          // round-2 review residual). Mirrors verify.py.
+          warnings.push(WARN.ARTIFACT_MANIFEST_UNVERSIONED)
+        } else if (amChain && amChain.length > 0) {
+          const tailMatchesPinned = dumps(amChain[amChain.length - 1]!) === dumps(candidateArtifactManifest)
+          if (!artifactChainContinuous(amChain) || !tailMatchesPinned) trust = 'unverified_rotation'
+        }
+      }
+    }
+  }
+
+  // --- G1 normative ceiling, hoisted (attest-versioning.md §5 amendment;
+  // v0.1 §11.3): the issuer manifest's keys[] array MUST NOT exceed
+  // MAX_MANIFEST_KEYS — checked the moment the manifest is resolved from
+  // the trust store, BEFORE any canonicalization/hash/signature/
+  // transparency use of it. This MUST run before the transparency block
+  // below: evaluateTransparencyClaim canonicalizes and hashes
+  // issuerManifestForTransparency whole to check a key-manifest claim,
+  // exactly the unbounded work a structural ceiling exists to prevent on a
+  // hostile array (2026-07-22 fix wave 2, review finding I1 — this check
+  // used to live only after Step 1/2 below, letting transparency/signature
+  // work run on an oversized manifest first).
+  //
+  // G6 mixed-keyset detection is hoisted alongside it (review finding I2):
+  // the warning must fire for every v0.2 resolution of a mixed manifest,
+  // independent of whether the receipt's signatures go on to verify (v0.2
+  // §13/§2.3 amendment) — it used to live only after both signature legs
+  // verified, so a tampered/failed receipt never carried it. Detection only
+  // depends on the manifest's own keyset and the payload's claimed
+  // attest_version, neither of which requires any of the crypto/schema
+  // work Step 1-4 below still gate their OWN errors on.
+  //
+  // Round 2 (finding I1 residual): the check itself now lives INSIDE the
+  // trust-resolution block above, before the chain-continuity tail compare —
+  // that compare canonicalizes the resolved manifest via dumps(), which is
+  // already the unbounded work the ceiling must precede.
 
   // --- Transparency/corroboration (Stage 2, informational only): resolved
   // here, before any pass/fail branching below, so a receipt that later
@@ -488,6 +619,12 @@ export function verify(
     if (typeof issuerId !== 'string') return invalid(ERR.MISSING_ISSUER_ID)
     manifest = trustStore.manifests[issuerId]
     if (manifest == null) return invalid(noTrustedManifest(issuerId))
+
+    // G1's manifest-keys ceiling and G6's mixed-keyset detection are both
+    // handled above, hoisted immediately after issuerManifestForTransparency
+    // (== this same manifest) is resolved from the trust store — see the
+    // comment there (2026-07-22 fix wave 2, findings I1/I2).
+
     if (kid.split('/')[0] !== issuerId || manifest['issuer'] !== issuerId) return invalid(ERR.ISSUER_MISMATCH)
 
     // Step 3 (shared with v0.1) — key resolution + status + validity window
@@ -533,6 +670,12 @@ export function verify(
     if (typeof issuerId !== 'string') return invalid(ERR.MISSING_ISSUER_ID)
     manifest = trustStore.manifests[issuerId]
     if (manifest == null) return invalid(noTrustedManifest(issuerId))
+
+    // G1's manifest-keys ceiling is handled above, hoisted immediately after
+    // issuerManifestForTransparency (== this same manifest) is resolved from
+    // the trust store — see the comment there (2026-07-22 fix wave 2,
+    // finding I1).
+
     if (kid.split('/')[0] !== issuerId || manifest['issuer'] !== issuerId) return invalid(ERR.ISSUER_MISMATCH)
 
     // Step 3 — key resolution + status + validity window
@@ -570,7 +713,10 @@ export function verify(
   let revocation = 'unknown'
   let binding: Binding = 'not_checked'
   if (schema === 'valid') {
-    revocation = classifyRevocation(payload, revocationView, manifest, warnings, errors, maxRevocationRecords)
+    revocation = classifyRevocation(
+      payload, revocationView, manifest, warnings, errors, maxRevocationRecords,
+      logKeys, anchorPolicy, revocationEvidence, transferView,
+    )
     binding = disclosure != null ? classifyBinding(payload, disclosure) : 'not_checked'
   }
 

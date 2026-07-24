@@ -239,6 +239,14 @@ def _valid_receipt_entry() -> dict[str, object]:
     }
 
 
+def _valid_revocation_record_entry() -> dict[str, object]:
+    return {
+        "type": "revocation-record",
+        "issuer": "shop.example.com",
+        "record_sha256": "c" * 64,
+    }
+
+
 def test_encode_entry_accepts_valid_key_manifest_entry() -> None:
     entry = _valid_key_manifest_entry()
     encoded = tlog.encode_entry(entry)
@@ -253,6 +261,91 @@ def test_encode_entry_accepts_valid_receipt_entry() -> None:
     entry = _valid_receipt_entry()
     encoded = tlog.encode_entry(entry)
     assert isinstance(encoded, bytes)
+
+
+def test_encode_entry_accepts_valid_revocation_record_entry() -> None:
+    entry = _valid_revocation_record_entry()
+    encoded = tlog.encode_entry(entry)
+    assert isinstance(encoded, bytes)
+    assert encoded == canon.dumps(entry).encode("utf-8")
+
+
+def test_encode_entry_rejects_revocation_record_missing_member() -> None:
+    entry = _valid_revocation_record_entry()
+    del entry["record_sha256"]
+    with pytest.raises(tlog.TlogError):
+        tlog.encode_entry(entry)
+
+
+def test_encode_entry_rejects_revocation_record_extra_member() -> None:
+    entry = _valid_revocation_record_entry()
+    entry["receipt_id"] = "01J1V5B4M9Z8QWERTY12345678"
+    with pytest.raises(tlog.TlogError):
+        tlog.encode_entry(entry)
+
+
+def test_encode_entry_rejects_revocation_record_short_hex() -> None:
+    entry = _valid_revocation_record_entry()
+    entry["record_sha256"] = "c" * 63
+    with pytest.raises(tlog.TlogError):
+        tlog.encode_entry(entry)
+
+
+def test_encode_entry_rejects_revocation_record_uppercase_hex() -> None:
+    entry = _valid_revocation_record_entry()
+    entry["record_sha256"] = "C" * 64
+    with pytest.raises(tlog.TlogError):
+        tlog.encode_entry(entry)
+
+
+def _valid_transfer_record_entry() -> dict[str, object]:
+    return {
+        "type": "transfer-record",
+        "issuer": "shop.example.com",
+        "record_sha256": "d" * 64,
+    }
+
+
+def test_encode_entry_accepts_valid_transfer_record_entry() -> None:
+    entry = _valid_transfer_record_entry()
+    encoded = tlog.encode_entry(entry)
+    assert isinstance(encoded, bytes)
+    assert encoded == canon.dumps(entry).encode("utf-8")
+
+
+def test_encode_entry_rejects_transfer_record_missing_member() -> None:
+    entry = _valid_transfer_record_entry()
+    del entry["record_sha256"]
+    with pytest.raises(tlog.TlogError):
+        tlog.encode_entry(entry)
+
+
+def test_encode_entry_rejects_transfer_record_extra_member() -> None:
+    entry = _valid_transfer_record_entry()
+    entry["receipt_id"] = "01J1V5B4M9Z8QWERTY12345678"
+    with pytest.raises(tlog.TlogError):
+        tlog.encode_entry(entry)
+
+
+def test_encode_entry_rejects_transfer_record_short_hex() -> None:
+    entry = _valid_transfer_record_entry()
+    entry["record_sha256"] = "d" * 63
+    with pytest.raises(tlog.TlogError):
+        tlog.encode_entry(entry)
+
+
+def test_encode_entry_rejects_transfer_record_uppercase_hex() -> None:
+    entry = _valid_transfer_record_entry()
+    entry["record_sha256"] = "D" * 64
+    with pytest.raises(tlog.TlogError):
+        tlog.encode_entry(entry)
+
+
+def test_encode_entry_rejects_transfer_record_wrong_type_bad_issuer() -> None:
+    entry = _valid_transfer_record_entry()
+    entry["issuer"] = "NOT-A-VALID-DNS-NAME"
+    with pytest.raises(tlog.TlogError):
+        tlog.encode_entry(entry)
 
 
 def test_encode_entry_accepts_an_at_bound_scalar() -> None:
@@ -468,7 +561,7 @@ def test_parse_checkpoint_rejects_unicode_category_origin_under_ascii_grammar(
         tlog.parse_checkpoint(text)
 
 
-@pytest.mark.parametrize("origin", ["🎉", "漢", "\U0002EBF0"])
+@pytest.mark.parametrize("origin", ["🎉", "漢", "\U0002ebf0"])
 def test_parse_checkpoint_rejects_non_ascii_origin_for_version_independent_grammar(
     origin: str,
 ) -> None:
@@ -588,7 +681,7 @@ def test_parse_checkpoint_rejects_signature_line_with_wrong_dash() -> None:
         "bad\u2028name",
         "🎉",
         "漢",
-        "\U0002EBF0",
+        "\U0002ebf0",
     ],
 )
 def test_parse_checkpoint_rejects_invalid_c2sp_signature_name(name: str) -> None:
@@ -613,7 +706,7 @@ def test_parse_checkpoint_rejects_lone_surrogate_origin() -> None:
         ("a\\b", r"'a\\b'"),
         ("\u200b", r"'\u200b'"),
         ("🎉", r"'\U0001f389'"),
-        ("\U0002EBF0", r"'\U0002ebf0'"),
+        ("\U0002ebf0", r"'\U0002ebf0'"),
         ("\x7f", r"'\x7f'"),
     ],
 )
@@ -843,14 +936,14 @@ def test_sign_checkpoint_rejects_whitespace_in_name() -> None:
         tlog.sign_checkpoint(ORIGIN, 1, ROOT, hk, "bad name")
 
 
-@pytest.mark.parametrize("origin", ["", "bad\x1forigin", "bad\x7forigin", "🎉", "漢", "\U0002EBF0"])
+@pytest.mark.parametrize("origin", ["", "bad\x1forigin", "bad\x7forigin", "🎉", "漢", "\U0002ebf0"])
 def test_sign_checkpoint_rejects_empty_or_control_character_origin(origin: str) -> None:
     with pytest.raises(tlog.TlogError):
         tlog.sign_checkpoint(origin, 1, ROOT, _hybrid_keys(), LOG_NAME)
 
 
 @pytest.mark.parametrize(
-    "name", ["", "bad+name", "bad\tname", "bad\x1fname", "🎉", "漢", "\U0002EBF0"]
+    "name", ["", "bad+name", "bad\tname", "bad\x1fname", "🎉", "漢", "\U0002ebf0"]
 )
 def test_sign_checkpoint_rejects_invalid_c2sp_name(name: str) -> None:
     with pytest.raises(tlog.TlogError):
