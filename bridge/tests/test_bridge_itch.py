@@ -528,20 +528,20 @@ def test_claim_is_exhausted_after_reaching_max_attempts(
     token = ledger.enqueue_claim("buyer@example.com", "123456", now=now.strftime(_RFC3339))
     adapter = ItchAdapter(api_key="key", http_get=_failing_http_get())
     poller = ItchPoller(
-        adapter=adapter, ledger=ledger, core=core, max_attempts=2, backoff_base_seconds=1
+        adapter=adapter, ledger=ledger, core=core, max_attempts=1, backoff_base_seconds=1
     )
 
     poller.tick(now=now)
-    poller.tick(now=now + timedelta(seconds=10))
-    poller.tick(now=now + timedelta(seconds=100))
 
     claim = ledger.get_claim(token)
     assert claim is not None
     assert claim.status == "exhausted"
     assert ledger.due_claims((now + timedelta(seconds=1000)).strftime(_RFC3339)) == []
-    assert "game 123456 (attempt 1)" in caplog.text
+    assert "game 123456 (attempt 1); abandoning claim" in caplog.text
+    assert "key" not in caplog.text
+    assert token not in caplog.text
     dead_letters = ledger.unresolved_dead_letters()
-    assert dead_letters[-1].reason == "claim abandoned after 2 failed API attempts"
+    assert dead_letters[-1].reason == "claim abandoned after 1 failed API attempts"
 
 
 def test_claim_gets_exactly_max_attempts_api_calls(ledger: Ledger, core: IssuingCore) -> None:

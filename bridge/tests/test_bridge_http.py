@@ -399,7 +399,7 @@ def test_paid_event_missing_id_is_dead_lettered_and_acknowledged(
 
 
 def test_paid_event_with_non_object_customer_details_is_dead_lettered(
-    deps: BridgeDeps, frozen_now: int
+    deps: BridgeDeps, frozen_now: int, caplog: pytest.LogCaptureFixture
 ) -> None:
     event = make_session_completed_event(metadata={"attest_product_key": "price_TEST"})
     event["data"]["object"]["customer_details"] = "x"
@@ -409,6 +409,8 @@ def test_paid_event_with_non_object_customer_details_is_dead_lettered(
     assert status.startswith("200")
     assert deps.ledger.seen_event("stripe", event["id"]) is True
     assert len(deps.ledger.unresolved_dead_letters()) == 1
+    assert "cs_test_123" not in caplog.text
+    assert "stripe event evt_test_1: dead-lettered" in caplog.text
 
 
 @pytest.mark.parametrize("has_event_id", [False, True])

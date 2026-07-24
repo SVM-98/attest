@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol
@@ -30,6 +31,12 @@ class ConfigError(BridgeError):
 
 class ClaimQueueFull(BridgeError):
     """The bounded itch claim queue cannot accept another pending claim."""
+
+
+def purchase_id_for_log(purchase_id: str) -> str:
+    """Return a stable, non-reversible representation safe for application logs."""
+    digest = hashlib.sha256(purchase_id.encode("utf-8")).hexdigest()[:12]
+    return f"sha256:{digest}"
 
 
 @dataclass(frozen=True, slots=True)
