@@ -24,6 +24,23 @@ jobs:
       - run: uv run --frozen ruff check .
       - run: uv run --frozen mypy --strict src
       - run: uv run --frozen python tools/check_spec_docs.py
+      # Builds the Internet-Draft snapshot source (ietf/) with the pinned,
+      # inline-references-only xml2rfc v3 toolchain (ietf/README.md). uvx is
+      # already available here via astral-sh/setup-uv above, so no extra
+      # install step is needed. The `cp` step works around a naming quirk in
+      # xml2rfc 3.34.0 (output basename tracks the source filename, not the
+      # docName attribute; ietf/README.md explains it in full) so the build
+      # produces the exact `-00`-suffixed filename this step checks for.
+      # --no-network keeps the build reproducible: every reference is an
+      # inline <reference> element, never an xi:include from bib.ietf.org.
+      - name: Build Internet-Draft (pinned toolchain)
+        run: |
+          cp ietf/draft-martinalli-open-purchase-receipts.xml \
+            "$RUNNER_TEMP/draft-martinalli-open-purchase-receipts-00.xml"
+          uvx --from xml2rfc==3.34.0 xml2rfc \
+            "$RUNNER_TEMP/draft-martinalli-open-purchase-receipts-00.xml" \
+            --text --path "$RUNNER_TEMP" --no-network
+          test -s "$RUNNER_TEMP/draft-martinalli-open-purchase-receipts-00.txt"
 
   supply-chain:
     runs-on: ubuntu-latest
@@ -64,6 +81,17 @@ jobs:
         run: |
           (cd verifiers/ts && npm pack --json > /tmp/pack.json)
           uv run --frozen python tools/assert_artifacts.py --npm-pack-json /tmp/pack.json
+
+      # --- Conformance dogfood: TS verifier through the PUBLIC runner ---
+      # `verifiers/ts/dist/` was already built above (npm run build, for the
+      # tarball assert); `python3` is on every hosted runner and the runner
+      # itself is stdlib-only. This is the same public path a third-party
+      # implementation's own CI would run — see docs/conformance.md.
+      - name: Conformance dogfood — TS verifier through the public runner
+        run: |
+          python3 tools/conformance_runner.py \
+            --adapter "node tools/conformance_adapter_ts.mjs {leaf}" \
+            --subset v0.2
 
       # --- SBOM (syft) for each ecosystem, runtime deps only ---
       - name: Generate SBOMs

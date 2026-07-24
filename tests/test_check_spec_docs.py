@@ -730,6 +730,312 @@ class TestVersioningDoc:
         assert check_spec_docs.check_versioning_lifecycle_states(text) == []
 
 
+class TestStandardsRelationship:
+    def test_annex_has_all_seven_entries(self) -> None:
+        text = (SPEC_DIR / "attest-standards-relationship.md").read_text(encoding="utf-8")
+        for needle in (
+            "## 1. W3C Verifiable Credentials",
+            "## 2. eIDAS 2.0 and the EUDI Wallet",
+            "## 3. JOSE/JWS and COSE",
+            "## 4. RFC 8785 (JCS)",
+            "## 5. C2PA",
+            "## 6. SCITT and RFC 9943",
+            "## 7. RATS (RFC 9334): a terminology note",
+        ):
+            assert needle in text
+
+    def test_scitt_entry_defuses_the_receipt_collision(self) -> None:
+        text = (SPEC_DIR / "attest-standards-relationship.md").read_text(encoding="utf-8")
+        assert "RFC 9943" in text
+        assert "inclusion" in text  # their receipt = proof of inclusion
+        assert "RFC 9334" in text  # RATS note present
+
+    def test_checker_reports_missing_file(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            check_spec_docs, "_STANDARDS_RELATIONSHIP_PATH", SPEC_DIR / "does-not-exist.md"
+        )
+        errors = check_spec_docs.check_standards_relationship()
+        assert any("missing" in e.lower() for e in errors)
+
+    def test_checker_is_clean_on_the_real_annex(self) -> None:
+        assert check_spec_docs.check_standards_relationship() == []
+
+    def test_checker_flags_a_renamed_heading(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        text = (SPEC_DIR / "attest-standards-relationship.md").read_text(encoding="utf-8")
+        drifted = text.replace("## 6. SCITT and RFC 9943", "## 6. SCITT")
+        monkeypatch.setattr(
+            check_spec_docs, "_STANDARDS_RELATIONSHIP_PATH", _write(tmp_path, "d.md", drifted)
+        )
+        errors = check_spec_docs.check_standards_relationship()
+        assert any("SCITT and RFC 9943" in e for e in errors)
+
+    def test_main_exits_nonzero_when_annex_file_is_missing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Pins the main() wiring: check_standards_relationship() is called
+        # directly from main() (not through collect_errors()), so a test that
+        # only calls the checker function directly would stay green even if
+        # main() stopped calling it.
+        monkeypatch.setattr(
+            check_spec_docs, "_STANDARDS_RELATIONSHIP_PATH", SPEC_DIR / "does-not-exist.md"
+        )
+        assert main() == 1
+
+    def test_main_exits_nonzero_when_annex_heading_is_renamed(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        text = (SPEC_DIR / "attest-standards-relationship.md").read_text(encoding="utf-8")
+        drifted = text.replace("## 6. SCITT and RFC 9943", "## 6. SCITT")
+        monkeypatch.setattr(
+            check_spec_docs, "_STANDARDS_RELATIONSHIP_PATH", _write(tmp_path, "d.md", drifted)
+        )
+        assert main() == 1
+
+    def test_checker_heading_inside_fenced_block_does_not_satisfy(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """RED for finding 5(a): a required heading present only inside a
+        fenced code block (illustrative content) must not satisfy the
+        checker -- fenced blocks must be stripped first, the same way
+        collect_errors() already does for the threat-model/privacy docs via
+        _strip_fenced_blocks()."""
+        text = (SPEC_DIR / "attest-standards-relationship.md").read_text(encoding="utf-8")
+        fenced = text.replace(
+            "## 6. SCITT and RFC 9943",
+            "```text\n## 6. SCITT and RFC 9943\n```",
+        )
+        monkeypatch.setattr(
+            check_spec_docs, "_STANDARDS_RELATIONSHIP_PATH", _write(tmp_path, "d.md", fenced)
+        )
+        errors = check_spec_docs.check_standards_relationship()
+        assert any("SCITT and RFC 9943" in e for e in errors)
+
+    def test_main_exits_nonzero_when_annex_literal_is_removed(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        text = (SPEC_DIR / "attest-standards-relationship.md").read_text(encoding="utf-8")
+        # RFC 9943 is a required literal (and also part of a required heading,
+        # so this mutation removes both at once -- either alone is sufficient
+        # to make main() non-zero, which is all this test needs to pin).
+        drifted = text.replace("RFC 9943", "the SCITT architecture document")
+        assert "RFC 9943" not in drifted
+        monkeypatch.setattr(
+            check_spec_docs, "_STANDARDS_RELATIONSHIP_PATH", _write(tmp_path, "d.md", drifted)
+        )
+        assert main() == 1
+
+
+# Minimal well-formed draft-source fixture text: carries both snapshot-
+# declaration lines (one revision integer per physical line, each existing in
+# the REAL attest-v0.1.md/attest-v0.2.md revision logs) and the three
+# required RFC-number literals the terminology defusals and JCS entry cite.
+_MINIMAL_DRAFT_TEXT = (
+    "<rfc><middle><section><name>Introduction</name>\n"
+    "<t>Relationship to the living specification: this document mirrors "
+    "attest-v0.1.md at revision 5.</t>\n"
+    "<t>It also mirrors attest-v0.2.md at revision 6 as the source of its "
+    "Extensions pointers.</t>\n"
+    "<t>See RFC 9943, RFC 9334, and RFC 8785.</t>\n"
+    "</section></middle></rfc>\n"
+)
+
+
+class TestInternetDraftSnapshot:
+    def test_draft_source_exists_and_declares_snapshot(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(check_spec_docs, "_INTERNET_DRAFT_DIR", tmp_path)
+        _write(tmp_path, f"{check_spec_docs._INTERNET_DRAFT_BASENAME}.xml", _MINIMAL_DRAFT_TEXT)
+        assert check_spec_docs.check_internet_draft_snapshot() == []
+
+    def test_draft_carries_the_terminology_defusals(self) -> None:
+        # Exercises the REAL committed draft source under ietf/, read the
+        # same way check_internet_draft_snapshot() itself reads it (the
+        # standalone _internet_draft_source_text() helper this test used to
+        # call was dead production code -- unused by the checker, which
+        # reads source_path directly -- so it was removed, 2026-07-23 fix,
+        # finding 10).
+        path = check_spec_docs._internet_draft_source_path()
+        assert path is not None
+        text = path.read_text(encoding="utf-8")
+        for needle in ("9943", "9334", "8785"):
+            assert needle in text
+
+    def test_checker_reports_missing_source(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(check_spec_docs, "_INTERNET_DRAFT_DIR", tmp_path)
+        errors = check_spec_docs.check_internet_draft_snapshot()
+        assert any("exactly one" in e.lower() for e in errors)
+
+    def test_checker_reports_more_than_one_source(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(check_spec_docs, "_INTERNET_DRAFT_DIR", tmp_path)
+        _write(tmp_path, f"{check_spec_docs._INTERNET_DRAFT_BASENAME}.md", _MINIMAL_DRAFT_TEXT)
+        _write(tmp_path, f"{check_spec_docs._INTERNET_DRAFT_BASENAME}.xml", _MINIMAL_DRAFT_TEXT)
+        errors = check_spec_docs.check_internet_draft_snapshot()
+        assert any("exactly one" in e.lower() for e in errors)
+
+    def test_checker_is_clean_on_the_real_draft(self) -> None:
+        assert check_spec_docs.check_internet_draft_snapshot() == []
+
+    def test_checker_flags_a_v01_revision_absent_from_the_log(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(check_spec_docs, "_INTERNET_DRAFT_DIR", tmp_path)
+        drifted = _MINIMAL_DRAFT_TEXT.replace("revision 5", "revision 999")
+        _write(tmp_path, f"{check_spec_docs._INTERNET_DRAFT_BASENAME}.xml", drifted)
+        errors = check_spec_docs.check_internet_draft_snapshot()
+        assert any("999" in e and "attest-v0.1.md" in e for e in errors)
+
+    def test_checker_flags_a_v02_revision_absent_from_the_log(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(check_spec_docs, "_INTERNET_DRAFT_DIR", tmp_path)
+        drifted = _MINIMAL_DRAFT_TEXT.replace("revision 6", "revision 999")
+        _write(tmp_path, f"{check_spec_docs._INTERNET_DRAFT_BASENAME}.xml", drifted)
+        errors = check_spec_docs.check_internet_draft_snapshot()
+        assert any("999" in e and "attest-v0.2.md" in e for e in errors)
+
+    def test_checker_flags_a_removed_required_literal(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(check_spec_docs, "_INTERNET_DRAFT_DIR", tmp_path)
+        drifted = _MINIMAL_DRAFT_TEXT.replace("RFC 9943", "the SCITT architecture document")
+        assert "9943" not in drifted
+        _write(tmp_path, f"{check_spec_docs._INTERNET_DRAFT_BASENAME}.xml", drifted)
+        errors = check_spec_docs.check_internet_draft_snapshot()
+        assert any("9943" in e for e in errors)
+
+    def test_main_exits_nonzero_when_draft_source_is_missing(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # Pins the main() wiring: check_internet_draft_snapshot() is called
+        # directly from main() (not through collect_errors()), so a test that
+        # only calls the checker function directly would stay green even if
+        # main() stopped calling it.
+        monkeypatch.setattr(check_spec_docs, "_INTERNET_DRAFT_DIR", tmp_path)
+        assert main() == 1
+
+    def test_main_exits_nonzero_when_snapshot_revision_is_absent_from_the_log(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(check_spec_docs, "_INTERNET_DRAFT_DIR", tmp_path)
+        drifted = _MINIMAL_DRAFT_TEXT.replace("revision 5", "revision 999")
+        _write(tmp_path, f"{check_spec_docs._INTERNET_DRAFT_BASENAME}.xml", drifted)
+        assert main() == 1
+
+    def test_main_exits_nonzero_when_required_literal_is_removed(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(check_spec_docs, "_INTERNET_DRAFT_DIR", tmp_path)
+        drifted = _MINIMAL_DRAFT_TEXT.replace("RFC 9334", "the RATS architecture document")
+        assert "9334" not in drifted
+        _write(tmp_path, f"{check_spec_docs._INTERNET_DRAFT_BASENAME}.xml", drifted)
+        assert main() == 1
+
+    def test_checker_declaration_inside_xml_comment_does_not_satisfy(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """RED for finding 5(b): a snapshot-revision declaration present only
+        inside an XML comment must not satisfy the checker -- comments are
+        never rendered, operative content and must be stripped before the
+        findall, the same way fenced Markdown blocks are stripped for the
+        standards-relationship annex."""
+        commented = _MINIMAL_DRAFT_TEXT.replace(
+            "<t>Relationship to the living specification: this document "
+            "mirrors attest-v0.1.md at revision 5.</t>\n",
+            "<!-- <t>Relationship to the living specification: this "
+            "document mirrors attest-v0.1.md at revision 5.</t> -->\n",
+        )
+        monkeypatch.setattr(check_spec_docs, "_INTERNET_DRAFT_DIR", tmp_path)
+        _write(tmp_path, f"{check_spec_docs._INTERNET_DRAFT_BASENAME}.xml", commented)
+        errors = check_spec_docs.check_internet_draft_snapshot()
+        assert any("attest-v0.1.md" in e and "found 0" in e for e in errors)
+
+    def test_checker_flags_two_v01_declarations_as_ambiguous(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # A source carrying a valid v0.1 declaration AND a second,
+        # conflicting one used to pass silently: the old `re.search` call
+        # only ever validated the FIRST match (2026-07-23 fix wave, finding
+        # 8 -- `findall` now requires exactly one).
+        duplicated = _MINIMAL_DRAFT_TEXT.replace(
+            "attest-v0.1.md at revision 5.</t>\n",
+            "attest-v0.1.md at revision 5.</t>\n"
+            "<t>A second, conflicting declaration also mirrors "
+            "attest-v0.1.md at revision 12.</t>\n",
+        )
+        assert duplicated.count("attest-v0.1.md") == 2
+        monkeypatch.setattr(check_spec_docs, "_INTERNET_DRAFT_DIR", tmp_path)
+        _write(tmp_path, f"{check_spec_docs._INTERNET_DRAFT_BASENAME}.xml", duplicated)
+        errors = check_spec_docs.check_internet_draft_snapshot()
+        assert any("exactly one" in e.lower() and "attest-v0.1.md" in e for e in errors)
+
+    def test_checker_flags_a_second_conflicting_v02_declaration_as_ambiguous(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        duplicated = _MINIMAL_DRAFT_TEXT.replace(
+            "attest-v0.2.md at revision 6 as the source of its Extensions pointers.</t>\n",
+            "attest-v0.2.md at revision 6 as the source of its "
+            "Extensions pointers.</t>\n"
+            "<t>A second, conflicting declaration also mirrors "
+            "attest-v0.2.md at revision 2.</t>\n",
+        )
+        assert duplicated.count("attest-v0.2.md") == 2
+        monkeypatch.setattr(check_spec_docs, "_INTERNET_DRAFT_DIR", tmp_path)
+        _write(tmp_path, f"{check_spec_docs._INTERNET_DRAFT_BASENAME}.xml", duplicated)
+        errors = check_spec_docs.check_internet_draft_snapshot()
+        assert any("exactly one" in e.lower() and "attest-v0.2.md" in e for e in errors)
+
+
+class TestConformanceDoc:
+    def test_doc_exists_and_covers_the_required_topics(self) -> None:
+        text = (REPO_ROOT / "docs" / "conformance.md").read_text(encoding="utf-8")
+        for needle in (
+            "tools/conformance_runner.py",
+            "{leaf}",
+            "attest conformant",
+            "self-certification",
+        ):
+            assert needle in text
+
+    def test_checker_reports_missing_file(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            check_spec_docs, "_CONFORMANCE_DOC_PATH", REPO_ROOT / "does-not-exist.md"
+        )
+        errors = check_spec_docs.check_conformance_doc()
+        assert any("missing" in e.lower() for e in errors)
+
+    def test_checker_is_clean_on_the_real_doc(self) -> None:
+        assert check_spec_docs.check_conformance_doc() == []
+
+    def test_checker_flags_a_removed_required_literal(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        text = (REPO_ROOT / "docs" / "conformance.md").read_text(encoding="utf-8")
+        drifted = text.replace("{leaf}", "LEAF_PLACEHOLDER")
+        assert "{leaf}" not in drifted
+        monkeypatch.setattr(
+            check_spec_docs, "_CONFORMANCE_DOC_PATH", _write(tmp_path, "c.md", drifted)
+        )
+        errors = check_spec_docs.check_conformance_doc()
+        assert any("{leaf}" in e for e in errors)
+
+    def test_main_exits_nonzero_when_doc_is_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Pins the main() wiring: check_conformance_doc() is called directly
+        # from main() (not through collect_errors()), so a test that only
+        # calls the checker function directly would stay green even if
+        # main() stopped calling it.
+        monkeypatch.setattr(
+            check_spec_docs, "_CONFORMANCE_DOC_PATH", REPO_ROOT / "does-not-exist.md"
+        )
+        assert main() == 1
+
+
 def test_versioning_doc_missing_heading_is_flagged_by_collect_errors() -> None:
     docs = _base_docs()
     docs["versioning"] = _minimal_versioning().replace("## 4. Algorithm lifecycle\n\n", "")
