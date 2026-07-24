@@ -89,6 +89,14 @@ class _HostileCodeException(smtplib.SMTPException):
     smtp_code = _HostileInt(535)
 
 
+class _HostileNameException(smtplib.SMTPException):
+    """Its class __name__ is set to attacker-controlled text below — the
+    sanitized detail must come from the trusted type table, not __name__."""
+
+
+_HostileNameException.__name__ = "HOSTILE-NAME-LEAK"
+
+
 def _config(*, port: int = 587) -> DeliveryConfig:
     return DeliveryConfig(
         smtp_host="smtp.example.com",
@@ -283,8 +291,7 @@ def test_smtp_exception_from_login_becomes_failed_result_not_a_raise() -> None:
 
     result = _send(_config(), factory)
     assert result.status == "failed"
-    assert result.detail is not None
-    assert "SMTPAuthenticationError" in result.detail
+    assert result.detail == "smtp auth failed (SMTP code 535)"
 
 
 def test_os_error_from_login_becomes_failed_result_not_a_raise() -> None:
@@ -293,8 +300,7 @@ def test_os_error_from_login_becomes_failed_result_not_a_raise() -> None:
 
     result = _send(_config(), factory)
     assert result.status == "failed"
-    assert result.detail is not None
-    assert "ConnectionRefusedError" in result.detail
+    assert result.detail == "connection refused"
 
 
 def test_failed_detail_never_contains_the_smtp_password_or_envelope_content() -> None:
@@ -315,7 +321,7 @@ def test_failed_detail_never_contains_the_smtp_password_or_envelope_content() ->
     assert result.detail is not None
     assert config.smtp_password not in result.detail
     assert "not-a-real-secret-but-treat-it-like-one" not in result.detail
-    assert result.detail == "SMTPException"  # category only, no server text
+    assert result.detail == "smtp error"  # hardcoded label, no server text
 
 
 def test_factory_raising_on_connect_becomes_failed_result() -> None:
@@ -324,8 +330,7 @@ def test_factory_raising_on_connect_becomes_failed_result() -> None:
 
     result = _send(_config(), factory)
     assert result.status == "failed"
-    assert result.detail is not None
-    assert "OSError" in result.detail
+    assert result.detail == "network error"
 
 
 def test_non_smtp_transport_exception_becomes_failed_result_not_a_raise() -> None:
@@ -337,7 +342,7 @@ def test_non_smtp_transport_exception_becomes_failed_result_not_a_raise() -> Non
 
     result = _send(_config(), factory)
     assert result.status == "failed"
-    assert result.detail == "RuntimeError"
+    assert result.detail == "delivery failed"
 
 
 def test_message_construction_failure_becomes_failed_result_not_a_raise() -> None:
@@ -347,7 +352,7 @@ def test_message_construction_failure_becomes_failed_result_not_a_raise() -> Non
     fakes: list[_FakeSMTP] = []
     result = _send(_config(), _fake_factory(fakes), envelope={"bad": object()})
     assert result.status == "failed"
-    assert result.detail == "TypeError"
+    assert result.detail == "invalid message"
     assert fakes == []
 
 
@@ -373,7 +378,21 @@ def test_safe_detail_hostile_int_subclass_code_is_not_formatted() -> None:
     assert result.status == "failed"
     assert result.detail is not None
     assert "HOSTILE-FORMAT-LEAK" not in result.detail
-    assert result.detail == "_HostileCodeException"
+    assert result.detail == "smtp error"  # hardcoded label; subclass code rejected
+
+
+def test_safe_detail_hostile_class_name_metadata_is_not_surfaced() -> None:
+    # A class whose __name__ is attacker-controlled text must not reach the
+    # detail: the label comes from a trusted type table via isinstance, never
+    # from type(exc).__name__.
+    def factory(host: str, port: int) -> _RaisingSMTP:
+        return _RaisingSMTP(host, port, _HostileNameException("boom"))
+
+    result = _send(_config(), factory)
+    assert result.status == "failed"
+    assert result.detail is not None
+    assert "HOSTILE-NAME-LEAK" not in result.detail
+    assert result.detail == "smtp error"
 
 
 # -- zero-config fallback ---------------------------------------------------
