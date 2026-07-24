@@ -1,5 +1,15 @@
 import { describe, it, expect } from 'vitest'
+import { ed25519 } from '@noble/curves/ed25519'
+import { ml_dsa65 } from '@noble/post-quantum/ml-dsa.js'
 import { verify, isOk } from '../src/verify.js'
+import { canonicalBytes, loadsStrict } from '../src/canon.js'
+import type { JsonObject, JsonValue } from '../src/canon.js'
+import type { TrustStore } from '../src/manifests.js'
+import { authorizationMessage, recordHash } from '../src/transfer.js'
+import { encodeEntry } from '../src/tlog.js'
+import { b64uEncode } from '../src/b64u.js'
+import { buildTree, inclusionProof, signCheckpoint, type HybridTestKeys } from './helpers/tlog-builder.js'
+
 const enc = (s: string) => new TextEncoder().encode(s)
 const emptyStore = { manifests: {}, provenance: {} }
 
@@ -18,6 +28,9 @@ describe('verify unit', () => {
     expect(isOk({ signature: 'valid', schema: 'valid', revocation: 'revoked', binding: 'not_checked', trust: 'verified', warnings: [], errors: [] })).toBe(false)
     expect(isOk({ signature: 'valid', schema: 'valid', revocation: 'unknown', binding: 'not_checked', trust: 'unverified_rotation', warnings: [], errors: [] })).toBe(true)
   })
+  it('isOk is false for revocation: "transferred" (v0.2 Stage 3)', () => {
+    expect(isOk({ signature: 'valid', schema: 'valid', revocation: 'transferred', binding: 'not_checked', trust: 'verified', warnings: [], errors: [] })).toBe(false)
+  })
 
   it('throws TypeError on a JSON.parse-d (number-typed) trust store', () => {
     // Simulate the JSON.parse mistake: manifest_version is a JS number, not bigint.
@@ -32,5 +45,442 @@ describe('verify unit', () => {
   it('does not throw the guard for a loadsStrict-parsed (bigint) trust store', () => {
     const store = { manifests: { 'ex.com': { issuer: 'ex.com', manifest_version: 3n } }, provenance: {} }
     expect(() => verify(enc('{}'), store as any)).not.toThrow()
+  })
+})
+
+// --------------------------------------------------------------------------
+// v0.2 Stage 3 (§17): verify()'s transferView option, transferred-class
+// backing, not_transferable_before, and the ok extension. Mirrors
+// tests/test_verify_transfer.py (Python reference). Fixtures build a real
+// transfer record (hand-signed with noble, transfer.ts is verify-only) and a
+// real transparency log (mirrors transfer.test.ts's own fixtures and
+// test/helpers/tlog-builder.ts, the same idiom sibling-hybrid.test.ts
+// established for hybrid-signed side-documents).
+const parse = (v: unknown): JsonObject => loadsStrict(enc(JSON.stringify(v))) as JsonObject
+
+const T_ISSUER = 'store.example.com'
+const T_KID = `${T_ISSUER}/keys/test#ed25519-1`
+
+// TEST ONLY — fixed seeds, never use in production.
+const tIssuerSeed = Uint8Array.from({ length: 32 }, () => 31)
+const tHolderSeed = Uint8Array.from({ length: 32 }, () => 32)
+const tOtherHolderSeed = Uint8Array.from({ length: 32 }, () => 33)
+const tNewHolderSeed = Uint8Array.from({ length: 32 }, () => 34)
+
+const tIssuerPub = ed25519.getPublicKey(tIssuerSeed)
+const tHolderPub = ed25519.getPublicKey(tHolderSeed)
+const tOtherHolderPub = ed25519.getPublicKey(tOtherHolderSeed)
+const tNewHolderPub = ed25519.getPublicKey(tNewHolderSeed)
+
+const T_OLD_ID = '01ARZ3NDEKTSV4RRFFQ69G5FAV'
+const T_NEW_ID = '01ARZ3NDEKTSV4RRFFQ69G5FAW'
+const T_LATE_NEW_ID = '01ARZ3NDEKTSV4RRFFQ69G5FAX'
+const T_AT = '2026-07-23T00:00:00Z'
+const T_NEW_HOLDER_PUBKEY = b64uEncode(tNewHolderPub)
+
+const T_LOG_ORIGIN = 'transfer-log.attest.example/2026'
+const T_LOG_NAME = 'attest-transfer-log-1'
+
+function tKeyManifest(): JsonObject {
+  const entry = { kid: T_KID, pub: b64uEncode(tIssuerPub), valid_from: '2026-01-01T00:00:00Z', valid_to: null, status: 'active' }
+  const body = { issuer: T_ISSUER, manifest_version: 1, issued_at: '2026-01-01T00:00:00Z', keys: [entry] }
+  const bodyParsed = parse(body)
+  const sig = ed25519.sign(canonicalBytes(bodyParsed), tIssuerSeed)
+  return parse({ ...body, manifest_signature: { kid: T_KID, sig: b64uEncode(sig) } })
+}
+
+function tTrustStore(): TrustStore {
+  return { manifests: { [T_ISSUER]: tKeyManifest() }, provenance: { [T_ISSUER]: 'tls' } }
+}
+
+function tPayload(revocability: string, notTransferableBefore?: string): Record<string, unknown> {
+  const license: Record<string, unknown> = {
+    grant: 'perpetual', revocability, transferable: false, drm: 'drm-free',
+    terms_uri: 'https://x/t', legal_text_sha256: 'a'.repeat(64),
+  }
+  if (notTransferableBefore !== undefined) license['not_transferable_before'] = notTransferableBefore
+  return {
+    attest_version: '0.1', issued_at: '2026-01-02T00:00:00Z', receipt_id: T_OLD_ID, supersedes: null,
+    issuer: { id: T_ISSUER, display_name: 'Example Store' },
+    work: { title: 'T', publisher: 'P', identifiers: { issuer_sku: 'X' }, artifact_series: 'series-x' },
+    license,
+    buyer: { commitment: 'A'.repeat(43), identifier_type: 'email', pubkey: b64uEncode(tHolderPub) },
+    survivability: { end_of_life: 'none', eol_commitment_sha256: null, eol_commitment_uri: null, redownload_right: true },
+  }
+}
+
+function tEnvelopeBytes(revocability: string, notTransferableBefore?: string): Uint8Array {
+  const payload = parse(tPayload(revocability, notTransferableBefore))
+  const sig = ed25519.sign(canonicalBytes(payload), tIssuerSeed)
+  const envelope = { payload, signatures: [{ kid: T_KID, alg: 'Ed25519', sig: b64uEncode(sig) }] }
+  return enc(JSON.stringify(envelope))
+}
+
+function tTransferredRevocationRecord(receiptId: string = T_OLD_ID, at: string = T_AT): JsonObject {
+  const body = { receipt_id: receiptId, status: 'transferred', revoked_at: at }
+  const sig = ed25519.sign(canonicalBytes(parse(body)), tIssuerSeed)
+  return parse({ ...body, signature: { kid: T_KID, sig: b64uEncode(sig) } })
+}
+
+function tTransferRecord(newReceiptId: string = T_NEW_ID, newHolderPubkey: string = T_NEW_HOLDER_PUBKEY, transferredAt: string = T_AT, hSeed: Uint8Array = tHolderSeed): JsonObject {
+  const authSig = ed25519.sign(authorizationMessage(T_OLD_ID, newHolderPubkey, transferredAt), hSeed)
+  const body = {
+    receipt_id: T_OLD_ID, new_receipt_id: newReceiptId, new_holder_pubkey: newHolderPubkey,
+    transferred_at: transferredAt, holder_authorization: { sig: b64uEncode(authSig) },
+  }
+  const bodyParsed = parse(body)
+  const sig = ed25519.sign(canonicalBytes(bodyParsed), tIssuerSeed)
+  return parse({ ...body, signature: { kid: T_KID, sig: b64uEncode(sig) } })
+}
+
+function resignTransferRecord(record: JsonObject): JsonObject {
+  const body: Record<string, unknown> = {}
+  for (const k of Object.keys(record)) if (k !== 'signature') body[k] = record[k]
+  const sig = ed25519.sign(canonicalBytes(parse(body)), tIssuerSeed)
+  return { ...record, signature: { kid: T_KID, sig: b64uEncode(sig) } }
+}
+
+function noHorizonPolicy() {
+  return { pinnedHeaders: {}, crqcHorizon: null }
+}
+
+function generateHybridLogKeys(): HybridTestKeys {
+  const edSeed = ed25519.utils.randomSecretKey()
+  const edPub = ed25519.getPublicKey(edSeed)
+  const { publicKey: mldsaPub, secretKey: mldsaSecret } = ml_dsa65.keygen()
+  return { edSeed, edPub, mldsaPub, mldsaSecret }
+}
+
+function tLogKey(hk: HybridTestKeys) {
+  return { origin: T_LOG_ORIGIN, name: T_LOG_NAME, ed25519Pub: hk.edPub, mldsaPub: hk.mldsaPub }
+}
+
+/** One genuine transfer-record log containing every record in
+ * `recordsInOrder`, in that log order (index 0 = earliest/first-logged).
+ * Mirrors test_transfer.py's identically-named helper. */
+function tLogBundle(recordsInOrder: JsonObject[], hk: HybridTestKeys): Record<string, unknown>[] {
+  const entries = recordsInOrder.map((r) => ({ type: 'transfer-record', issuer: T_ISSUER, record_sha256: recordHash(r) }))
+  const leaves = entries.map((e) => encodeEntry(e))
+  const root = buildTree(leaves)
+  const treeSize = leaves.length
+  const checkpointText = signCheckpoint(T_LOG_ORIGIN, treeSize, root, hk, T_LOG_NAME)
+  return entries.map((entry, i) => ({
+    entry, leaf_index: i, tree_size: treeSize,
+    inclusion_proof: inclusionProof(leaves, i).map((p) => Buffer.from(p).toString('hex')),
+    checkpoint: checkpointText,
+  }))
+}
+
+interface VerifyWithOpts {
+  revocationView?: JsonValue[] | null
+  transferView?: JsonValue[] | null
+  logKeys?: ReturnType<typeof tLogKey>[] | null
+  anchorPolicy?: ReturnType<typeof noHorizonPolicy> | null
+  revocability?: string
+  notTransferableBefore?: string
+  supplyTransferView?: boolean
+}
+
+function verifyWith(opts: VerifyWithOpts = {}) {
+  const {
+    revocationView = null, transferView = null, logKeys = null, anchorPolicy = null,
+    revocability = 'none', notTransferableBefore, supplyTransferView = true,
+  } = opts
+  const envelopeBytes = tEnvelopeBytes(revocability, notTransferableBefore)
+  const options: Record<string, unknown> = { logKeys, anchorPolicy }
+  if (supplyTransferView) options['transferView'] = transferView
+  return verify(envelopeBytes, tTrustStore(), revocationView, null, undefined, options as any)
+}
+
+describe('verify(): Stage 3 transferred-class backing (§17.3)', () => {
+  it('reports transferred (not ok) with full backing', () => {
+    const hk = generateHybridLogKeys()
+    const record = tTransferRecord()
+    const bundle = tLogBundle([record], hk)[0]
+    const validClaim = parse({ record, evidence: bundle })
+
+    const result = verifyWith({
+      revocationView: parse([tTransferredRevocationRecord()]),
+      transferView: [validClaim],
+      logKeys: [tLogKey(hk)],
+      anchorPolicy: noHorizonPolicy(),
+      revocability: 'policy',
+    })
+
+    expect(result.revocation).toBe('transferred')
+    expect(isOk(result)).toBe(false)
+  })
+
+  it('honors the consent gate even for the irrevocable "none" class', () => {
+    const hk = generateHybridLogKeys()
+    const record = tTransferRecord()
+    const bundle = tLogBundle([record], hk)[0]
+    const validClaim = parse({ record, evidence: bundle })
+
+    const result = verifyWith({
+      revocationView: parse([tTransferredRevocationRecord()]),
+      transferView: [validClaim],
+      logKeys: [tLogKey(hk)],
+      anchorPolicy: noHorizonPolicy(),
+      revocability: 'none',
+    })
+
+    expect(result.revocation).toBe('transferred')
+    expect(isOk(result)).toBe(false)
+  })
+
+  it('ignores an unbacked transfer without a transferView at all', () => {
+    const result = verifyWith({
+      revocationView: parse([tTransferredRevocationRecord()]),
+      transferView: null,
+      revocability: 'policy',
+    })
+
+    expect(result.revocation).toBe('invalid_revocation_ignored')
+    expect(result.warnings).toContain('transferred_revocation_unbacked')
+    expect(isOk(result)).toBe(true)
+  })
+
+  it.each([
+    ['empty', [] as JsonValue[]],
+    ['only-mismatched', [{ record: { receipt_id: T_NEW_ID }, evidence: null }] as unknown as JsonValue[]],
+    ['oversized', [{ padding: 'x'.repeat(10_000_000) }] as unknown as JsonValue[]],
+    ['unserializable', (() => { const cyclic: unknown[] = []; cyclic.push(cyclic); return cyclic })() as unknown as JsonValue[]],
+  ])('warns unbacked when the resolver never engages (%s)', (_name, transferView) => {
+    const result = verifyWith({
+      revocationView: parse([tTransferredRevocationRecord()]),
+      transferView,
+      revocability: 'policy',
+    })
+
+    expect(result.revocation).toBe('invalid_revocation_ignored')
+    expect(result.warnings).toContain('transferred_revocation_unbacked')
+    expect(isOk(result)).toBe(true)
+  })
+
+  it('uses the materialized transferView after serialization', () => {
+    const hk = generateHybridLogKeys()
+    const record = tTransferRecord()
+    const bundle = tLogBundle([record], hk)[0]
+    const plainClaim = parse({ record, evidence: bundle })
+    let reads = 0
+    const options = {
+      revocationView: parse([tTransferredRevocationRecord()]),
+      logKeys: [tLogKey(hk)],
+      anchorPolicy: noHorizonPolicy(),
+      revocability: 'policy',
+    }
+
+    const expected = verifyWith({ ...options, transferView: [plainClaim] })
+    const statefulClaim = {
+      get record() {
+        if (++reads === 1) return plainClaim['record']
+        throw new Error('second record read must not escape the verification boundary')
+      },
+      get evidence() { return plainClaim['evidence'] },
+    }
+    const actual = verifyWith({ ...options, transferView: [statefulClaim] as unknown as JsonValue[] })
+    expect(actual).toEqual(expected)
+  })
+
+  it('treats a forged holder authorization as unbacked', () => {
+    const hk = generateHybridLogKeys()
+    const record = tTransferRecord()
+    // Forge the holder leg with a DIFFERENT keypair, then re-sign the whole
+    // record so the issuer signature itself still verifies structurally.
+    const forgedSig = ed25519.sign(authorizationMessage(T_OLD_ID, T_NEW_HOLDER_PUBKEY, T_AT), tOtherHolderSeed)
+    const forged = resignTransferRecord({ ...record, holder_authorization: { sig: b64uEncode(forgedSig) } })
+    const bundle = tLogBundle([forged], hk)[0]
+    const forgedClaim = parse({ record: forged, evidence: bundle })
+
+    const result = verifyWith({
+      revocationView: parse([tTransferredRevocationRecord()]),
+      transferView: [forgedClaim],
+      logKeys: [tLogKey(hk)],
+      anchorPolicy: noHorizonPolicy(),
+      revocability: 'policy',
+    })
+
+    expect(result.revocation).toBe('invalid_revocation_ignored')
+    expect(result.warnings).toContain('transferred_revocation_unbacked')
+    expect(isOk(result)).toBe(true)
+  })
+
+  it('ignores an authenticated but unlogged transfer record', () => {
+    const record = tTransferRecord()
+    const unloggedClaim = parse({ record, evidence: null })
+    const hk = generateHybridLogKeys()
+
+    const result = verifyWith({
+      revocationView: parse([tTransferredRevocationRecord()]),
+      transferView: [unloggedClaim],
+      logKeys: [tLogKey(hk)],
+      anchorPolicy: noHorizonPolicy(),
+      revocability: 'policy',
+    })
+
+    expect(result.revocation).toBe('invalid_revocation_ignored')
+    expect(result.warnings).toContain('transfer_record_unlogged')
+    expect(isOk(result)).toBe(true)
+  })
+
+  it('cannot honor a transfer when the verifier is not Stage-2 capable', () => {
+    const hk = generateHybridLogKeys()
+    const record = tTransferRecord()
+    const bundle = tLogBundle([record], hk)[0]
+    const claim = parse({ record, evidence: bundle })
+
+    const result = verifyWith({
+      revocationView: parse([tTransferredRevocationRecord()]),
+      transferView: [claim],
+      logKeys: null,
+      anchorPolicy: null,
+      revocability: 'policy',
+    })
+
+    expect(result.revocation).toBe('invalid_revocation_ignored')
+    expect(result.warnings).toContain('transfer_record_unlogged')
+    expect(isOk(result)).toBe(true)
+  })
+
+  it('resolves a double assignment to the earliest-logged leaf index', () => {
+    const hk = generateHybridLogKeys()
+    const earlyRecord = tTransferRecord(T_NEW_ID)
+    const lateRecord = tTransferRecord(T_LATE_NEW_ID)
+    // Log order: earlyRecord first (leaf_index 0), lateRecord second (1).
+    const [earlyBundle, lateBundle] = tLogBundle([earlyRecord, lateRecord], hk)
+    const earlyClaim = parse({ record: earlyRecord, evidence: earlyBundle })
+    const lateClaim = parse({ record: lateRecord, evidence: lateBundle })
+
+    const result = verifyWith({
+      revocationView: parse([tTransferredRevocationRecord()]),
+      transferView: [lateClaim, earlyClaim], // list order deliberately reversed
+      logKeys: [tLogKey(hk)],
+      anchorPolicy: noHorizonPolicy(),
+      revocability: 'policy',
+    })
+
+    expect(result.revocation).toBe('transferred')
+    expect(result.warnings).toContain('transfer_double_assignment_conflict')
+  })
+
+  it('treats duplicate valid transfer claims as one survivor', () => {
+    const hk = generateHybridLogKeys()
+    const record = tTransferRecord()
+    const bundle = tLogBundle([record], hk)[0]
+    const claim = parse({ record, evidence: bundle })
+
+    const result = verifyWith({
+      revocationView: parse([tTransferredRevocationRecord()]),
+      transferView: [claim, claim],
+      logKeys: [tLogKey(hk)],
+      anchorPolicy: noHorizonPolicy(),
+      revocability: 'policy',
+    })
+
+    expect(result.revocation).toBe('transferred')
+    expect(result.warnings).not.toContain('transfer_double_assignment_conflict')
+  })
+
+  it('keeps distinct valid transfer claims as a double assignment', () => {
+    const hk = generateHybridLogKeys()
+    const earlyRecord = tTransferRecord(T_NEW_ID)
+    const lateRecord = tTransferRecord(T_LATE_NEW_ID)
+    const [earlyBundle, lateBundle] = tLogBundle([earlyRecord, lateRecord], hk)
+
+    const result = verifyWith({
+      revocationView: parse([tTransferredRevocationRecord()]),
+      transferView: [parse({ record: earlyRecord, evidence: earlyBundle }), parse({ record: lateRecord, evidence: lateBundle })],
+      logKeys: [tLogKey(hk)],
+      anchorPolicy: noHorizonPolicy(),
+      revocability: 'policy',
+    })
+
+    expect(result.warnings).toContain('transfer_double_assignment_conflict')
+  })
+
+  it('ignores a transfer_at earlier than not_transferable_before', () => {
+    const hk = generateHybridLogKeys()
+    const record = tTransferRecord(T_NEW_ID, T_NEW_HOLDER_PUBKEY, T_AT)
+    const bundle = tLogBundle([record], hk)[0]
+    const claim = parse({ record, evidence: bundle })
+
+    const result = verifyWith({
+      revocationView: parse([tTransferredRevocationRecord()]),
+      transferView: [claim],
+      logKeys: [tLogKey(hk)],
+      anchorPolicy: noHorizonPolicy(),
+      revocability: 'policy',
+      notTransferableBefore: '2026-08-01T00:00:00Z',
+    })
+
+    expect(result.revocation).toBe('invalid_revocation_ignored')
+    expect(result.warnings).toContain('transfer_not_yet_transferable')
+    expect(result.warnings).not.toContain('transferred_revocation_unbacked')
+    expect(isOk(result)).toBe(true)
+  })
+
+  it.each(['2026-02-30T00:00:00Z', '2026-13-01T00:00:00Z', '2026-04-31T00:00:00Z'])(
+    'does not honor a transfer with an impossible not_transferable_before (%s)',
+    (notTransferableBefore) => {
+      const hk = generateHybridLogKeys()
+      const record = tTransferRecord()
+      const bundle = tLogBundle([record], hk)[0]
+      const claim = parse({ record, evidence: bundle })
+
+      const result = verifyWith({
+        revocationView: parse([tTransferredRevocationRecord()]),
+        transferView: [claim],
+        logKeys: [tLogKey(hk)],
+        anchorPolicy: noHorizonPolicy(),
+        revocability: 'policy',
+        notTransferableBefore,
+      })
+
+      expect(result.revocation).toBe('invalid_revocation_ignored')
+      expect(result.warnings).toContain('transfer_not_yet_transferable')
+      expect(result.warnings).not.toContain('transferred_revocation_unbacked')
+      expect(isOk(result)).toBe(true)
+    },
+  )
+
+  it('leaves a plain "revoked" record unaffected by an also-present transferView', () => {
+    const hk = generateHybridLogKeys()
+    const revokedBody = { receipt_id: T_OLD_ID, status: 'revoked', revoked_at: T_AT }
+    const revokedSig = ed25519.sign(canonicalBytes(parse(revokedBody)), tIssuerSeed)
+    const revokedRecord = parse({ ...revokedBody, signature: { kid: T_KID, sig: b64uEncode(revokedSig) } })
+    const unrelatedTransferRecord = tTransferRecord()
+    const bundle = tLogBundle([unrelatedTransferRecord], hk)[0]
+    const claim = parse({ record: unrelatedTransferRecord, evidence: bundle })
+
+    const result = verifyWith({
+      revocationView: [revokedRecord],
+      transferView: [claim],
+      logKeys: [tLogKey(hk)],
+      anchorPolicy: noHorizonPolicy(),
+      revocability: 'policy',
+    })
+
+    expect(result.revocation).toBe('revoked')
+    expect(isOk(result)).toBe(false)
+  })
+
+  it('sees zero behavior change when transferView is never supplied at all', () => {
+    const result = verifyWith({
+      revocationView: parse([tTransferredRevocationRecord()]),
+      revocability: 'policy',
+      supplyTransferView: false,
+    })
+
+    expect(result.revocation).toBe('invalid_revocation_ignored')
+    expect(result.warnings).toContain('transferred_revocation_unbacked')
+    expect(isOk(result)).toBe(true)
+  })
+
+  it('throws TypeError on a non-list transferView (caller-contract enforcement)', () => {
+    const envelopeBytes = tEnvelopeBytes('none')
+    expect(() =>
+      verify(envelopeBytes, tTrustStore(), null, null, undefined, { transferView: { record: {}, evidence: null } as any }),
+    ).toThrow(TypeError)
   })
 })

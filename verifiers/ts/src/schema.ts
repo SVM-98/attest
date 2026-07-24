@@ -5,6 +5,8 @@
 // deliberately NOT enforced here (Task 5 adjudication) -- we just require
 // those fields be strings where the schema requires a string.
 import type { JsonObject, JsonValue } from './canon.js'
+import { MAX_DEPTH } from './canon.js'
+import { envelopeExceedsBytes } from './messages.js'
 
 export const SCHEMA_TOP_LEVEL_KEYS: ReadonlySet<string> = new Set([
   'attest_version',
@@ -159,6 +161,15 @@ function validateLicense(v: JsonValue | undefined, errors: string[]): void {
   if (license['revocability'] === 'refund_window') {
     check(errors, 'revocation_window_days' in license, 'license.revocation_window_days: required when license.revocability is refund_window')
   }
+  // v0.2 §17.7 (Stage 3): not_transferable_before, when present, must be an
+  // RFC3339 UTC date-time — same shape as issued_at (ISSUED_AT_RE).
+  if ('not_transferable_before' in license) {
+    check(
+      errors,
+      typeof license['not_transferable_before'] === 'string' && ISSUED_AT_RE.test(license['not_transferable_before']),
+      'license.not_transferable_before: must be an RFC3339 UTC date-time (YYYY-MM-DDTHH:MM:SSZ)',
+    )
+  }
 }
 
 function validateSurvivability(v: JsonValue | undefined, errors: string[]): void {
@@ -204,6 +215,24 @@ function validateRevocabilityNoneConditional(payload: JsonObject, errors: string
   check(errors, hasArtifactSeries || hasArtifacts, 'work: must have artifact_series or a non-empty artifacts array when license.revocability is none')
 }
 
+// D1 (v0.2 §17 schema amendment): if attest_version === "0.2" AND
+// license.transferable === true then buyer.pubkey must be a non-null 43-char
+// base64url string — tighter than validateBuyer's general "null or..." check
+// above. Mirrors the JSON-Schema allOf/if/then in
+// docs/spec/schema/attest-receipt.schema.json (D1 conditional).
+function validateTransferableConditional(payload: JsonObject, errors: string[]): void {
+  const license = payload['license']
+  if (payload['attest_version'] !== '0.2' || !isObject(license) || license['transferable'] !== true) return
+
+  const buyer = payload['buyer']
+  const pubkey = isObject(buyer) ? buyer['pubkey'] : undefined
+  check(
+    errors,
+    typeof pubkey === 'string' && COMMITMENT_RE.test(pubkey),
+    'buyer.pubkey: must be a non-null 43-char base64url string when license.transferable is true (attest_version 0.2)',
+  )
+}
+
 export function validatePayload(payload: JsonObject): string[] {
   const errors: string[] = []
 
@@ -230,6 +259,37 @@ export function validatePayload(payload: JsonObject): string[] {
   if ('license' in payload && 'survivability' in payload && 'work' in payload) {
     validateRevocabilityNoneConditional(payload, errors)
   }
+  if ('license' in payload && 'buyer' in payload) {
+    validateTransferableConditional(payload, errors)
+  }
 
   return errors
+}
+
+// --- G1 normative ceilings (attest-versioning.md §5 amendment; v0.1 §11/
+// §15, v0.2 §6/§16) — conformance-surface structural bounds a conforming
+// verifier MUST enforce, independent of and in addition to validatePayload
+// above. Checked by verify.ts before any signature/schema work runs on the
+// untrusted bytes they bound. Byte-identical to validate.py.
+
+export const MAX_ENVELOPE_BYTES = 1_048_576 // raw, undecoded envelope size ceiling
+
+/** Nesting-depth ceiling (2026-07-22 fix wave): an alias of canon.ts's
+ * MAX_DEPTH, never a second, smaller value. loadsStrict already rejects any
+ * input nested deeper than this during parsing (CanonError, "maximum
+ * nesting depth exceeded") -- a parsed tree therefore can never exceed it,
+ * so this module does NOT define its own jsonTreeDepth/validateJsonDepth
+ * walk of the parsed tree: that check was proven byte-for-byte redundant
+ * with canon.ts's own enforcement and was deleted rather than kept as dead
+ * code. The name is kept as a public alias, at the single source-of-truth
+ * value, because the spec (v0.1 §11.3) and tests reference MAX_JSON_DEPTH
+ * as the name of the conformance-surface ceiling even though its
+ * enforcement lives entirely in canon.ts. */
+export const MAX_JSON_DEPTH = MAX_DEPTH
+
+/** The raw envelope MUST NOT exceed MAX_ENVELOPE_BYTES. Checked on the
+ * undecoded bytes, before any parsing work. */
+export function validateEnvelopeSize(envelopeBytes: Uint8Array): string[] {
+  if (envelopeBytes.length > MAX_ENVELOPE_BYTES) return [envelopeExceedsBytes(MAX_ENVELOPE_BYTES)]
+  return []
 }

@@ -92,6 +92,14 @@ export const ERR = {
 export const WARN = {
   DRM_BOUND: 'license.drm is drm-bound (design vector 18)',
   REVOCABILITY_NONE_IGNORED: "revocation record ignored: license.revocability is 'none' (irrevocable)",
+  // G6 mixed-keyset prohibition (v0.2 §2.3/§13 amendment) — the wire warning
+  // string, exact and cross-language (Python parity: verify.py).
+  MIXED_KEYSET_ACTIVE_ED_ONLY_SIBLING: 'mixed_keyset_active_ed_only_sibling',
+  // G2/G3 manifest currency (attest-versioning.md rev 4; v0.1 §7.2/§7.3
+  // amendment) — the wire warning string, exact and cross-language.
+  ARTIFACT_MANIFEST_UNVERSIONED: 'artifact_manifest_unversioned',
+  ARTIFACT_MANIFEST_UNAUTHENTICATED: 'artifact_manifest_unauthenticated',
+  ARTIFACT_MANIFEST_ISSUER_MISMATCH: 'artifact_manifest_issuer_mismatch',
 } as const
 
 export const unsupportedAttestVersion = (v: unknown) => `unsupported attest_version: ${pyRepr(v)}`
@@ -123,6 +131,15 @@ export const revocationViewOversize = (n: number, max: number) =>
 export const revocationViewOversizeRevocable = (n: number, max: number) =>
   `revocation view exceeds ${max} records (${n} supplied), cannot certify a revocable receipt`
 
+// G1 normative ceilings (attest-versioning.md §5 amendment) — byte-identical
+// to validate.py / manifests.py.
+export const envelopeExceedsBytes = (max: number) => `envelope exceeds ${max} bytes`
+// nestingDepthExceeds() was deleted in the 2026-07-22 fix wave along with
+// schema.ts's validateJsonDepth/jsonTreeDepth: the ceiling is now enforced
+// entirely by canon.ts's own parse-time cap, which reports "maximum nesting
+// depth exceeded" (invalidJson()), never this message.
+export const manifestExceedsKeys = (max: number) => `issuer manifest exceeds ${max} keys`
+
 // --------------------------------------------------------------------------
 // Stage 2 (tlog/anchor/transparency): AnchorVerdict.warnings and
 // TransparencyResult.warnings are a cross-language protocol surface — copied
@@ -149,6 +166,14 @@ export const ANCHOR_WARN = {
   OTS_HEADER_MERKLE_ROOT_INVALID: "ots proof 'header_merkle_root' must be 64 lowercase hex chars",
   OTS_HEADER_HASH_INVALID: "ots proof 'header_hash' must be 64 lowercase hex chars",
   OTS_CHAIN_MISMATCH: 'ots op-chain result does not match header_merkle_root',
+  // G4/I2 (attest-v0.2.md §11.1.1): the same base mismatch, but under a
+  // declared signed-note-v2 profile — profile-aware, so the verifier names
+  // which seed the profile requires and, when the legacy note-v1 seed's
+  // replay genuinely matches, flags the common mistake explicitly.
+  OTS_CHAIN_MISMATCH_V2_REQUIRES:
+    'ots op-chain result does not match header_merkle_root; anchor_profile signed-note-v2 requires the accumulator to start from SHA256(checkpoint.signed_note_bytes)',
+  OTS_CHAIN_MISMATCH_V2_LOOKS_LIKE_V1:
+    'ots op-chain result does not match header_merkle_root; anchor_profile signed-note-v2 requires the accumulator to start from SHA256(checkpoint.signed_note_bytes) — this evidence looks like a note-v1 commitment presented as signed-note-v2',
   OTS_HEADER_NOT_PINNED: 'header_hash is not in policy.pinned_headers',
   OTS_PINNED_ROOT_MISMATCH: 'pinned header merkle_root does not match proof',
   OTS_PINNED_TIME_MISMATCH: 'pinned header time does not match proof',
@@ -170,6 +195,9 @@ export const otsHeaderTimeInvalid = (max: number) =>
   `ots proof 'header_time' must be a positive int no later than ${max}`
 export const rfc3161TokenNotStr = (v: unknown) => `rfc3161 token_b64 must be a str, got ${pyTypeName(v)}`
 export const unknownProofKind = (kind: unknown) => `unknown proof kind ${pyTruncRepr(kind)}, ignored`
+// G4 (attest-v0.2.md §11.1): evidence declares an anchor_profile outside {absent, null, 'note-v1', 'signed-note-v2'}.
+export const evidenceAnchorProfileInvalid = (v: unknown) =>
+  `evidence.anchor_profile must be 'note-v1' or 'signed-note-v2', got ${pyTruncRepr(v)}`
 
 // `anchor._trunc`: safely render an untrusted scalar for a bounded warning —
 // never invoke a hostile object's own stringification, only these three cases.
@@ -205,6 +233,11 @@ export const TRANSPARENCY_WARN = {
   EQUIVOCATION_DETECTED: 'log_equivocation_detected',
   ANCHORS_INVALID: 'anchors_invalid',
   ANCHOR_TIME_INVALID: 'anchor_time_invalid',
+  // G4 (attest-v0.2.md §11.1): an anchor that established standing via the
+  // legacy note-bytes-only commitment (AnchorVerdict.noteOnly) — still
+  // fully verifiable (eternal verifiability, attest-versioning.md §3), just
+  // classified as the weaker profile.
+  ANCHOR_NOTE_ONLY: 'anchor_note_only',
   POST_HORIZON_UNANCHORED: 'post_horizon_unanchored',
   EVIDENCE_EVALUATION_FAILED: 'evidence_evaluation_failed',
 } as const
@@ -214,4 +247,19 @@ export const VERIFY_TRANSPARENCY_WARN = {
   CONFIG_MISSING: 'transparency_config_missing',
   CLAIM_UNRESOLVABLE: 'transparency_claim_unresolvable',
   ROTATION_CHAIN_REQUIRED: 'corroboration_requires_rotation_chain',
+  // G5 (v0.2 §8/§15 amendment, TM-47): a refund_window revocation record
+  // that fails the deadline-effectiveness rule (unlogged, or anchored after
+  // the receipt's own refund-window deadline) — exact, cross-language wire
+  // string (Python parity: verify.py).
+  REVOCATION_UNLOGGED_DEADLINE: 'revocation_unlogged_deadline',
+} as const
+
+// v0.2 Stage 3 (§17.2-§17.4, verbatim; TS parity: Python's verify.py) —
+// transferred-class backing warnings for classifyRevocation's transferred
+// branch (revocation.ts).
+export const TRANSFER_WARN = {
+  REVOCATION_UNBACKED: 'transferred_revocation_unbacked',
+  RECORD_UNLOGGED: 'transfer_record_unlogged',
+  NOT_YET_TRANSFERABLE: 'transfer_not_yet_transferable',
+  DOUBLE_ASSIGNMENT: 'transfer_double_assignment_conflict',
 } as const

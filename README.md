@@ -87,11 +87,67 @@ won't adopt voluntarily, the lever is regulation and market pressure, not forger
 
 ## Status
 
-Spec v0.1 is complete, with two independent implementations — a Python reference
-implementation and a TypeScript verifier — that agree on all 27 conformance
-vectors (52 leaf cases spanning format/crypto and lifecycle/policy behavior), plus
-an end-to-end demo that deletes a store's entire infrastructure mid-lifecycle and
+Spec v0.1 is complete and v0.2 is specified and implemented on `main`, with two
+independent implementations — a Python reference implementation and a TypeScript
+verifier — that agree on all 97 conformance vector leaves across 36 groups: 51 of
+them the v0.1 corpus, the rest exercising v0.2's hybrid signature profile,
+transparency/anchoring behaviour, the upgrade-policy hardening (mixed-keyset
+prohibition, artifact-manifest currency, anchor profile v2, logged revocation
+deadlines), and Stage 3 issuer-mediated transfer. (A v0.1-only verifier is required
+to reject v0.2 envelopes, so it is measured against the 51-leaf subset.) There is also an
+end-to-end demo that deletes a store's entire infrastructure mid-lifecycle and
 proves the receipt still verifies.
+
+The published packages are `0.4.0`, which ships all of v0.2 — Stages 1 and 2
+(hybrid signatures; transparency and anchoring) and Stage 3, issuer-mediated
+transfer, this document's own §17.
+
+Three pieces of assurance work go beyond what a test suite can show. They are
+being finished on branches, and are linked here rather than left invisible:
+
+- **Formal verification.** A [Tamarin model of the wire protocol](https://github.com/SVM-98/attest/blob/feature/p1.3-formal-verification/formal/attest.spthy):
+  machine-checked theorems that acceptance implies an issuer signature, that key
+  rotation cannot be hijacked, and that revocation is sound and effective — plus
+  attack exhibits proved *reachable* rather than argued in prose, plus negative
+  controls that must falsify. Each theorem states its own scope in the theory
+  file; nothing is claimed more broadly there than the prover checked. In
+  progress on [`feature/p1.3-formal-verification`](https://github.com/SVM-98/attest/tree/feature/p1.3-formal-verification).
+- **[Threat model](https://github.com/SVM-98/attest/blob/pillar-1/docs/spec/attest-threat-model.md).**
+  67 attacks catalogued across the whole receipt lifecycle, each either mitigated
+  or recorded as out of scope with a reason, a traceability matrix, and the
+  protocol gaps the exercise found left tracked in the open instead of quietly
+  fixed. On [`pillar-1`](https://github.com/SVM-98/attest/tree/pillar-1).
+- **[Privacy considerations](https://github.com/SVM-98/attest/blob/pillar-1/docs/spec/attest-privacy.md).**
+  Every field classified by what it reveals to which observer, twenty testable
+  privacy claims, and a GDPR annex covering what a receipt deliberately does not
+  record. On [`pillar-1`](https://github.com/SVM-98/attest/tree/pillar-1).
+- **[Transfer economics](https://github.com/SVM-98/attest/blob/pillar-1/docs/spec/attest-transfer-economics.md)
+  (non-normative).** The market and legal context behind Stage 3's transfer
+  profile — resale velocity, the issuer-royalty incentive, and the CJEU case law
+  (*UsedSoft*, *Tom Kabinet*) that makes transfer issuer-mediated rather than a
+  general resale right. On [`pillar-1`](https://github.com/SVM-98/attest/tree/pillar-1).
+
+Three further pieces make attest citable and checkable, not just built and
+tested, and are likewise linked here rather than left invisible:
+
+- **IETF Internet-Draft.** [`ietf/draft-martinalli-open-purchase-receipts.xml`](https://github.com/SVM-98/attest/blob/pillar-1/ietf/draft-martinalli-open-purchase-receipts.xml)
+  is the source for `draft-martinalli-open-purchase-receipts-00`, a
+  snapshot-profile mirror of the living spec (declares it mirrors v0.1
+  revision 5 and v0.2 revision 6) that builds clean to `-00` txt/html in CI.
+  It is ready to submit; submission to the IETF Datatracker is a deliberate
+  manual step, not something this repo automates. On
+  [`pillar-1`](https://github.com/SVM-98/attest/tree/pillar-1).
+- **[Standards-relationship annex](https://github.com/SVM-98/attest/blob/pillar-1/docs/spec/attest-standards-relationship.md).**
+  Documents attest's boundary against every adjacent standard people compare
+  it to — W3C Verifiable Credentials, eIDAS 2.0/the EUDI Wallet, JOSE/JWS and
+  COSE, RFC 8785 (JCS), C2PA, SCITT/RFC 9943, and RATS (RFC 9334) — so each
+  comparison is answered once instead of re-argued per issue. On
+  [`pillar-1`](https://github.com/SVM-98/attest/tree/pillar-1).
+- **[Conformance program](https://github.com/SVM-98/attest/blob/pillar-1/docs/conformance.md).**
+  One documented command, run with a third party's own adapter against the
+  vector corpus, produces a pass/fail report and a self-certification claim;
+  both in-repo verifiers pass 97/97 through that exact path. On
+  [`pillar-1`](https://github.com/SVM-98/attest/tree/pillar-1).
 
 ## Quickstart
 
@@ -144,9 +200,39 @@ corpus every implementation is checked against.
 [docs/spec/attest-v0.2.md](docs/spec/attest-v0.2.md) is an additive delta
 specification defining the v0.2 hybrid Ed25519+ML-DSA-65 signature profile
 (post-quantum-resistant receipts, `attest_version: "0.2"`); v0.1 receipts
-remain valid and verifiable forever, and this profile is Stage 1 of a larger
-v0.2 — issuer key transparency/anchoring and transfer records are forthcoming
-in later stages.
+remain valid and verifiable forever. That profile was Stage 1; Stage 2 — issuer
+key transparency and timestamp anchoring, where a log corroborates a receipt's
+existence without ever being able to make an unsigned receipt look authentic —
+is specified in the same document. Stage 3 — issuer-mediated transfer, giving
+`license.transferable` its first real meaning, layered on top of the Stage 2 log
+— is specified there too (§17); business economics around resale are
+deliberately out of protocol and live in the non-normative
+[transfer-economics annex](docs/spec/attest-transfer-economics.md).
+
+[docs/spec/attest-versioning.md](docs/spec/attest-versioning.md) is the
+normative upgrade policy governing both specifications above: the additive
+pattern new extensions must follow, the eternal-verifiability guarantee, the
+three-state algorithm lifecycle (`active` / `deprecated` / `unsafe`), the
+amendment procedure, and the signature-suite, payload-field, revocation-class,
+log-entry-type, and transfer-type registries.
+
+[docs/spec/attest-threat-model.md](docs/spec/attest-threat-model.md) is the
+maintained threat model behind the two specifications above — a living
+normative companion that analyzes their mechanisms rather than imposing
+requirements of its own — and
+[docs/spec/attest-privacy.md](docs/spec/attest-privacy.md) is its
+privacy-considerations sibling.
+
+The core protocol properties are machine-checked in Tamarin: [formal/](formal/)
+holds the model, the property↔lemma↔spec map, and the honest scope of what is
+and is not proved, gated in CI by a statement-pinning checker.
+
+[docs/spec/attest-standards-relationship.md](docs/spec/attest-standards-relationship.md)
+(non-normative) is the boundary annex: in terms an expert in each standard
+would accept, it states attest's relationship to W3C Verifiable Credentials,
+eIDAS 2.0/the EUDI Wallet, JOSE/JWS and COSE, RFC 8785 (JCS), C2PA, SCITT
+(RFC 9943), and RATS (RFC 9334) — including what a future bridge to one of
+them could look like, where one exists.
 
 ## Roadmap / north star
 
@@ -162,12 +248,9 @@ Non-normative, and deliberately undated — these are directions, not commitment
   capture their own evidence of a purchase from a store that never signs anything,
   at weaker-than-issuer-signed trust. Legal review is required before any of this
   is built.
-- **Rights-holder-authorized transfer.** A future profile that gives real meaning
-  to the reserved `license.transferable` field, once rights holders actually
-  authorize resale or transfer.
 - **Registry / replication layer.** An optional layer for replicating verification
-  material, with optional Merkle-root transparency anchoring — the only place a
-  chain will ever appear in this project, and even then strictly optional.
+  material, with optional Merkle-root transparency anchoring — separate from the
+  shipped §17.5 chain-of-title audit surface, and still strictly optional.
 
 ## Licensing, contributing, contact
 
@@ -181,10 +264,11 @@ the required attribution.
 actually conform to it; forks are welcome to use the technology but not the name
 for a divergent derivative. This paragraph is a naming norm, not a trademark
 registration — real trademark enforcement would require actually registering the
-mark, which has not happened.
+mark, which has not happened. Conformance claims follow the self-certification
+process in [docs/conformance.md](docs/conformance.md).
 
 **Contributing.** See [`CONTRIBUTING.md`](CONTRIBUTING.md). Implementation pull
-requests must pass all 52 conformance vector leaves and keep both the Python and
+requests must pass all 97 conformance vector leaves and keep both the Python and
 TypeScript suites green.
 
 **Contact.** Use GitHub Issues for technical bugs, GitHub Discussions for

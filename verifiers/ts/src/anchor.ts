@@ -11,6 +11,13 @@
 // of the bundle. `checkpoint`/`policy` are the trusted, verifier-config side
 // (mirrors tlog.verifyCheckpoint's logKey/expectedOrigin split): malformed
 // ones throw `AnchorError` instead, since that signals a caller bug.
+//
+// Anchor profile (G4, attest-v0.2.md §11.1): an `ots` proof's accumulator
+// starts from an `evidence.anchor_profile`-selected commitment —
+// `sha256(checkpoint.signedNoteBytes)` (the full signed note) for
+// "signed-note-v2", or `sha256(checkpoint.noteBytes)` (the unsigned header
+// alone — TM-33's residual pre-anchor-then-sign gap) for absent/null/
+// "note-v1". `AnchorVerdict.noteOnly` records which profile was used.
 import { equalBytes, concatBytes, hexToBytes } from '@noble/curves/utils.js'
 import { sha256 } from '@noble/hashes/sha2'
 import { Checkpoint, TlogError, parseCheckpoint } from './tlog.js'
@@ -33,6 +40,7 @@ import {
   otsHeaderTimeInvalid,
   rfc3161TokenNotStr,
   unknownProofKind,
+  evidenceAnchorProfileInvalid,
 } from './messages.js'
 
 const HEX64_RE = /^[0-9a-f]{64}$/
@@ -52,6 +60,17 @@ const MAX_OP_HEX_LEN = 2048 // hex chars (1024 bytes) per append/prepend operand
 const MAX_RENDERABLE_UNIX_TIME = 253402300799
 
 const KNOWN_OTS_OPS = new Set(['sha256', 'append', 'prepend'])
+
+// Anchor profile (G4, attest-v0.2.md §11.1): which checkpoint bytes an
+// `ots` proof's accumulator starts from. Absent or "note-v1" is the legacy
+// path (starts from checkpoint.noteBytes, the unsigned header alone —
+// eternal verifiability, attest-versioning.md §3: still fully verifiable,
+// forever, just classified noteOnly=true). "signed-note-v2" starts from
+// checkpoint.signedNoteBytes (the full signed note) and is what
+// newly-produced anchors MUST use going forward.
+const ANCHOR_PROFILE_NOTE_V1 = 'note-v1'
+const ANCHOR_PROFILE_SIGNED_NOTE_V2 = 'signed-note-v2'
+const KNOWN_ANCHOR_PROFILES = new Set([ANCHOR_PROFILE_NOTE_V1, ANCHOR_PROFILE_SIGNED_NOTE_V2])
 
 export const MAX_PROOFS_PER_EVIDENCE_ = MAX_PROOFS_PER_EVIDENCE
 export const MAX_OPS_PER_PROOF_ = MAX_OPS_PER_PROOF
@@ -80,12 +99,21 @@ export interface AnchorPolicy {
 
 /** The outcome of `verifyAnchor` over one evidence bundle. `anchoredBefore`
  * is the minimum pinned header time over verified `ots` (PQ-surviving)
- * proofs only — `rfc3161` proofs never set it. */
+ * proofs only — `rfc3161` proofs never set it.
+ *
+ * `noteOnly` is `true` iff the evidence's `anchor_profile` is absent,
+ * `null`, or `"note-v1"` (G4, attest-v0.2.md §11.1): the accumulator
+ * started from `checkpoint.noteBytes` alone, so any resulting anchor proves
+ * existence of the unsigned header text only, not of the eventually-
+ * attached signature. `false` for `"signed-note-v2"` evidence.
+ * `transparency.ts` turns this into the caller-facing `anchor_note_only`
+ * warning — `verifyAnchor`'s own `warnings` never mention it. */
 export interface AnchorVerdict {
   anchored: boolean
   anchoredBefore: number | null
   pqSurviving: boolean
   warnings: string[]
+  noteOnly: boolean
 }
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
@@ -97,7 +125,14 @@ function isPinnedHeaderShape(v: unknown): v is PinnedHeader {
 }
 
 function isCheckpointShape(v: unknown): v is Checkpoint {
-  return isPlainObject(v) && 'origin' in v && 'treeSize' in v && 'root' in v && 'noteBytes' in v
+  return (
+    isPlainObject(v) &&
+    'origin' in v &&
+    'treeSize' in v &&
+    'root' in v &&
+    'noteBytes' in v &&
+    'signedNoteBytes' in v
+  )
 }
 
 function isAnchorVerdictShape(v: unknown): v is AnchorVerdict {
@@ -174,6 +209,48 @@ function opHex(value: unknown): Uint8Array | null {
   return hexToBytes(value)
 }
 
+interface OtsChainReplay {
+  accumulator: Uint8Array | null
+  warning: string | null
+}
+
+/** Validate and replay an untrusted `ots` proof's `ops` op-chain, starting
+ * from `accumulatorStart`. Returns `{accumulator, warning: null}` on
+ * success, or `{accumulator: null, warning}` naming the first shape
+ * violation. Shared by `verifyOtsProof` (verification) — mirrors
+ * `anchor.py`'s `replay_ots_op_chain`; callers must never reimplement this
+ * loop. */
+export function replayOtsOpChain(accumulatorStart: Uint8Array, ops: unknown): OtsChainReplay {
+  if (!Array.isArray(ops)) return { accumulator: null, warning: ANCHOR_WARN.OTS_OPS_NOT_LIST }
+  if (ops.length === 0) return { accumulator: null, warning: ANCHOR_WARN.OTS_EMPTY_OPS }
+  if (ops.length > MAX_OPS_PER_PROOF) {
+    return { accumulator: null, warning: otsTooManyOps(MAX_OPS_PER_PROOF) }
+  }
+
+  let accumulator = accumulatorStart
+  for (const op of ops) {
+    if (!Array.isArray(op) || op.length === 0 || typeof op[0] !== 'string') {
+      return { accumulator: null, warning: ANCHOR_WARN.OTS_OP_SHAPE }
+    }
+    const opcode = op[0]
+    if (!KNOWN_OTS_OPS.has(opcode)) {
+      return { accumulator: null, warning: otsUnknownOp(opcode) }
+    }
+    if (opcode === 'sha256') {
+      if (op.length !== 1) {
+        return { accumulator: null, warning: ANCHOR_WARN.OTS_SHA256_TAKES_NO_OPERAND }
+      }
+      accumulator = sha256(accumulator)
+    } else {
+      if (op.length !== 2) return { accumulator: null, warning: otsOperandRequired(opcode) }
+      const operand = opHex(op[1])
+      if (operand === null) return { accumulator: null, warning: otsOperandInvalid(opcode) }
+      accumulator = opcode === 'append' ? concatBytes(accumulator, operand) : concatBytes(operand, accumulator)
+    }
+  }
+  return { accumulator, warning: null }
+}
+
 interface OtsProofOutcome {
   verified: boolean
   headerTime: number
@@ -181,18 +258,24 @@ interface OtsProofOutcome {
 }
 
 /** Evaluate one `ots` proof: replay its op-chain from `accumulatorStart`
- * and cross-check the result against a header pinned in `policy`. */
+ * and cross-check the result against a header pinned in `policy`.
+ *
+ * `legacyAccumulatorStart`/`noteOnly` (G4/I2, attest-v0.2.md §11.1.1): on an
+ * op-chain mismatch under a declared signed-note-v2 profile, also replay
+ * the SAME `ops` from the legacy note-v1 seed — purely diagnostic, never
+ * changes `verified` — so the warning can name which seed the declared
+ * profile actually requires and flag a v1-shaped commitment presented as
+ * v2. */
 function verifyOtsProof(
   proof: Record<string, unknown>,
   accumulatorStart: Uint8Array,
+  legacyAccumulatorStart: Uint8Array,
+  noteOnly: boolean,
   policy: AnchorPolicy,
 ): OtsProofOutcome {
   const ops = proof['ops']
-  if (!Array.isArray(ops)) return { verified: false, headerTime: 0, warning: ANCHOR_WARN.OTS_OPS_NOT_LIST }
-  if (ops.length === 0) return { verified: false, headerTime: 0, warning: ANCHOR_WARN.OTS_EMPTY_OPS }
-  if (ops.length > MAX_OPS_PER_PROOF) {
-    return { verified: false, headerTime: 0, warning: otsTooManyOps(MAX_OPS_PER_PROOF) }
-  }
+  const { accumulator, warning } = replayOtsOpChain(accumulatorStart, ops)
+  if (warning !== null) return { verified: false, headerTime: 0, warning }
 
   const rootBytes = hex64(proof['header_merkle_root'])
   if (rootBytes === null) {
@@ -212,30 +295,21 @@ function verifyOtsProof(
     return { verified: false, headerTime: 0, warning: otsHeaderTimeInvalid(MAX_RENDERABLE_UNIX_TIME) }
   }
 
-  let accumulator = accumulatorStart
-  for (const op of ops) {
-    if (!Array.isArray(op) || op.length === 0 || typeof op[0] !== 'string') {
-      return { verified: false, headerTime: 0, warning: ANCHOR_WARN.OTS_OP_SHAPE }
+  // `warning === null` above guarantees `accumulator` is non-null.
+  if (!equalBytes(accumulator as Uint8Array, rootBytes)) {
+    if (noteOnly) return { verified: false, headerTime: 0, warning: ANCHOR_WARN.OTS_CHAIN_MISMATCH }
+    const legacyReplay = replayOtsOpChain(legacyAccumulatorStart, ops)
+    const looksLikeV1 =
+      legacyReplay.warning === null &&
+      legacyReplay.accumulator !== null &&
+      equalBytes(legacyReplay.accumulator, rootBytes)
+    return {
+      verified: false,
+      headerTime: 0,
+      warning: looksLikeV1
+        ? ANCHOR_WARN.OTS_CHAIN_MISMATCH_V2_LOOKS_LIKE_V1
+        : ANCHOR_WARN.OTS_CHAIN_MISMATCH_V2_REQUIRES,
     }
-    const opcode = op[0]
-    if (!KNOWN_OTS_OPS.has(opcode)) {
-      return { verified: false, headerTime: 0, warning: otsUnknownOp(opcode) }
-    }
-    if (opcode === 'sha256') {
-      if (op.length !== 1) {
-        return { verified: false, headerTime: 0, warning: ANCHOR_WARN.OTS_SHA256_TAKES_NO_OPERAND }
-      }
-      accumulator = sha256(accumulator)
-    } else {
-      if (op.length !== 2) return { verified: false, headerTime: 0, warning: otsOperandRequired(opcode) }
-      const operand = opHex(op[1])
-      if (operand === null) return { verified: false, headerTime: 0, warning: otsOperandInvalid(opcode) }
-      accumulator = opcode === 'append' ? concatBytes(accumulator, operand) : concatBytes(operand, accumulator)
-    }
-  }
-
-  if (!equalBytes(accumulator, rootBytes)) {
-    return { verified: false, headerTime: 0, warning: ANCHOR_WARN.OTS_CHAIN_MISMATCH }
   }
 
   const pinned = policy.pinnedHeaders[headerHash]
@@ -268,7 +342,13 @@ export function verifyAnchor(evidence: unknown, checkpoint: unknown, policy: unk
   const validatedPolicy = validatePolicy(policy)
 
   const warnings: string[] = []
-  const fail = (): AnchorVerdict => ({ anchored: false, anchoredBefore: null, pqSurviving: false, warnings })
+  const fail = (): AnchorVerdict => ({
+    anchored: false,
+    anchoredBefore: null,
+    pqSurviving: false,
+    warnings,
+    noteOnly: false,
+  })
 
   if (!isPlainObject(evidence)) {
     warnings.push(evidenceNotObject(evidence))
@@ -312,7 +392,19 @@ export function verifyAnchor(evidence: unknown, checkpoint: unknown, policy: unk
     return fail()
   }
 
-  const accumulatorStart = sha256(checkpoint.noteBytes)
+  let anchorProfile = 'anchor_profile' in evidence ? evidence['anchor_profile'] : ANCHOR_PROFILE_NOTE_V1
+  if (anchorProfile === null) anchorProfile = ANCHOR_PROFILE_NOTE_V1 // explicit JSON null: same as absent
+  if (typeof anchorProfile !== 'string' || !KNOWN_ANCHOR_PROFILES.has(anchorProfile)) {
+    warnings.push(evidenceAnchorProfileInvalid(anchorProfile))
+    return fail()
+  }
+  const noteOnly = anchorProfile !== ANCHOR_PROFILE_SIGNED_NOTE_V2
+  // Both seeds are computed unconditionally (cheap): `legacyAccumulatorStart`
+  // is only used diagnostically, on a v2 op-chain mismatch, to name the
+  // common mistake of presenting a v1-shaped commitment as v2.
+  const legacyAccumulatorStart = sha256(checkpoint.noteBytes)
+  const v2AccumulatorStart = sha256(checkpoint.signedNoteBytes)
+  const accumulatorStart = noteOnly ? legacyAccumulatorStart : v2AccumulatorStart
   let anchored = false
   let pqSurviving = false
   let anchoredBefore: number | null = null
@@ -324,7 +416,13 @@ export function verifyAnchor(evidence: unknown, checkpoint: unknown, policy: unk
     }
     const kind = proof['kind']
     if (kind === 'ots') {
-      const outcome = verifyOtsProof(proof, accumulatorStart, validatedPolicy)
+      const outcome = verifyOtsProof(
+        proof,
+        accumulatorStart,
+        legacyAccumulatorStart,
+        noteOnly,
+        validatedPolicy,
+      )
       if (outcome.warning !== null) warnings.push(proofPrefixed(i, outcome.warning))
       if (outcome.verified) {
         anchored = true
@@ -344,7 +442,7 @@ export function verifyAnchor(evidence: unknown, checkpoint: unknown, policy: unk
     }
   })
 
-  return { anchored, anchoredBefore, pqSurviving, warnings }
+  return { anchored, anchoredBefore, pqSurviving, warnings, noteOnly }
 }
 
 /** True iff `policy.crqcHorizon === null`, or `verdict` is a PQ-surviving

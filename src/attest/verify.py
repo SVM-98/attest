@@ -28,7 +28,18 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
-from attest import anchor, canon, commitment, keys, manifests, pq, revocation, tlog, validate
+from attest import (
+    anchor,
+    canon,
+    commitment,
+    keys,
+    manifests,
+    pq,
+    revocation,
+    tlog,
+    transfer,
+    validate,
+)
 from attest import transparency as transparency_module
 
 _ALG = "Ed25519"  # hard-coded — never selected from any field, mirrors issue.py
@@ -71,6 +82,20 @@ _REVOCABILITY_POLICY = "policy"
 
 _RECORD_STATUS_REVOKED = "revoked"
 
+# v0.2 Stage 3 (§17, issuer-mediated transfer): old-receipt extinguishment via
+# a `status: "transferred"` revocation record, honored only when BACKED by an
+# authenticated, log-included transfer record (§17.3's consent gate). The
+# literal is deliberately reused for both the record's own `status` field and
+# the reachable `revocation` result value — mirrors `_RECORD_STATUS_REVOKED`/
+# `_REVOCATION_REVOKED`'s existing dual use above.
+_REVOCATION_TRANSFERRED = "transferred"
+
+# Fixed literals (v0.2 §17.2-§17.4, verbatim; TS parity: messages.ts).
+_WARN_TRANSFERRED_REVOCATION_UNBACKED = "transferred_revocation_unbacked"
+_WARN_TRANSFER_RECORD_UNLOGGED = "transfer_record_unlogged"
+_WARN_TRANSFER_NOT_YET_TRANSFERABLE = "transfer_not_yet_transferable"
+_WARN_TRANSFER_DOUBLE_ASSIGNMENT = "transfer_double_assignment_conflict"
+
 _BINDING_PROVEN = "proven"
 _BINDING_NOT_PROVEN = "not_proven"
 _BINDING_NOT_CHECKED = "not_checked"
@@ -85,10 +110,30 @@ _MANIFEST_FRESHNESS_NOT_CHECKED = "not_checked"
 
 _CLAIM_TYPE_RECEIPT = "receipt"
 _CLAIM_TYPE_KEY_MANIFEST = "key-manifest"
+_CLAIM_TYPE_REVOCATION_RECORD = "revocation-record"
 
 _WARN_TRANSPARENCY_CONFIG_MISSING = "transparency_config_missing"
 _WARN_TRANSPARENCY_CLAIM_UNRESOLVABLE = "transparency_claim_unresolvable"
 _WARN_ROTATION_CHAIN_REQUIRED = "corroboration_requires_rotation_chain"
+
+# G5 (v0.2 §8/§15 amendment, TM-47): a refund_window revocation record that
+# fails the deadline-effectiveness rule (unlogged, or logged/anchored after
+# the receipt's own refund-window deadline) — exact, cross-language wire
+# string (TS parity: messages.ts).
+_WARN_REVOCATION_UNLOGGED_DEADLINE = "revocation_unlogged_deadline"
+_ANCHORED_BEFORE_PREFIX = "anchored_before:"
+
+# G6 mixed-keyset prohibition (v0.2 §2.3/§13 amendment) — the wire warning
+# string, exact and cross-language (TS parity: messages.ts).
+_WARN_MIXED_KEYSET_ACTIVE_ED_ONLY_SIBLING = "mixed_keyset_active_ed_only_sibling"
+
+# G2/G3 manifest currency (attest-versioning.md rev 4; v0.1 §7.2/§7.3
+# amendment) — the wire warning string for a legacy (no `manifest_version`)
+# artifact manifest resolved for the receipt's `work.artifact_series`, exact
+# and cross-language (TS parity: messages.ts).
+_WARN_ARTIFACT_MANIFEST_UNVERSIONED = "artifact_manifest_unversioned"
+_WARN_ARTIFACT_MANIFEST_UNAUTHENTICATED = "artifact_manifest_unauthenticated"
+_WARN_ARTIFACT_MANIFEST_ISSUER_MISMATCH = "artifact_manifest_issuer_mismatch"
 
 # This outer cap must COVER everything the downstream evaluators' own inner
 # caps accept, or evaluator-valid evidence gets falsely rejected here.
@@ -125,6 +170,15 @@ class TrustStore:
     manifests: dict[str, dict[str, Any]]  # issuer_id -> key manifest
     provenance: dict[str, str]  # issuer_id -> "tls" | "bundle"
     chains: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    # G2/G3 (attest-versioning.md rev 4; v0.1 §7.2/§7.3 amendment) — the
+    # artifact-manifest analog of `manifests`/`chains` above, scoped by the
+    # receipt issuer and `work.artifact_series`: issuer_id -> series ->
+    # manifest/history. This prevents one issuer's series name from affecting
+    # another issuer's currency state.
+    artifact_manifests: dict[str, dict[str, dict[str, Any]]] = field(default_factory=dict)
+    artifact_manifest_chains: dict[str, dict[str, list[dict[str, Any]]]] = field(
+        default_factory=dict
+    )
 
 
 @dataclass(frozen=True)
@@ -161,6 +215,10 @@ class VerificationResult:
     schema: str  # "valid" | "invalid" | "not_checked"
     revocation: (
         str  # "unknown" | "not_revoked_as_of:<T>" | "revoked" | "invalid_revocation_ignored"
+        # | "transferred" (v0.2 §17.3, Stage 3: a BACKED status:"transferred"
+        # revocation record extinguishes the old receipt — reachable only
+        # under Stage-3-capable verification, i.e. a caller that evaluates
+        # `transfer_view`)
     )
     binding: str  # "proven" | "not_proven" | "not_checked"
     trust: str  # "verified" | "unauthenticated_tofu" | "unverified_rotation"
@@ -182,11 +240,20 @@ class VerificationResult:
         `invalid_revocation_ignored` and `unknown`/`not_revoked_as_of:<T>` do
         NOT affect `ok` — an ignored-by-class or unverified revocation record
         must never degrade a receipt's validity (that would defeat the
-        revocability:none irrevocability guarantee, design vector 16)."""
+        revocability:none irrevocability guarantee, design vector 16).
+
+        v0.2 Stage 3 (design doc §4): `revocation == "transferred"` caps `ok`
+        the same way `"revoked"` already does — a BACKED transfer record
+        extinguishes the old receipt exactly as effectively as a plain
+        revocation, it is simply reported on a distinct value so a caller can
+        tell "sold" from "revoked" on the same feed. Reachable only under
+        Stage-3-capable verification (a caller that evaluates
+        `transfer_view`); a verifier that never does keeps v0.1's `ok`
+        formula unchanged."""
         return (
             self.signature == _SIG_VALID
             and self.schema == _SCHEMA_VALID
-            and self.revocation != _REVOCATION_REVOKED
+            and self.revocation not in (_REVOCATION_REVOKED, _REVOCATION_TRANSFERRED)
             and not self.errors
         )
 
@@ -251,6 +318,17 @@ def _chain_continuous(chain: list[dict[str, Any]]) -> bool:
     if len(chain) < 2:
         return True
     return all(manifests.check_continuity(chain[i], chain[i + 1]) for i in range(len(chain) - 1))
+
+
+def _artifact_chain_continuous(chain: list[dict[str, Any]]) -> bool:
+    """True iff every consecutive pair in `chain` passes
+    `manifests.check_artifact_continuity` — the artifact-manifest analog of
+    `_chain_continuous` (G2/G3, attest-versioning.md rev 4)."""
+    if len(chain) < 2:
+        return True
+    return all(
+        manifests.check_artifact_continuity(chain[i], chain[i + 1]) for i in range(len(chain) - 1)
+    )
 
 
 def _rotation_chain_verified(
@@ -552,6 +630,227 @@ def _within_refund_window(record: dict[str, Any], window_end: datetime | None) -
         return False  # incomparable naive/aware mix — fail closed, never effective
 
 
+def _revocation_deadline_satisfied(
+    effective: list[dict[str, Any]],
+    revocation_evidence: dict[str, Any] | None,
+    issuer_id: str | None,
+    log_keys: list[tlog.LogKey],
+    anchor_policy: anchor.AnchorPolicy,
+    window_end: datetime | None,
+    warnings: list[str],
+) -> bool:
+    """G5 (v0.2 §8/§15, TM-47): True iff at least one of `effective`'s
+    refund_window revocation records has Stage 2 evidence proving it was
+    logged AND anchored no later than `window_end` — the SAME refund-window
+    deadline `_refund_window_end`/`_within_refund_window` already compute,
+    never a second definition of "deadline".
+
+    Only called once the caller has ALREADY established the verifier is
+    Stage-2 capable (`log_keys`/`anchor_policy` both supplied) and `effective`
+    is non-empty; `revocation_evidence` itself may still be absent or fail to
+    resolve — either way this returns `False`, so a Stage-2-capable verifier
+    with no (or unresolvable) evidence for this specific record never honors
+    it. `log_keys`/`anchor_policy` are the same trusted, verifier-config
+    values `_evaluate_transparency_claim` validates for receipt/key-manifest
+    claims; malformed ones raise `TransparencyError` here too (a config bug),
+    exactly the same discipline.
+
+    Every warning the shared evaluator returns for a candidate record (e.g.
+    `anchor_note_only`, malformed-evidence reasons, `log_equivocation_detected`)
+    is appended to `warnings` (dedup against identical strings already
+    present) regardless of whether that record ends up timely — mirrors
+    `_evaluate_transparency_claim`'s own `warnings.extend(result.warnings)`.
+    """
+    if revocation_evidence is None or window_end is None:
+        return False
+
+    origin = _resolve_log_origin(log_keys)
+    transparency_module._validate_policy(anchor_policy)
+
+    try:
+        # verify()'s untrusted-evidence boundary, mirroring
+        # `_evaluate_transparency_claim`: canonicalize and parse once so
+        # every following phase sees one ordinary JSON object, never a
+        # stateful mapping/value supplied by the caller.
+        serialized_evidence = canon.dumps(revocation_evidence)
+        if len(serialized_evidence) > _MAX_TRANSPARENCY_EVIDENCE_LEN:
+            return False
+        materialized_evidence = json.loads(serialized_evidence)
+        if not isinstance(materialized_evidence, dict):
+            return False
+    # Adversarial-boundary confinement (never BaseException): a hostile
+    # `revocation_evidence` mapping's `__eq__`/`__getitem__` must not escape
+    # as a bare exception, mirroring `_evaluate_transparency_claim`.
+    except Exception:
+        return False
+
+    for record in effective:
+        try:
+            record_hash = revocation.record_hash(record)
+        except (TypeError, canon.CanonError):
+            continue
+        expected_entry = _validated_transparency_entry(
+            {
+                "type": _CLAIM_TYPE_REVOCATION_RECORD,
+                "issuer": issuer_id,
+                "record_sha256": record_hash,
+            }
+        )
+        if expected_entry is None:
+            continue
+        result = transparency_module.evaluate_transparency(
+            materialized_evidence,
+            log_keys=log_keys,
+            expected_origin=origin,
+            policy=anchor_policy,
+            expected_entry=expected_entry,
+        )
+        for warning in result.warnings:
+            if warning not in warnings:
+                warnings.append(warning)
+        if not result.transparency.startswith(_ANCHORED_BEFORE_PREFIX):
+            continue
+        anchored_time = _parse_iso(result.transparency[len(_ANCHORED_BEFORE_PREFIX) :])
+        if anchored_time is None:
+            continue
+        try:
+            if anchored_time <= window_end:
+                return True
+        except TypeError:
+            continue  # incomparable naive/aware mix — fail closed, never timely
+    return False
+
+
+def _resolve_transfer_backing(
+    payload: dict[str, Any],
+    transfer_view: list[dict[str, Any]],
+    issuer_manifest: dict[str, Any],
+    issuer_id: str | None,
+    log_keys: list[tlog.LogKey] | None,
+    anchor_policy: anchor.AnchorPolicy | None,
+    warnings: list[str],
+) -> dict[str, Any] | None:
+    """v0.2 §17.2-§17.4 (Stage 3): the winning, BACKED transfer record for
+    `payload`'s own `receipt_id` among `transfer_view`'s untrusted claims
+    (`{"record": <transfer record>, "evidence": <§10.2 evidence bundle>}`),
+    or `None` if no claim survives every gate below.
+
+    `transfer_view` is materialized once at the untrusted boundary — the
+    SAME `canon.dumps`/size-bound/`except Exception` confinement
+    `_revocation_deadline_satisfied` already applies to `revocation_evidence`
+    — so every later phase sees ordinary JSON values, never a stateful/
+    hostile mapping or list a caller constructed.
+
+    Per claim, in this exact order (§17.3's consent gate plus §17.7/§17.2):
+
+    1. `record` is a dict whose `receipt_id` equals `payload`'s own — else
+       the claim is irrelevant to this receipt and is skipped silently.
+    2. `transfer.verify_record_signature(record, issuer_manifest)` — the
+       issuer's own signature (hoisting `manifests.verify_key_manifest` once
+       here, mirroring `_classify_revocation`'s own hoisting of the same
+       check — this function is called at most once per classification).
+       On failure: `_WARN_TRANSFERRED_REVOCATION_UNBACKED` (deduplicated),
+       skip.
+    3. `payload["buyer"]["pubkey"]` is a non-null string AND
+       `transfer.verify_authorization(record, pubkey)` — the OLD receipt's
+       own holder consented. Same unbacked warning on failure, skip.
+    4. If `payload["license"]["not_transferable_before"]` is present: both
+       timestamps parse (fail-closed) and `record["transferred_at"]` is not
+       earlier than it — else `_WARN_TRANSFER_NOT_YET_TRANSFERABLE`, skip.
+    5. Stage-2 capability (`log_keys` AND `anchor_policy` both supplied) and
+       `transfer.record_logged_standing(...)` proves this record's own
+       `transfer-record` log entry reached at least `logged` standing — else
+       `_WARN_TRANSFER_RECORD_UNLOGGED`, skip.
+
+    Survivors are `(leaf_index, record)` pairs; two or more is a double
+    assignment (§17.4) — `_WARN_TRANSFER_DOUBLE_ASSIGNMENT` — and the
+    EARLIEST log index (first-logged) wins.
+    """
+    try:
+        serialized = canon.dumps(transfer_view)
+        if len(serialized) > _MAX_TRANSPARENCY_EVIDENCE_LEN:
+            return None
+        materialized = json.loads(serialized)
+    # Adversarial-boundary confinement (never BaseException), mirroring
+    # `_revocation_deadline_satisfied`: a hostile `transfer_view` list/dict's
+    # `__eq__`/`__getitem__` must not escape as a bare exception.
+    except Exception:
+        return None
+    if not isinstance(materialized, list):
+        return None
+
+    receipt_id = payload.get("receipt_id")
+    manifest_ok = manifests.verify_key_manifest(issuer_manifest)
+
+    def _append_once(warning: str) -> None:
+        if warning not in warnings:
+            warnings.append(warning)
+
+    survivors: dict[str, tuple[int, dict[str, Any]]] = {}
+    for claim in materialized:
+        if not isinstance(claim, dict):
+            continue
+        record = claim.get("record")
+        if not isinstance(record, dict) or record.get("receipt_id") != receipt_id:
+            continue
+
+        if not manifest_ok or not transfer.verify_record_signature(record, issuer_manifest):
+            _append_once(_WARN_TRANSFERRED_REVOCATION_UNBACKED)
+            continue
+
+        buyer = payload.get("buyer")
+        holder_pubkey = buyer.get("pubkey") if isinstance(buyer, dict) else None
+        if not isinstance(holder_pubkey, str) or not transfer.verify_authorization(
+            record, holder_pubkey
+        ):
+            _append_once(_WARN_TRANSFERRED_REVOCATION_UNBACKED)
+            continue
+
+        license_block = payload.get("license")
+        not_transferable_before = (
+            license_block.get("not_transferable_before")
+            if isinstance(license_block, dict)
+            else None
+        )
+        if not_transferable_before is not None:
+            transferred_at = _parse_iso(record.get("transferred_at"))
+            floor = _parse_iso(not_transferable_before)
+            honored = False
+            if transferred_at is not None and floor is not None:
+                try:
+                    honored = transferred_at >= floor
+                except TypeError:
+                    honored = False  # incomparable naive/aware mix — fail closed
+            if not honored:
+                _append_once(_WARN_TRANSFER_NOT_YET_TRANSFERABLE)
+                continue
+
+        leaf_index = None
+        if log_keys is not None and anchor_policy is not None:
+            leaf_index = transfer.record_logged_standing(
+                record,
+                claim.get("evidence"),
+                issuer_id if issuer_id is not None else "",
+                log_keys,
+                anchor_policy,
+                warnings,
+            )
+        if leaf_index is None:
+            _append_once(_WARN_TRANSFER_RECORD_UNLOGGED)
+            continue
+
+        record_hash = transfer.record_hash(record)
+        previous = survivors.get(record_hash)
+        if previous is None or leaf_index < previous[0]:
+            survivors[record_hash] = (leaf_index, record)
+
+    if not survivors:
+        return None
+    if len(survivors) > 1:
+        _append_once(_WARN_TRANSFER_DOUBLE_ASSIGNMENT)
+    return min(survivors.values(), key=lambda item: item[0])[1]
+
+
 def _classify_revocation(
     payload: dict[str, Any],
     revocation_view: list[dict[str, Any]] | None,
@@ -559,6 +858,10 @@ def _classify_revocation(
     warnings: list[str],
     errors: list[str],
     max_records: int = _MAX_REVOCATION_RECORDS,
+    log_keys: list[tlog.LogKey] | None = None,
+    anchor_policy: anchor.AnchorPolicy | None = None,
+    revocation_evidence: dict[str, Any] | None = None,
+    transfer_view: list[dict[str, Any]] | None = None,
 ) -> str:
     """§6 step 6 / §3.1: revocation-by-class.
 
@@ -578,6 +881,17 @@ def _classify_revocation(
     - "refund_window": an effective record is honored only if its own signed
       `revoked_at` falls within `issued_at + revocation_window_days` —
       evaluated against the record's own signed time, never local clock.
+      G5 (TM-47) adds a deadline-EFFECTIVENESS rule on top, gated on the
+      verifier being Stage-2 capable (`log_keys`/`anchor_policy` both
+      supplied, exactly `_evaluate_transparency_claim`'s existing gate): a
+      window-effective record is honored only if `revocation_evidence`
+      proves it was logged (`revocation-record` entry, §8) AND anchored no
+      later than the SAME refund-window deadline — see
+      `_revocation_deadline_satisfied`. A verifier that is not Stage-2
+      capable at all keeps v0.1 semantics unchanged (eternal verifiability:
+      the rule only engages where a verifier actually asks for it).
+      `policy`/`compromised`/`none` classes are UNAFFECTED by this rule —
+      logging remains optional corroboration for them, never a gate.
 
     The `not_revoked_as_of:<T>` freshness anchor is computed over ALL
     authenticated records in the view (any receipt_id), not the raw view —
@@ -593,6 +907,21 @@ def _classify_revocation(
     padding past the cap. For `none` (irrevocable) a revocation can never
     affect `ok`, so it is a non-fatal warning. In both cases revocation is
     `"unknown"`.
+
+    v0.2 Stage 3 (§17.3, design doc §4): once the `"revoked"`-status logic
+    above has run to completion WITHOUT itself yielding `_REVOCATION_REVOKED`
+    — byte-identical to pre-Stage-3 behavior; this ordering is what keeps
+    every existing conformance leaf unchanged — an authenticated, matching
+    `status == "transferred"` record is additionally considered, for ALL
+    revocability classes, `none` included (the consent-gate principle,
+    §17.3): a BACKED winner (see `_resolve_transfer_backing`) yields
+    `_REVOCATION_TRANSFERRED`; otherwise the outcome reverts to whatever the
+    `"revoked"`-status logic already computed, and
+    `_WARN_TRANSFERRED_REVOCATION_UNBACKED` is appended UNLESS the resolver
+    itself already appended a more specific warning
+    (`transfer_record_unlogged`/`transfer_not_yet_transferable`) or
+    `transfer_view` was never supplied at all — in which case the resolver is
+    never reached, and this function appends the unbacked warning directly.
     """
     if not revocation_view:  # None or empty: no data, no freshness anchor either way
         return _REVOCATION_UNKNOWN
@@ -641,7 +970,11 @@ def _classify_revocation(
 
     # Effective revocations for THIS receipt: matching receipt_id, authenticated,
     # and status == "revoked". Matching-but-unauthenticated records are warned.
+    # A matching, authenticated `status == "transferred"` record (Stage 3,
+    # §17.3) is collected separately — it is not a "revoked"-status statement,
+    # so it plays no part in the "revoked"-status dispatch below.
     valid: list[dict[str, Any]] = []
+    transferred_matches: list[dict[str, Any]] = []
     for record in revocation_view:
         if not isinstance(record, dict) or record.get("receipt_id") != receipt_id:
             continue
@@ -650,34 +983,108 @@ def _classify_revocation(
             continue
         if record.get("status") == _RECORD_STATUS_REVOKED:
             valid.append(record)
+        elif record.get("status") == _REVOCATION_TRANSFERRED:
+            transferred_matches.append(record)
 
-    if revocability == _REVOCABILITY_NONE:
-        if valid:
-            warnings.append(
-                "revocation record ignored: license.revocability is 'none' (irrevocable)"
+    def _revoked_class_result() -> str:
+        """The pre-Stage-3 `"revoked"`-status dispatch, unchanged — kept as a
+        nested function purely so its result can be captured before the
+        Stage 3 transferred-class check runs (see the enclosing docstring)."""
+        if revocability == _REVOCABILITY_NONE:
+            if valid:
+                warnings.append(
+                    "revocation record ignored: license.revocability is 'none' (irrevocable)"
+                )
+                return _REVOCATION_INVALID_IGNORED
+            return not_revoked
+
+        if revocability == _REVOCABILITY_POLICY:
+            if valid:
+                return _REVOCATION_REVOKED
+            return not_revoked
+
+        if revocability == _REVOCABILITY_REFUND_WINDOW:
+            window_end = _refund_window_end(payload)
+            effective = [r for r in valid if _within_refund_window(r, window_end)]
+            if effective:
+                # G5 (TM-47): a Stage-2-capable verifier MUST additionally
+                # apply the deadline-effectiveness rule — a window-effective
+                # record is honored only with evidence proving it was logged
+                # and anchored no later than `window_end`. A verifier that
+                # never supplies log_keys/anchor_policy at all is not
+                # Stage-2 capable, so the rule does not engage and v0.1
+                # semantics stand.
+                if log_keys is not None and anchor_policy is not None:
+                    deadline_issuer_id = (
+                        issuer_manifest.get("issuer") if isinstance(issuer_manifest, dict) else None
+                    )
+                    if not _revocation_deadline_satisfied(
+                        effective,
+                        revocation_evidence,
+                        deadline_issuer_id if isinstance(deadline_issuer_id, str) else None,
+                        log_keys,
+                        anchor_policy,
+                        window_end,
+                        warnings,
+                    ):
+                        warnings.append(_WARN_REVOCATION_UNLOGGED_DEADLINE)
+                        return _REVOCATION_INVALID_IGNORED
+                return _REVOCATION_REVOKED
+            if valid:  # matched and verified, but every one fell outside the window
+                warnings.append(
+                    f"revocation record for {receipt_id!r} outside refund window, ignored"
+                )
+                return _REVOCATION_INVALID_IGNORED
+            return not_revoked
+
+        # Unknown/malformed revocability: schema validation (step 5, already
+        # run before this is ever called) should reject this payload outright
+        # — fail closed by never honoring a match under an unrecognized class.
+        return not_revoked
+
+    revoked_result = _revoked_class_result()
+    if revoked_result == _REVOCATION_REVOKED:
+        return revoked_result
+
+    # --- Stage 3 (§17.3): transferred-class backing, considered only once
+    # the "revoked"-status logic above did NOT itself yield "revoked" — and
+    # for ALL revocability classes, `none` included (the consent-gate
+    # principle).
+    if transferred_matches:
+        if transfer_view is None:
+            # The resolver is never reached at all — this function is the
+            # only place left to report the unbacked outcome.
+            if _WARN_TRANSFERRED_REVOCATION_UNBACKED not in warnings:
+                warnings.append(_WARN_TRANSFERRED_REVOCATION_UNBACKED)
+            return _REVOCATION_INVALID_IGNORED
+
+        manifest_issuer_id = (
+            issuer_manifest.get("issuer") if isinstance(issuer_manifest, dict) else None
+        )
+        winner = _resolve_transfer_backing(
+            payload,
+            transfer_view,
+            issuer_manifest,
+            manifest_issuer_id if isinstance(manifest_issuer_id, str) else None,
+            log_keys,
+            anchor_policy,
+            warnings,
+        )
+        if winner is not None:
+            return _REVOCATION_TRANSFERRED
+        if not any(
+            warning in warnings
+            for warning in (
+                _WARN_TRANSFERRED_REVOCATION_UNBACKED,
+                _WARN_TRANSFER_RECORD_UNLOGGED,
+                _WARN_TRANSFER_NOT_YET_TRANSFERABLE,
+                _WARN_TRANSFER_DOUBLE_ASSIGNMENT,
             )
-            return _REVOCATION_INVALID_IGNORED
-        return not_revoked
+        ):
+            warnings.append(_WARN_TRANSFERRED_REVOCATION_UNBACKED)
+        return _REVOCATION_INVALID_IGNORED
 
-    if revocability == _REVOCABILITY_POLICY:
-        if valid:
-            return _REVOCATION_REVOKED
-        return not_revoked
-
-    if revocability == _REVOCABILITY_REFUND_WINDOW:
-        window_end = _refund_window_end(payload)
-        effective = [r for r in valid if _within_refund_window(r, window_end)]
-        if effective:
-            return _REVOCATION_REVOKED
-        if valid:  # matched and verified, but every one fell outside the window
-            warnings.append(f"revocation record for {receipt_id!r} outside refund window, ignored")
-            return _REVOCATION_INVALID_IGNORED
-        return not_revoked
-
-    # Unknown/malformed revocability: schema validation (step 5, already run
-    # before this is ever called) should reject this payload outright — fail
-    # closed by never honoring a match under an unrecognized class.
-    return not_revoked
+    return revoked_result
 
 
 def _check_binding_salt(
@@ -740,6 +1147,8 @@ def verify(
     transparency: dict[str, Any] | None = None,
     log_keys: list[tlog.LogKey] | None = None,
     anchor_policy: anchor.AnchorPolicy | None = None,
+    revocation_evidence: dict[str, Any] | None = None,
+    transfer_view: list[dict[str, Any]] | None = None,
 ) -> VerificationResult:
     """§6 steps 0-7. `max_revocation_records` bounds the untrusted revocation
     view: a larger view is not evaluated (revocation `"unknown"`). It fails
@@ -758,6 +1167,34 @@ def verify(
     malformed `log_keys`/`anchor_policy` raises `attest.transparency.
     TransparencyError` (a config bug); malformed/absent `transparency`
     evidence never raises, only degrades the three new components.
+
+    `revocation_evidence` is G5's (v0.2 §8/§15, TM-47) one exception to the
+    "Stage 2 is purely informational" rule: it carries one untrusted
+    transparency evidence bundle for a SPECIFIC `refund_window` revocation
+    record in `revocation_view`, reusing the SAME `log_keys`/`anchor_policy`
+    configuration. Once a verifier is Stage-2 capable (`log_keys` AND
+    `anchor_policy` both supplied — the same gate that already governs
+    `transparency`), a `refund_window` record is honored only if this
+    evidence proves it was logged and anchored no later than the receipt's
+    own refund-window deadline; see `_revocation_deadline_satisfied` and
+    `_classify_revocation`. A verifier that supplies neither `log_keys` nor
+    `anchor_policy` is not Stage-2 capable at all, so this rule never
+    engages and v0.1 semantics are unchanged — this is what keeps every
+    pre-G5 caller's behavior byte-for-byte identical. `policy`/`compromised`/
+    `none` revocability classes are entirely unaffected by this parameter.
+
+    `transfer_view` is v0.2 Stage 3's (§17) evidence channel — the SECOND
+    sanctioned exception to "Stage 2 is purely informational", after G5's
+    `revocation_evidence`: an untrusted list of claims, each `{"record": <a
+    transfer.py transfer record>, "evidence": <§10.2 evidence bundle>}`,
+    reusing the SAME `log_keys`/`anchor_policy` Stage-2-capability gate
+    (both supplied). A `status: "transferred"` record in `revocation_view`
+    is honored — `revocation: "transferred"`, capping `ok` the same way
+    `"revoked"` already does — only when this channel proves a BACKED
+    transfer record for the same `receipt_id`; see
+    `_resolve_transfer_backing` and `_classify_revocation`. A caller that
+    never supplies `transfer_view` sees ZERO behavior change, exactly like
+    every other Stage 2/3 addition.
     """
     # Caller-contract enforcement (security): a non-list `revocation_view`
     # must fail loud. If a lone record OBJECT slipped through here,
@@ -767,6 +1204,11 @@ def verify(
     # security check. `None` (no view) stays valid.
     if revocation_view is not None and not isinstance(revocation_view, list):
         raise TypeError("revocation_view must be a list of records or None")
+    # Same caller-contract enforcement, extended to the Stage 3 channel: a
+    # lone claim OBJECT must fail loud rather than be silently iterated as
+    # dict keys by `_resolve_transfer_backing`.
+    if transfer_view is not None and not isinstance(transfer_view, list):
+        raise TypeError("transfer_view must be a list of claims or None")
 
     errors: list[str] = []
     warnings: list[str] = []
@@ -796,9 +1238,33 @@ def verify(
             errors=tuple(errors),
         )
 
+    # --- G1 normative ceiling (attest-versioning.md §5 amendment; v0.1 §11/
+    # §15, v0.2 §6/§16): the raw envelope MUST NOT exceed MAX_ENVELOPE_BYTES.
+    # Checked on the undecoded bytes, before ANY parsing work — the cheapest
+    # possible check on input a hostile sender fully controls the size of.
+    # Reported as `schema: "invalid"` (not the "not_checked" default every
+    # other precondition failure below uses): this ceiling is conformance-
+    # surface, not a parse-shape failure.
+    size_violations = validate.validate_envelope_size(envelope_bytes)
+    if size_violations:
+        return _invalid(size_violations[0], schema=_SCHEMA_INVALID)
+
     # --- Step 0: preconditions — parse once, strictly. All later steps and
     # all downstream consumers operate on this single parsed object, never
     # on the raw bytes (kills sign-vs-parse splits).
+    #
+    # G1 normative ceiling (attest-versioning.md §5 amendment; v0.1 §11.3):
+    # the parsed envelope tree's nesting depth MUST NOT exceed
+    # `validate.MAX_JSON_DEPTH` (== `canon.MAX_DEPTH`, 256). Enforced entirely
+    # by `canon.loads_strict` itself during parsing (`CanonError`, "maximum
+    # nesting depth exceeded") — there is deliberately no separate walk of
+    # the parsed tree here (2026-07-22 fix wave): the parser's own structural
+    # safety cap already IS this ceiling, so a second, redundant check could
+    # never fire (see `validate.py`'s `MAX_JSON_DEPTH` docstring). A receipt
+    # that trips it never produces a parsed object at all, so it is reported
+    # the same way every other malformed-envelope failure is, `schema:
+    # "not_checked"` — unlike the byte-size/manifest-array ceilings below,
+    # which run AFTER a successful parse and are conformance-surface checks.
     try:
         parsed = canon.loads_strict(envelope_bytes)
     except canon.CanonError as exc:
@@ -830,12 +1296,101 @@ def verify(
         provenance = trust_store.provenance.get(issuer_id)
         trust = _TRUST_VERIFIED if provenance == _PROVENANCE_TLS else _TRUST_TOFU
         issuer_manifest = trust_store.manifests.get(issuer_id)
+
+        # G1 ceiling + G6 detection preflight — ABOVE the chain handling, for
+        # structural parity with verify.ts (2026-07-22 fix wave 2 round 2,
+        # finding I1 residual: the TS chain tail compare canonicalizes the
+        # manifest, so its preflight had to precede the chain block; Python's
+        # chain compare is plain equality, but the two verifiers keep the
+        # same order so trust in an early-rejection result matches). See the
+        # block comment below.
+        if isinstance(issuer_manifest, dict):
+            issuer_manifest_keys = issuer_manifest.get("keys")
+            if (
+                isinstance(issuer_manifest_keys, list)
+                and len(issuer_manifest_keys) > manifests.MAX_MANIFEST_KEYS
+            ):
+                return _invalid(
+                    f"issuer manifest exceeds {manifests.MAX_MANIFEST_KEYS} keys",
+                    schema=_SCHEMA_INVALID,
+                )
+
+            if payload.get("attest_version") == "0.2" and manifests.has_active_ed_only_sibling(
+                issuer_manifest
+            ):
+                warnings.append(_WARN_MIXED_KEYSET_ACTIVE_ED_ONLY_SIBLING)
+
         chain = trust_store.chains.get(issuer_id)
         if chain and (not _chain_continuous(chain) or chain[-1] != issuer_manifest):
             # A chain that does not actually end at the manifest being used proves
             # nothing about it — treat it as a discontinuous rotation (2026-07-13
             # review, finding 8).
             trust = _TRUST_UNVERIFIED_ROTATION
+
+    # --- G2/G3 manifest currency (attest-versioning.md rev 4; v0.1 §7.2/§7.3
+    # amendment): resolve currency state per (issuer, series), authenticate
+    # the pinned manifest and every chain member before touching any currency
+    # metadata, then warn legacy manifests or evaluate continuity.
+    work_block = payload.get("work")
+    artifact_series = work_block.get("artifact_series") if isinstance(work_block, dict) else None
+    if isinstance(issuer_id, str) and isinstance(artifact_series, str):
+        issuer_artifact_manifests = trust_store.artifact_manifests.get(issuer_id, {})
+        candidate_artifact_manifest = issuer_artifact_manifests.get(artifact_series)
+        if isinstance(candidate_artifact_manifest, dict):
+            am_chain = trust_store.artifact_manifest_chains.get(issuer_id, {}).get(artifact_series)
+            members = [candidate_artifact_manifest]
+            if am_chain:
+                members.extend(am_chain)
+            authenticated = (
+                isinstance(issuer_manifest, dict)
+                and all(
+                    manifests.verify_artifact_manifest(member, issuer_manifest)
+                    for member in members
+                    if isinstance(member, dict)
+                )
+                and not any(not isinstance(member, dict) for member in members)
+            )
+            if candidate_artifact_manifest.get("issuer") != issuer_id:
+                warnings.append(_WARN_ARTIFACT_MANIFEST_ISSUER_MISMATCH)
+            elif not authenticated:
+                warnings.append(_WARN_ARTIFACT_MANIFEST_UNAUTHENTICATED)
+            else:
+                if any("manifest_version" not in member for member in members):
+                    # Any legacy member makes currency non-evaluable: warn and
+                    # SKIP both continuity and the tail compare — a legacy
+                    # manifest must never trigger the currency downgrade
+                    # (v0.1 §7.3, warn-only; round-2 review residual).
+                    warnings.append(_WARN_ARTIFACT_MANIFEST_UNVERSIONED)
+                elif am_chain and (
+                    not _artifact_chain_continuous(am_chain)
+                    or am_chain[-1] != candidate_artifact_manifest
+                ):
+                    trust = _TRUST_UNVERIFIED_ROTATION
+
+    # --- G1 normative ceiling, hoisted (attest-versioning.md §5 amendment;
+    # v0.1 §11.3): the issuer manifest's `keys[]` array MUST NOT exceed
+    # manifests.MAX_MANIFEST_KEYS — checked the moment the manifest is
+    # resolved from the trust store, BEFORE any canonicalization/hash/
+    # signature/transparency use of it. This MUST run before the transparency
+    # block below: `_evaluate_transparency_claim` canonicalizes and SHA-256s
+    # `issuer_manifest` whole (via `_resolve_transparency_claim`) to check a
+    # key-manifest claim, which is exactly the unbounded work a structural
+    # ceiling exists to prevent on a hostile array (2026-07-22 fix wave 2,
+    # review finding I1 — this check used to live only after Step 1/2 below,
+    # letting transparency/signature work run on an oversized manifest first).
+    #
+    # G6 mixed-keyset detection is hoisted alongside it (review finding I2):
+    # the warning must fire for every v0.2 resolution of a mixed manifest,
+    # independent of whether the receipt's signatures go on to verify (v0.2
+    # §13/§2.3 amendment) — it used to live only after both signature legs
+    # verified, so a tampered/failed receipt never carried it. Detection only
+    # depends on the manifest's own keyset and the payload's claimed
+    # `attest_version`, neither of which requires any of the crypto/schema
+    # work Step 1-4 below still gate their OWN errors on.
+    #
+    # Round 2 (finding I1 residual): the check itself now lives INSIDE the
+    # trust-resolution block above, before the chain handling — mirroring
+    # verify.ts, whose chain tail compare canonicalizes the manifest.
 
     # --- Transparency/corroboration (Stage 2, informational only): resolved
     # here, before any pass/fail branching below, so a receipt that later
@@ -904,6 +1459,11 @@ def verify(
         manifest = trust_store.manifests.get(issuer_id)
         if manifest is None:
             return _invalid(f"no trusted manifest for issuer {issuer_id!r}")
+
+        # G1's manifest-keys ceiling and G6's mixed-keyset detection are both
+        # handled above, hoisted immediately after `issuer_manifest` (== this
+        # same `manifest`) is resolved from the trust store — see the comment
+        # there (2026-07-22 fix wave 2, findings I1/I2).
 
         if kid.split("/")[0] != issuer_id or manifest.get("issuer") != issuer_id:
             return _invalid("issuer_mismatch: kid domain does not match payload issuer.id")
@@ -983,6 +1543,11 @@ def verify(
         if manifest is None:
             return _invalid(f"no trusted manifest for issuer {issuer_id!r}")
 
+        # G1's manifest-keys ceiling is handled above, hoisted immediately
+        # after `issuer_manifest` (== this same `manifest`) is resolved from
+        # the trust store — see the comment there (2026-07-22 fix wave 2,
+        # finding I1).
+
         if kid.split("/")[0] != issuer_id or manifest.get("issuer") != issuer_id:
             return _invalid("issuer_mismatch: kid domain does not match payload issuer.id")
 
@@ -1035,7 +1600,16 @@ def verify(
     # module docstring.
     if schema_result == _SCHEMA_VALID:
         revocation_result = _classify_revocation(
-            payload, revocation_view, manifest, warnings, errors, max_records=max_revocation_records
+            payload,
+            revocation_view,
+            manifest,
+            warnings,
+            errors,
+            max_records=max_revocation_records,
+            log_keys=log_keys,
+            anchor_policy=anchor_policy,
+            revocation_evidence=revocation_evidence,
+            transfer_view=transfer_view,
         )
         binding_result = (
             _classify_binding(payload, disclosure)

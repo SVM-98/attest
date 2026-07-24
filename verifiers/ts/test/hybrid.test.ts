@@ -213,4 +213,52 @@ describe('v0.2 hybrid verification', () => {
     expect(result.signature).toBe('invalid')
     expect(result.errors).toEqual(["unsupported attest_version: ['0.2']"])
   })
+
+  // --- I2 (2026-07-22 fix wave 2, review round-1): the G6 mixed-keyset
+  // warning must fire on every v0.2 resolution of a MIXED manifest,
+  // independent of whether the receipt's own signatures then verify —
+  // mirrors tests/test_verify_hybrid.py's tampered-leg mixed-keyset pair.
+  const LEGACY_KID = `${ISSUER}/keys/test#ed25519-legacy-1`
+  const legacySeed = Uint8Array.from({ length: 32 }, () => 22)
+  const legacyPub = ed25519.getPublicKey(legacySeed)
+
+  function mixedKeysetManifest(legacyStatus: string): JsonObject {
+    return signManifest(
+      {
+        issuer: ISSUER, manifest_version: 1, issued_at: VALID_FROM,
+        keys: [
+          { kid: KID, pub: b64uEncode(edPub), valid_from: VALID_FROM, valid_to: null, status: 'active', pub_ml_dsa_65: b64uEncode(mldsaPub) },
+          { kid: LEGACY_KID, pub: b64uEncode(legacyPub), valid_from: VALID_FROM, valid_to: null, status: legacyStatus },
+        ],
+      },
+      KID,
+      true,
+    )
+  }
+
+  it('the mixed-keyset warning is present when the Ed25519 leg is tampered', () => {
+    const manifest = mixedKeysetManifest('active')
+    const envelope = hybridEnvelope()
+    const sig0 = envelope.signatures[0] as JsonObject
+    const raw = b64uDecode(sig0['sig'] as string)
+    raw[0] = raw[0]! ^ 0xff
+    const tampered = { ...sig0, sig: b64uEncode(raw) }
+    const result = verify(envelopeBytes({ payload: envelope.payload, signatures: [tampered, envelope.signatures[1]] }), trustStore(manifest))
+    expect(result.signature).toBe('invalid')
+    expect(result.errors).toEqual(['signature verification failed'])
+    expect(result.warnings).toContain('mixed_keyset_active_ed_only_sibling')
+  })
+
+  it('the mixed-keyset warning is present when the ML-DSA-65 leg is tampered', () => {
+    const manifest = mixedKeysetManifest('active')
+    const envelope = hybridEnvelope()
+    const sig1 = envelope.signatures[1] as JsonObject
+    const raw = b64uDecode(sig1['sig'] as string)
+    raw[0] = raw[0]! ^ 0xff
+    const tampered = { ...sig1, sig: b64uEncode(raw) }
+    const result = verify(envelopeBytes({ payload: envelope.payload, signatures: [envelope.signatures[0], tampered] }), trustStore(manifest))
+    expect(result.signature).toBe('invalid')
+    expect(result.errors).toEqual(['ML-DSA-65 signature verification failed'])
+    expect(result.warnings).toContain('mixed_keyset_active_ed_only_sibling')
+  })
 })

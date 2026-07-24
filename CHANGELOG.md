@@ -22,7 +22,95 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   or the receipt is rejected. v0.1 receipts remain valid and verifiable
   forever; a v0.1 verifier MUST reject a v0.2 envelope outright (no downgrade
   path). New public spec: [`docs/spec/attest-v0.2.md`](docs/spec/attest-v0.2.md).
-  New conformance leaf group `26-hybrid` (8 leaves), for 51 vectors total.
+  New conformance leaf group `26-hybrid` (8 leaves).
+
+- v0.2 Stage 2 — issuer key transparency and timestamp anchoring, as a
+  **corroboration** layer. What it proves is inclusion in a log-signed Merkle
+  root: a verifier checks a hybrid-signed checkpoint plus an inclusion proof, and
+  anchoring can additionally bound when that checkpoint existed. It can never
+  make an unsigned or untrusted artifact look authentic — the `verified` trust
+  result stays what it always was, domain control, and inclusion evidence
+  surfaces separately as `transparency` / `corroboration` so the two claims
+  cannot be confused.
+
+  What it does **not** provide, stated in the spec itself (§10.4, §13) and worth
+  repeating here: without witness cosignatures there is no anti-equivocation. An
+  unwitnessed log operator can maintain split views indefinitely, and a verifier
+  detects equivocation only when it already holds two inconsistent validly-signed
+  checkpoints. `corroboration: "witnessed"` — the verdict that closes this — needs
+  a witness federation that does not exist yet.
+
+  Substrate is a static C2SP tlog-tiles log; checkpoints carry hybrid Ed25519 +
+  ML-DSA-65 signatures on both cores. Two anchor kinds: OpenTimestamps, required
+  for any **post-horizon** standing, and RFC 3161, accepted as a classical
+  convenience that carries no weight past a configured CRQC horizon. The receipt
+  commitment covers the signed-receipt core — `JCS(payload)` and `JCS(signatures)`
+  under a domain separator — so it binds the signature bytes, not the payload
+  alone. Log keys are pinned in the verifier's own trust store and rotated
+  out-of-band; the mandatory gapless rotation chain is a rule about **issuer key
+  manifests** above version 1, not about log keys. Sibling patch shipped with it:
+  revocation records and artifact manifests carry hybrid signatures too, closing
+  the window where they were Ed25519-only and forgeable once a cryptographically
+  relevant quantum computer exists. New conformance leaf groups
+  `27-valid-to-absent` and `28-transparency`.
+
+- Conformance corpus grown to **66 leaf vectors across 29 groups**, from 43 at
+  0.1.2. Both implementations reproduce every one, with none skipped. Note the
+  corpus is no longer a v0.1 corpus: the 43 leaves at 0.1.2 are v0.1 conformance,
+  and the 23 added since exercise v0.2 behaviour a v0.1-only verifier is required
+  to reject.
+
+## [0.4.0] — 2026-07-23
+
+### Added
+
+- **v0.2 Stage 3 — issuer-mediated transfer** (`docs/spec/attest-v0.2.md` §17), giving
+  the reserved `license.transferable` field its first real meaning. A transfer record
+  is an issuer-signed side-document — `receipt_id`, `new_receipt_id`, `new_holder_pubkey`,
+  `transferred_at`, an outgoing-holder `holder_authorization` signature over a
+  domain-separated preimage, and the issuer's own hybrid-AND-ruled `signature` — that
+  moves a receipt from one holder to another. Old-receipt extinguishment reuses the
+  existing revocation feed (`status: "transferred"`, reported as the new reachable
+  value `revocation: "transferred"`, capping `ok` the same way `"revoked"` already
+  does) and is honored for every `license.revocability` class, including `none`, but
+  only when backed by an authenticated `holder_authorization` and a logged inclusion
+  proof (the consent gate). A transfer record that authenticates but is not logged is
+  ignored (`transfer_record_unlogged`); two records for the same receipt resolve
+  earliest-log-index-wins (`transfer_double_assignment_conflict`); `license.not_transferable_before`
+  gates transfer eligibility (`transfer_not_yet_transferable`); post-transfer revocation
+  matches by `receipt_id`, under the new receipt's own class and `issued_at` anchor. A
+  v0.2 receipt with `license.transferable: true` and a null/absent `buyer.pubkey` is now
+  a schema error — the chain of title is cryptographic from the first link — while v0.1
+  receipts are untouched. A separate `audit_chain`/`auditChain` surface walks a whole
+  chain of transfers and reports per-link validity, independent of single-receipt
+  `verify()`. New conformance leaf groups `35-transfer` (11 leaves) and
+  `36-transfer-chain` (4 leaves), bringing the corpus to 97 leaves across 36 groups,
+  reproduced by the Python reference, the TypeScript verifier, and the site adapter.
+- Python: `src/attest/transfer.py` (record build/sign/verify, holder authorization,
+  chain-of-title audit), `verify.py` integration (transferred-class backing,
+  `not_transferable_before` enforcement), and `attest transfer` CLI
+  subcommands.
+- TypeScript: `verifiers/ts/src/transfer.ts` and `revocation.ts`/`verify.ts` parity for
+  the full transfer profile, including Stage 3's stricter date validation (a
+  Python/TypeScript divergence closed during review).
+- Threat model (`docs/spec/attest-threat-model.md`): §6.1's five forthcoming-revision
+  requirements resolved into cross-references; new Group K adds TM-61 through TM-67
+  (transfer-record forgery, chain-of-title hijack, double assignment, post-transfer
+  revocation confusion, coerced transfer, post-CRQC holder-authorization forgery,
+  transfer-feed trade-graph observability); a declared, tracked gap records that the
+  Tamarin formal-verification model does not cover the transfer profile in this
+  revision (`formal/` and `tools/check_formal.py` are untouched by design).
+- Privacy considerations (`docs/spec/attest-privacy.md`): `not_transferable_before`
+  classified (§2.5); the `revocation-record` and `transfer-record` log-entry types
+  documented for the first time (§2.11, closing a pre-existing gap left open since
+  rev 5); new §2.17 analyzing transfer-record observability and its pseudonymity
+  bound; a §5 note that a `transfer-record` log entry is a content-free hash with a
+  non-authenticated issuer hint and does not by itself establish that a transfer happened.
+- Non-normative annex `docs/spec/attest-transfer-economics.md`: the resale-velocity
+  problem, the issuer-royalty incentive (the Robot Cache precedent), the legal frame
+  (*UsedSoft* C-128/11, *Tom Kabinet* C-263/18, and the `eu_usedsoft_asserted`
+  relationship), and an explicit out-of-scope list (marketplaces, payments, escrow,
+  royalty mechanics).
 
 ## [0.1.2] — 2026-07-13
 

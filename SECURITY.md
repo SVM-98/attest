@@ -6,9 +6,17 @@ security issues with care.
 
 ## Supported versions
 
-| Version | Supported |
-|---------|-----------|
-| 0.1     | ✅        |
+Both published specification versions receive security fixes. This is not a
+courtesy: a receipt is meant to outlive the store that issued it, so a signature
+profile stops being supported only if it is broken, never because it is old.
+
+| Version | Supported | Status |
+|---------|-----------|--------|
+| 0.2     | ✅ reports accepted | **Unreleased.** Specified and implemented on `main`, not yet in any published package — the latest release is `v0.1.2`. Hybrid Ed25519 + ML-DSA-65 profile and Stage 2 transparency/anchoring evidence |
+| 0.1     | ✅        | Released (`v0.1.2` on PyPI and npm). v0.1 receipts remain valid and verifiable indefinitely |
+
+Report anything affecting either profile, including the post-quantum half of the
+hybrid profile.
 
 ## Reporting a vulnerability
 
