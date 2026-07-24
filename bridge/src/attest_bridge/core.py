@@ -19,12 +19,14 @@ trusts a caller to have done so.
 from __future__ import annotations
 
 import json
+import logging
 import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from attest import issue
+from attest import issue, manifests
+from attest import verify as verifier
 from attest_bridge.catalog import ProductCatalog
 from attest_bridge.delivery import Delivery
 from attest_bridge.ledger import Ledger
@@ -33,6 +35,7 @@ from attest_bridge.signing import IssuerIdentity
 
 _ED25519_PUBKEY_LEN = 32
 _RFC3339 = "%Y-%m-%dT%H:%M:%SZ"
+_log = logging.getLogger("attest_bridge.core")
 
 
 def _now_rfc3339() -> str:
@@ -97,10 +100,19 @@ class IssuingCore:
         # (2) Catalog resolution — UnmappedProduct propagates untouched.
         template = self._catalog.resolve(purchase.product_key)
 
-        # (3) Fresh, unique salt for this receipt's buyer-binding commitment.
+        # (3) A daemon can outlive its signing key. Refuse this purchase in the
+        # recoverable path rather than producing a receipt the verifier rejects.
+        issued_at = _now_rfc3339()
+        entry = manifests.find_key(self._issuer.manifest_snapshot, self._issuer.kid)
+        if entry is None or not verifier._within_validity(issued_at, entry):
+            reason = f"signing key {self._issuer.kid!r} is outside its validity window"
+            _log.error("purchase %s rejected: %s", purchase.platform_purchase_id, reason)
+            raise PurchaseRejected(reason)
+
+        # (4) Fresh, unique salt for this receipt's buyer-binding commitment.
         salt = secrets.token_bytes(16)
 
-        # (4) Assemble the payload — 1:1 via `issue.build_payload`, never
+        # (5) Assemble the payload — 1:1 via `issue.build_payload`, never
         # hand-built.
         payload = issue.build_payload(
             attest_version="0.2",
@@ -119,11 +131,13 @@ class IssuingCore:
             legal_text_sha256=template.legal_text_sha256,
             grant=template.grant,
             revocability=template.revocability,
+            revocation_window_days=template.revocation_window_days,
             drm=template.drm,
             edition=template.edition,
+            issued_at=issued_at,
         )
 
-        # (5) Sign — 1:1 via `issue.issue`, never hand-signed.
+        # (6) Sign — 1:1 via `issue.issue`, never hand-signed.
         envelope = issue.issue(
             payload,
             self._issuer.signing_keys,
@@ -132,7 +146,7 @@ class IssuingCore:
             manifest_snapshot=self._issuer.manifest_snapshot,
         )
 
-        # (6) Record in the Ledger before returning (Global Constraint 9:
+        # (7) Record in the Ledger before returning (Global Constraint 9:
         # issue + ledger-record first, delivery — T6 — happens after).
         receipt_id: str = payload["receipt_id"]
         self._ledger.record_receipt(

@@ -146,7 +146,7 @@ def _env(env: Mapping[str, str], table: Mapping[str, Any], key: str, *, context:
     """
     env_key = f"{key}_env"
     var_name = _require_str(table, env_key, context=context)
-    if var_name not in env:
+    if var_name not in env or not env[var_name]:
         raise ConfigError(f"{context}: environment variable {var_name!r} is not set")
     return env[var_name]
 
@@ -200,6 +200,11 @@ def _load_product(key: str, value: Any) -> ProductTemplate:
         legal_text_sha256=_require_str(value, "legal_text_sha256", context=context),
         grant=_optional_str(value, "grant", "perpetual", context=context),
         revocability=_optional_str(value, "revocability", "none", context=context),
+        revocation_window_days=(
+            _optional_int(value, "revocation_window_days", 0, context=context)
+            if "revocation_window_days" in value
+            else None
+        ),
         drm=_optional_str(value, "drm", "drm-free", context=context),
         edition=_optional_str_or_none(value, "edition", context=context),
     )

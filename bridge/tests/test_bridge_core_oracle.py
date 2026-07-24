@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import json
 import smtplib
+from pathlib import Path
 from typing import Any
 
 import pytest
-from attest_bridge.config import DeliveryConfig
+from attest_bridge.config import DeliveryConfig, IssuerConfig
 from attest_bridge.core import IssuingCore
 from attest_bridge.delivery import Delivery
 from attest_bridge.model import NormalizedPurchase, PurchaseRejected, UnmappedProduct
+from attest_bridge.signing import load_issuer
 from conftest import ISSUER
 
-from attest import anchor, cli, keys, transfer
+from attest import anchor, cli, keys, pq, transfer
 from attest import verify as verify_mod
 
 
@@ -47,6 +49,55 @@ def test_email_bound_receipt_verifies_offline_ok(core: IssuingCore, trust_store:
     assert payload["attest_version"] == "0.2"
     assert payload["license"]["transferable"] is False
     assert payload["buyer"]["pubkey"] is None
+
+
+def test_issue_for_rejects_when_the_daemon_key_has_expired(
+    core: IssuingCore, ledger: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("attest_bridge.core._now_rfc3339", lambda: "2100-01-01T00:00:00Z")
+    monkeypatch.setattr("attest_bridge.core.verifier._within_validity", lambda *_: False)
+
+    with pytest.raises(PurchaseRejected, match="validity window"):
+        core.issue_for(_purchase(platform_purchase_id="cs_expired_key"))
+    assert ledger.get_receipt("stripe", "cs_expired_key") is None
+
+
+def test_real_loader_identity_issues_a_receipt_the_oracle_accepts(
+    tmp_path: Path, catalog: Any, ledger: Any, hybrid_keys: Any, key_manifest: Any, trust_store: Any
+) -> None:
+    seed_path = tmp_path / "issuer.seed"
+    seed_path.write_text(keys.b64u(hybrid_keys.ed.seed), encoding="utf-8")
+    mldsa_path = tmp_path / "issuer.mldsa.json"
+    mldsa_path.write_text(
+        json.dumps(
+            {
+                "alg": pq.ML_DSA_65_ALG,
+                "sk": keys.b64u(hybrid_keys.mldsa.sk),
+                "pub": keys.b64u(hybrid_keys.mldsa.pub),
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(key_manifest), encoding="utf-8")
+    issuer = load_issuer(
+        IssuerConfig(
+            ISSUER,
+            "Example Games Store",
+            next(iter(key_manifest["keys"]))["kid"],
+            seed_path,
+            mldsa_path,
+            manifest_path,
+        )
+    )
+    outcome = IssuingCore(
+        catalog=catalog,
+        issuer=issuer,
+        ledger=ledger,
+        public_base_url="https://receipts.example.com",
+    ).issue_for(_purchase(platform_purchase_id="cs_loaded_oracle"))
+
+    assert verify_mod.verify(_envelope_bytes(outcome.envelope), trust_store).ok is True
 
 
 def test_embedded_salt_proves_binding_via_real_verifier(
