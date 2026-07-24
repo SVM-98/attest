@@ -221,7 +221,7 @@ class ItchPoller:
         now_rfc3339 = now.strftime(_RFC3339)
         for claim in self._ledger.due_claims(now_rfc3339):
             try:
-                completed, receipts_issued = self._drain_claim(claim, now_rfc3339)
+                completed = self._drain_claim(claim, now_rfc3339)
             except ItchApiError:
                 self._defer_or_exhaust(claim, now)
                 continue
@@ -235,17 +235,16 @@ class ItchPoller:
             if not completed:
                 self._defer_or_exhaust(claim, now)
                 continue
-            self._ledger.complete_claim(claim.token, receipts_issued=receipts_issued)
+            self._ledger.complete_claim(claim.token)
 
-    def _drain_claim(self, claim: Claim, now_rfc3339: str) -> tuple[bool, int]:
+    def _drain_claim(self, claim: Claim, now_rfc3339: str) -> bool:
         """Fetch the claim's live purchases and issue for the actionable ones.
-        Returns (completed, receipts_issued). Every API-confirmed purchase is
-        independently processed, so one malformed purchase cannot prevent a
-        later purchase in the same response from being issued and emailed.
+        Every API-confirmed purchase is independently processed, so one
+        malformed purchase cannot prevent a later purchase in the same
+        response from being issued and emailed.
         Raises ItchApiError on API failure."""
         purchases = self._adapter.fetch_purchases(claim.game_id, claim.email)
         completed = False
-        receipts_issued = 0
         retryable_failure = False
         for raw in purchases:
             if not isinstance(raw, dict):
@@ -284,8 +283,8 @@ class ItchPoller:
                 continue
             completed = True
             if not outcome.duplicate:
-                receipts_issued += 1
-        return completed and not retryable_failure, receipts_issued
+                self._ledger.add_claim_receipts(claim.token, 1)
+        return completed and not retryable_failure
 
     def _defer_or_exhaust(self, claim: Claim, now: datetime) -> None:
         if claim.attempts + 1 >= self._max_attempts:

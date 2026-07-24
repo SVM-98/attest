@@ -236,7 +236,7 @@ def test_defer_claim_increments_attempts_and_updates_next_attempt_at(ledger: Led
 def test_complete_claim_drops_it_from_due_claims(ledger: Ledger) -> None:
     token = ledger.enqueue_claim("buyer@example.com", "game_1", now=PAST)
 
-    ledger.complete_claim(token, receipts_issued=0)
+    ledger.complete_claim(token)
 
     assert ledger.due_claims(NOW) == []
     claim = ledger.get_claim(token)
@@ -244,25 +244,37 @@ def test_complete_claim_drops_it_from_due_claims(ledger: Ledger) -> None:
     assert claim.status == "confirmed"
 
 
-def test_complete_claim_records_zero_receipts(ledger: Ledger) -> None:
+def test_complete_claim_retains_zero_receipts(ledger: Ledger) -> None:
     token = ledger.enqueue_claim("buyer@example.com", "game_1", now=PAST)
 
-    ledger.complete_claim(token, receipts_issued=0)
+    ledger.complete_claim(token)
 
     claim = ledger.get_claim(token)
     assert claim is not None
     assert claim.receipts_issued == 0
 
 
-def test_complete_claim_records_receipts_issued(ledger: Ledger) -> None:
+def test_add_claim_receipts_is_cumulative_across_completion(ledger: Ledger) -> None:
     token = ledger.enqueue_claim("buyer@example.com", "game_1", now=PAST)
 
-    ledger.complete_claim(token, receipts_issued=2)
+    ledger.add_claim_receipts(token, 1)
+    ledger.add_claim_receipts(token, 1)
+    ledger.complete_claim(token)
 
     claim = ledger.get_claim(token)
     assert claim is not None
     assert claim.status == "confirmed"
     assert claim.receipts_issued == 2
+
+
+def test_two_ledger_connections_deduplicate_the_same_pending_claim(tmp_path: Path) -> None:
+    db_path = tmp_path / "shared.sqlite3"
+    first = Ledger(db_path)
+    second = Ledger(db_path)
+
+    token = first.enqueue_claim("buyer@example.com", "game_1", now=NOW)
+
+    assert second.enqueue_claim("buyer@example.com", "game_1", now=NOW) == token
 
 
 def test_exhaust_claim_drops_it_from_due_claims(ledger: Ledger) -> None:

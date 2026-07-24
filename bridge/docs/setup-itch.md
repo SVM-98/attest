@@ -95,14 +95,10 @@ https://<your-bridge-host>/itch/claim
 ```
 
 `GET` on that URL serves a plain HTML form (email + a dropdown of your
-configured games); submitting it (`POST` to the same URL) enqueues the claim
-and returns a token. Give buyers a way to check status — poll
-`GET https://<your-bridge-host>/itch/claim/<token>` — it returns
-`{"status": "pending"}` while waiting, then the deliberately non-oracular
-`{"status":"processed", "detail":"If a matching itch.io purchase exists,
-its receipt has been emailed to the address you submitted."}`. The claim API
-never returns a receipt URL or other receipt-derived information: the
-salt-bearing envelope is sent only to the submitted mailbox.
+configured games); submitting it (`POST` to the same URL) enqueues the claim.
+There is nothing to poll: if the live itch API finds a matching purchase, the
+receipt is sent to the submitted mailbox. The claim API never returns a token,
+receipt URL, or other receipt-derived information.
 
 **CSV backfill**, for buyers who purchased before you set the bridge up, or
 in bulk: export your buyer list from the itch.io dashboard (Analytics/Sales
@@ -122,10 +118,9 @@ never resolves (its claim keeps retrying, then exhausts).
 
 ## 4. Test it
 
-Once the poller has run (within `poll_interval_seconds` of enqueuing), check
-a claim's status via `/itch/claim/<token>`. If the purchase matches, the
-receipt arrives by email. Save the attached receipt with restrictive creation
-permissions and verify it:
+Once the poller has run (within `poll_interval_seconds` of enqueuing), a
+matching purchase's receipt arrives by email. Save the attached receipt with
+restrictive creation permissions and verify it:
 
 ```sh
 umask 077

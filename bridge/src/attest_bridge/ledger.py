@@ -57,6 +57,8 @@ CREATE TABLE IF NOT EXISTS claims (
   attempts INTEGER NOT NULL DEFAULT 0,
   next_attempt_at TEXT NOT NULL, created_at TEXT NOT NULL,
   receipts_issued INTEGER NOT NULL DEFAULT 0);
+CREATE UNIQUE INDEX IF NOT EXISTS claims_pending_email_game_unique
+  ON claims (email, game_id) WHERE status = 'pending';
 CREATE TABLE IF NOT EXISTS dead_letters (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   platform TEXT NOT NULL, purchase_id TEXT, reason TEXT NOT NULL,
@@ -88,7 +90,7 @@ class Claim:
     next_attempt_at: str
     created_at: str
     # Operator-only count of receipts issued while resolving this claim. It is
-    # intentionally never an HTTP response field: claim status must not reveal
+    # intentionally never an HTTP response field: claim state must not reveal
     # whether an address owns a particular game.
     receipts_issued: int
 
@@ -263,8 +265,10 @@ class Ledger:
     def enqueue_claim(self, email: str, game_id: str, *, now: str) -> str:
         with self._lock, self._conn:
             # This lookup and potential insert deliberately share one lock and
-            # transaction: otherwise concurrent submissions could both miss the
-            # existing pending row or race past the queue cap.
+            # transaction. The partial unique index below extends the dedup
+            # half across Ledger instances/processes. The count cap remains
+            # best-effort across processes: an extra admission is not a
+            # security boundary and does not justify distributed counting.
             existing = self._conn.execute(
                 "SELECT token FROM claims WHERE email = ? AND game_id = ? "
                 "AND status = 'pending' ORDER BY created_at LIMIT 1",
@@ -279,14 +283,24 @@ class Ledger:
             if int(pending["count"]) >= MAX_PENDING_CLAIMS:
                 raise ClaimQueueFull("claim queue is full")
             token = secrets.token_urlsafe(32)
-            self._conn.execute(
-                """
-                INSERT INTO claims (token, email, game_id, status, attempts,
-                                     next_attempt_at, created_at)
-                VALUES (?, ?, ?, 'pending', 0, ?, ?)
-                """,
-                (token, email, game_id, now, now),
-            )
+            try:
+                self._conn.execute(
+                    """
+                    INSERT INTO claims (token, email, game_id, status, attempts,
+                                         next_attempt_at, created_at)
+                    VALUES (?, ?, ?, 'pending', 0, ?, ?)
+                    """,
+                    (token, email, game_id, now, now),
+                )
+            except sqlite3.IntegrityError:
+                existing = self._conn.execute(
+                    "SELECT token FROM claims WHERE email = ? AND game_id = ? "
+                    "AND status = 'pending' ORDER BY created_at LIMIT 1",
+                    (email, game_id),
+                ).fetchone()
+                if existing is None:
+                    raise
+                return str(existing["token"])
         return token
 
     def get_claim(self, token: str) -> Claim | None:
@@ -306,16 +320,24 @@ class Ledger:
             ).fetchall()
         return [_claim_from_row(row) for row in rows]
 
-    def complete_claim(self, token: str, *, receipts_issued: int) -> None:
-        """Mark a claim terminal and retain only an operator-visible count.
+    def add_claim_receipts(self, token: str, n: int) -> None:
+        """Increment the operator-visible issued count for a claim."""
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE claims SET receipts_issued = receipts_issued + ? WHERE token = ?",
+                (n, token),
+            )
+
+    def complete_claim(self, token: str) -> None:
+        """Mark a claim terminal while retaining its cumulative receipt count.
 
         No receipt identifier or download capability is associated with the
         claim row: claims are delivered to the submitted mailbox only.
         """
         with self._lock, self._conn:
             self._conn.execute(
-                "UPDATE claims SET status = 'confirmed', receipts_issued = ? WHERE token = ?",
-                (receipts_issued, token),
+                "UPDATE claims SET status = 'confirmed' WHERE token = ?",
+                (token,),
             )
 
     def defer_claim(self, token: str, *, next_attempt_at: str) -> None:

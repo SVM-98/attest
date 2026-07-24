@@ -7,8 +7,8 @@ webhook error-handling policy (the design's "what happens on every kind of
 failure" section, made executable) and never invents behavior the policy
 table doesn't pin.
 
-The `/itch/claim*` routes (T9, OI-4) are a different shape entirely: itch has
-no webhook, so these routes only ever enqueue/read Ledger claim rows — never
+The `/itch/claim` routes (T9, OI-4) are a different shape entirely: itch has
+no webhook, so these routes only ever enqueue Ledger claim rows — never
 call `IssuingCore.process`. See `itch_adapter.py`'s module docstring for the
 full claim-queue design and why the API response (fetched later, by
 `ItchPoller.tick`) is the sole issuance authority.
@@ -67,10 +67,11 @@ from attest_bridge.stripe_adapter import StripeAdapter, StripeSignatureError
 _RFC3339 = "%Y-%m-%dT%H:%M:%SZ"
 _NOT_FOUND_BODY = b'{"error":"not found"}'
 _ITCH_PRODUCT_PREFIX = "itch_"
-_ITCH_PROCESSED_DETAIL = (
-    "If a matching itch.io purchase exists, its receipt has been emailed to the address you "
-    "submitted."
-)
+_ITCH_CLAIM_ACCEPTED = {
+    "status": "received",
+    "detail": "If a matching itch.io purchase exists, its receipt will be emailed to the "
+    "address you submitted.",
+}
 
 WSGIApp = Callable[[dict[str, Any], Any], Iterable[bytes]]
 
@@ -148,12 +149,19 @@ def _parse_query(query_string: str) -> dict[str, str]:
     return {key: values[0] for key, values in parsed.items() if values}
 
 
-def _best_effort_purchase_id(event: dict[str, Any]) -> str | None:
+def _best_effort_purchase_id(event: object) -> str | None:
     """Extract a session/purchase id from a raw event for dead-letter operator
     visibility only — never load-bearing (the dead letter's `raw_json` is the
     authoritative record `retry-failed` re-drives from)."""
-    session = event.get("data", {}).get("object", {})
-    session_id = session.get("id") if isinstance(session, dict) else None
+    if not isinstance(event, dict):
+        return None
+    data = event.get("data")
+    if not isinstance(data, dict):
+        return None
+    session = data.get("object")
+    if not isinstance(session, dict):
+        return None
+    session_id = session.get("id")
     return session_id if isinstance(session_id, str) else None
 
 
@@ -365,7 +373,7 @@ def _handle_itch_claim_form(deps: BridgeDeps, start_response: Any) -> Iterable[b
         '<form method="post" action="/itch/claim">'
         '<label>Email <input type="email" name="email" required></label>'
         f'<label>Game <select name="game_id">{options}</select></label>'
-        '<button type="submit">Claim my receipt</button>'
+        '<button type="submit">Email my receipt</button>'
         "</form></body></html>"
     ).encode()
     headers = [("Content-Type", "text/html; charset=utf-8"), ("Content-Length", str(len(body)))]
@@ -402,38 +410,15 @@ def _handle_itch_claim_post(
             start_response, "400 Bad Request", {"error": "invalid email or game_id"}
         )
     try:
-        token = deps.ledger.enqueue_claim(email, game_id, now=_now_rfc3339())
+        deps.ledger.enqueue_claim(email, game_id, now=_now_rfc3339())
     except ClaimQueueFull:
         return _json_response(
             start_response, "503 Service Unavailable", {"error": "claim queue is full, retry later"}
         )
-    return _json_response(start_response, "202 Accepted", {"claim": token})
-
-
-def _handle_itch_claim_status(
-    deps: BridgeDeps, start_response: Any, *, token: str
-) -> Iterable[bytes]:
-    if deps.itch is not None and deps.config.delivery is None:
-        return _json_response(
-            start_response,
-            "503 Service Unavailable",
-            {"error": "receipt delivery is not configured"},
-        )
-    # Works regardless of whether `[itch]`/the poller is configured in THIS
-    # process — a claim's status only ever depends on the Ledger.
-    claim = deps.ledger.get_claim(token)
-    if claim is None:
-        return _not_found(start_response)
-    if claim.status == "pending":
-        return _json_response(start_response, "200 OK", {"status": "pending"})
-    return _json_response(
-        start_response,
-        "200 OK",
-        {
-            "status": "processed",
-            "detail": _ITCH_PROCESSED_DETAIL,
-        },
-    )
+    # The token remains an internal queue handle only. Every accepted claim
+    # gets this byte-identical acknowledgement, including dedup and API-miss
+    # cases, so the public route cannot become a purchase-ownership oracle.
+    return _json_response(start_response, "202 Accepted", _ITCH_CLAIM_ACCEPTED)
 
 
 # -- app ------------------------------------------------------------------
@@ -463,9 +448,6 @@ def make_app(deps: BridgeDeps) -> WSGIApp:
             return _handle_itch_claim_form(deps, start_response)
         if method == "POST" and path == "/itch/claim":
             return _handle_itch_claim_post(deps, environ, start_response)
-        if method == "GET" and path.startswith("/itch/claim/"):
-            token = path[len("/itch/claim/") :]
-            return _handle_itch_claim_status(deps, start_response, token=token)
         return _not_found(start_response)
 
     return cast(WSGIApp, app)

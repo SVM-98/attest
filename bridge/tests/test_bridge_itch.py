@@ -39,10 +39,6 @@ from attest import keys, pq
 from attest import verify as verify_mod
 
 _RFC3339 = "%Y-%m-%dT%H:%M:%SZ"
-_PROCESSED_DETAIL = (
-    "If a matching itch.io purchase exists, its receipt has been emailed to the address you "
-    "submitted."
-)
 # Same convention as conftest.py's own _LEGAL_TEXT_SHA256 -- a realistic
 # 64-lowercase-hex digest, never a hand-typed placeholder.
 _LEGAL_TEXT_SHA256 = hashlib.sha256(b"attest-bridge-itch-test-license-terms-v1").hexdigest()
@@ -271,21 +267,60 @@ def test_claim_with_two_purchases_issues_and_delivers_both(
     assert claim is not None and claim.receipts_issued == 2
 
 
-def test_bad_purchase_in_a_claim_does_not_abort_a_later_purchase(
-    ledger: Ledger, core: IssuingCore
+def test_generic_purchase_failure_in_a_claim_does_not_abort_a_later_purchase(
+    ledger: Ledger, core: IssuingCore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     now = datetime(2026, 7, 24, 10, 0, 0, tzinfo=UTC)
     token = ledger.enqueue_claim("buyer@example.com", "123456", now=now.strftime(_RFC3339))
-    bad = _purchase_json(id=5013, created_at="not-a-timestamp")
+    bad = _purchase_json(id=5013)
     good = _purchase_json(id=5014)
     adapter = ItchAdapter(api_key="itch_key", http_get=_fake_http_get([bad, good])[0])
+
+    original_process = core.process
+
+    def fail_one_purchase(purchase: NormalizedPurchase) -> Any:
+        if purchase.platform_purchase_id == "5013":
+            raise RuntimeError("transient signing failure")
+        return original_process(purchase)
+
+    monkeypatch.setattr(core, "process", fail_one_purchase)
 
     ItchPoller(adapter=adapter, ledger=ledger, core=core).tick(now=now)
 
     assert ledger.get_receipt("itch", "5014") is not None
-    assert len(ledger.unresolved_dead_letters()) == 1
     claim = ledger.get_claim(token)
     assert claim is not None and claim.receipts_issued == 1
+    assert claim.status == "pending"
+
+
+def test_claim_receipt_count_survives_a_deferred_tick(
+    ledger: Ledger, core: IssuingCore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = datetime(2026, 7, 24, 10, 0, 0, tzinfo=UTC)
+    token = ledger.enqueue_claim("buyer@example.com", "123456", now=now.strftime(_RFC3339))
+    adapter = ItchAdapter(
+        api_key="itch_key",
+        http_get=_fake_http_get([_purchase_json(id=5021), _purchase_json(id=5022)])[0],
+    )
+    poller = ItchPoller(adapter=adapter, ledger=ledger, core=core, backoff_base_seconds=60)
+    original_process = core.process
+    failures = 0
+
+    def fail_b_once(purchase: NormalizedPurchase) -> Any:
+        nonlocal failures
+        if purchase.platform_purchase_id == "5022" and failures == 0:
+            failures += 1
+            raise RuntimeError("transient signing failure")
+        return original_process(purchase)
+
+    monkeypatch.setattr(core, "process", fail_b_once)
+    poller.tick(now=now)
+    poller.tick(now=now + timedelta(seconds=60))
+
+    claim = ledger.get_claim(token)
+    assert claim is not None
+    assert claim.status == "confirmed"
+    assert claim.receipts_issued == 2
 
 
 def test_e2e_repoll_after_reenqueue_does_not_reissue_dedups_on_purchase_id(
@@ -604,7 +639,8 @@ def test_only_pending_due_claims_are_processed_confirmed_ones_are_untouched(
     now = datetime(2026, 7, 24, 10, 0, 0, tzinfo=UTC)
     past = (now - timedelta(hours=1)).strftime(_RFC3339)
     already_confirmed_token = ledger.enqueue_claim("done@example.com", "123456", now=past)
-    ledger.complete_claim(already_confirmed_token, receipts_issued=1)
+    ledger.add_claim_receipts(already_confirmed_token, 1)
+    ledger.complete_claim(already_confirmed_token)
 
     fake_http_get, calls = _fake_http_get([])
     adapter = ItchAdapter(api_key="key", http_get=fake_http_get)
@@ -755,10 +791,12 @@ def test_get_itch_claim_form_lists_configured_itch_games(itch_deps: BridgeDeps) 
     assert b"123456" in body
 
 
-def test_post_itch_claim_form_encoded_enqueues_and_returns_202(itch_deps: BridgeDeps) -> None:
+def test_post_itch_claim_acknowledgement_is_identical_for_fresh_dedup_and_no_purchase(
+    itch_deps: BridgeDeps,
+) -> None:
     app = make_app(itch_deps)
     body = urlencode({"email": "buyer@example.com", "game_id": "123456"}).encode()
-    status, _, resp_body = call_app(
+    status, _, fresh = call_app(
         app,
         "POST",
         "/itch/claim",
@@ -766,38 +804,29 @@ def test_post_itch_claim_form_encoded_enqueues_and_returns_202(itch_deps: Bridge
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
     assert status.startswith("202")
-    payload = json.loads(resp_body)
-    claim = itch_deps.ledger.get_claim(payload["claim"])
-    assert claim is not None
-    assert claim.email == "buyer@example.com"
-    assert claim.game_id == "123456"
-    assert claim.status == "pending"
-
-
-def test_post_itch_claim_json_body_enqueues_and_returns_202(itch_deps: BridgeDeps) -> None:
-    app = make_app(itch_deps)
-    body = json.dumps({"email": "buyer@example.com", "game_id": "123456"}).encode()
-    status, _, resp_body = call_app(
-        app, "POST", "/itch/claim", body=body, headers={"Content-Type": "application/json"}
+    second_status, _, dedup = call_app(
+        app,
+        "POST",
+        "/itch/claim",
+        body=body,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
-    assert status.startswith("202")
-    payload = json.loads(resp_body)
-    claim = itch_deps.ledger.get_claim(payload["claim"])
-    assert claim is not None
-    assert claim.email == "buyer@example.com"
-    assert claim.game_id == "123456"
-
-
-def test_duplicate_claim_submission_returns_the_existing_token(itch_deps: BridgeDeps) -> None:
-    app = make_app(itch_deps)
-    body = urlencode({"email": "buyer@example.com", "game_id": "123456"}).encode()
-    headers = {"Content-Type": "application/x-www-form-urlencoded"}
-    first_status, _, first_body = call_app(app, "POST", "/itch/claim", body=body, headers=headers)
-    second_status, _, second_body = call_app(app, "POST", "/itch/claim", body=body, headers=headers)
-
-    assert first_status.startswith("202") and second_status.startswith("202")
-    assert json.loads(first_body)["claim"] == json.loads(second_body)["claim"]
-    assert len(itch_deps.ledger.due_claims("2099-01-01T00:00:00Z")) == 1
+    no_purchase_body = urlencode({"email": "nobody@example.com", "game_id": "123456"}).encode()
+    third_status, _, no_purchase = call_app(
+        app,
+        "POST",
+        "/itch/claim",
+        body=no_purchase_body,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert second_status.startswith("202") and third_status.startswith("202")
+    assert fresh == dedup == no_purchase
+    assert json.loads(fresh) == {
+        "status": "received",
+        "detail": "If a matching itch.io purchase exists, its receipt will be emailed to the "
+        "address you submitted.",
+    }
+    assert len(itch_deps.ledger.due_claims("2099-01-01T00:00:00Z")) == 2
 
 
 def test_post_itch_claim_unknown_game_returns_400(itch_deps: BridgeDeps) -> None:
@@ -870,51 +899,7 @@ def test_post_itch_claim_returns_503_when_queue_is_full(
     assert json.loads(body) == {"error": "claim queue is full, retry later"}
 
 
-def test_get_itch_claim_status_pending(itch_deps: BridgeDeps) -> None:
-    token = itch_deps.ledger.enqueue_claim(
-        "buyer@example.com", "123456", now="2026-07-24T10:00:00Z"
-    )
-    app = make_app(itch_deps)
-    status, _, body = call_app(app, "GET", f"/itch/claim/{token}")
-    assert status.startswith("200")
-    assert json.loads(body) == {"status": "pending"}
-
-
-def test_get_itch_claim_status_terminal_is_processed_without_receipt_data(
-    itch_deps: BridgeDeps,
-) -> None:
-    token = itch_deps.ledger.enqueue_claim(
-        "buyer@example.com", "123456", now="2026-07-24T10:00:00Z"
-    )
-    itch_deps.ledger.complete_claim(token, receipts_issued=1)
-    app = make_app(itch_deps)
-    status, _, body = call_app(app, "GET", f"/itch/claim/{token}")
-    assert status.startswith("200")
-    payload = json.loads(body)
-    assert payload == {
-        "status": "processed",
-        "detail": _PROCESSED_DETAIL,
-    }
-
-
-def test_get_itch_claim_status_exhausted_is_the_same_processed_shape(
-    itch_deps: BridgeDeps,
-) -> None:
-    token = itch_deps.ledger.enqueue_claim(
-        "buyer@example.com", "123456", now="2026-07-24T10:00:00Z"
-    )
-    itch_deps.ledger.exhaust_claim(token)
-    app = make_app(itch_deps)
-    status, _, body = call_app(app, "GET", f"/itch/claim/{token}")
-    assert status.startswith("200")
-    payload = json.loads(body)
-    assert payload == {
-        "status": "processed",
-        "detail": _PROCESSED_DETAIL,
-    }
-
-
-def test_get_itch_claim_status_unknown_token_returns_uniform_404(itch_deps: BridgeDeps) -> None:
+def test_get_itch_claim_token_route_is_not_registered(itch_deps: BridgeDeps) -> None:
     app = make_app(itch_deps)
     status, _, body = call_app(app, "GET", "/itch/claim/does-not-exist-token")
     assert status.startswith("404")
@@ -937,25 +922,11 @@ def test_itch_claim_form_and_post_404_when_itch_not_configured(
     assert status2.startswith("404")
 
 
-def test_get_itch_claim_status_works_even_when_itch_not_configured(
-    bridge_deps_no_itch: BridgeDeps,
-) -> None:
-    # The status lookup only needs the Ledger -- it must keep working even if
-    # the poller/adapter isn't wired up in this process.
-    token = bridge_deps_no_itch.ledger.enqueue_claim(
-        "buyer@example.com", "123456", now="2026-07-24T10:00:00Z"
-    )
-    app = make_app(bridge_deps_no_itch)
-    status, _, body = call_app(app, "GET", f"/itch/claim/{token}")
-    assert status.startswith("200")
-    assert json.loads(body) == {"status": "pending"}
-
-
 def test_salt_bearing_download_docs_set_umask_before_curl_output() -> None:
     docs_root = Path(__file__).parents[1] / "docs"
     for path in docs_root.glob("*.md"):
         text = path.read_text(encoding="utf-8")
-        for match in re.finditer(r"curl\\b[^\\n]*\\s-o\\s", text):
+        for match in re.finditer(r"curl\b[^\n]*\s-o\s", text):
             preceding_lines = text[: match.start()].rstrip().splitlines()
             assert preceding_lines[-1] == "umask 077"
 
@@ -1091,6 +1062,55 @@ def test_itch_import_csv_alone_never_issues_a_receipt(
     due = ledger.due_claims("2099-01-01T00:00:00Z")
     assert len(due) == 1
     assert due[0].status == "pending"
+
+
+def test_itch_import_reports_partial_progress_when_the_queue_fills(
+    tmp_path: Path,
+    hybrid_keys: pq.HybridSigningKeys,
+    key_manifest: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from attest_bridge import ledger as ledger_mod
+
+    monkeypatch.setattr(ledger_mod, "MAX_PENDING_CLAIMS", 2)
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    ledger.enqueue_claim("existing@example.com", "123456", now="2026-07-24T10:00:00Z")
+    config_path = _write_minimal_config(tmp_path, hybrid_keys, key_manifest)
+    csv_path = tmp_path / "purchases.csv"
+    csv_path.write_text("email\nfirst@example.com\nsecond@example.com\n", encoding="utf-8")
+
+    rc = cli.main(
+        ["itch-import", "--config", str(config_path), "--game-id", "123456", str(csv_path)]
+    )
+
+    assert rc != 0
+    assert "imported: 1; queue is full" in capsys.readouterr().err
+
+
+def test_serve_does_not_start_a_delivery_sweeper_without_delivery(
+    bridge_deps_no_itch: BridgeDeps, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Server:
+        def __enter__(self) -> Server:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def serve_forever(self) -> None:
+            return None
+
+    monkeypatch.setattr(cli, "_build_deps", lambda _path, log: bridge_deps_no_itch)
+    monkeypatch.setattr(cli, "make_server", lambda *args, **kwargs: Server())
+
+    def unexpected_thread(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("delivery sweeper must not start without delivery")
+
+    monkeypatch.setattr(cli.threading, "Thread", unexpected_thread)
+
+    args = type("Args", (), {"config": "unused", "host": "127.0.0.1", "port": 0})()
+    assert cli._cmd_serve(args) == 0
 
 
 def test_itch_import_rc_2_on_config_error(tmp_path: Path) -> None:
