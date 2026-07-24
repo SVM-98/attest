@@ -115,8 +115,10 @@ Edit it:
   looks like `price_1Pxy...`). A purchase for a price with no matching table
   is refused, never issued with guessed terms — this is deliberate.
 - A Checkout Session must contain exactly one purchasable line item. If the
-  bridge fetches line items and finds more than one, it dead-letters the event
-  for operator triage rather than issuing a receipt for only the first product.
+  bridge has an API key, it fetches line items and rejects more than one even
+  when `attest_product_key` metadata supplies the product mapping. Without an
+  API key, the count is unknowable: setting `attest_product_key` asserts that
+  the Checkout Session has exactly one purchasable line item.
 - Drop the `[itch]` table if you don't also sell on itch.io (see
   [setup-itch.md](setup-itch.md)), and the `[delivery]` table if you're happy
   with download-link-only (no receipt emails — see step 8).

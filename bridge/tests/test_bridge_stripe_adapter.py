@@ -341,6 +341,15 @@ def test_normalize_missing_email_raises_purchase_rejected() -> None:
         _adapter().normalize(event)
 
 
+@pytest.mark.parametrize("field", ["customer_details", "metadata"])
+def test_normalize_rejects_falsy_non_object_present_fields(field: str) -> None:
+    session = _session(metadata={"attest_product_key": "price_TEST"})
+    session[field] = []
+
+    with pytest.raises(PurchaseRejected):
+        _adapter().normalize(_event(session))
+
+
 def test_normalize_no_metadata_key_with_api_key_uses_line_items_fallback() -> None:
     calls: list[tuple[str, dict[str, str]]] = []
 
@@ -358,6 +367,18 @@ def test_normalize_no_metadata_key_with_api_key_uses_line_items_fallback() -> No
     url, headers = calls[0]
     assert url == "https://api.stripe.com/v1/checkout/sessions/cs_test_123/line_items"
     assert headers == {"Authorization": "Bearer sk_test_merchant_key"}
+
+
+def test_normalize_metadata_product_key_with_api_key_still_validates_line_item_count() -> None:
+    session = _session(metadata={"attest_product_key": "price_TEST"})
+
+    with pytest.raises(PurchaseRejected, match="multiple line items"):
+        _adapter(
+            api_key="sk_test_merchant_key",
+            http_get=lambda _url, _headers: json.dumps(
+                {"data": [{"price": {"id": "price_TEST"}}, {"price": {"id": "price_other"}}]}
+            ).encode(),
+        ).normalize(_event(session))
 
 
 def test_normalize_no_metadata_and_no_api_key_raises_purchase_rejected_with_exact_message() -> None:

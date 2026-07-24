@@ -411,6 +411,23 @@ def test_paid_event_with_non_object_customer_details_is_dead_lettered(
     assert len(deps.ledger.unresolved_dead_letters()) == 1
 
 
+@pytest.mark.parametrize("has_event_id", [False, True])
+def test_paid_event_with_non_object_data_is_dead_lettered_and_acknowledged(
+    deps: BridgeDeps, frozen_now: int, has_event_id: bool
+) -> None:
+    event = make_session_completed_event(metadata={"attest_product_key": "price_TEST"})
+    event["data"] = "x"
+    if not has_event_id:
+        del event["id"]
+
+    status, _, _ = _signed_webhook(deps, event)
+
+    assert status.startswith("200")
+    assert len(deps.ledger.unresolved_dead_letters()) == 1
+    if has_event_id:
+        assert deps.ledger.seen_event("stripe", "evt_test_1") is True
+
+
 def test_multiple_stripe_line_items_dead_letter_without_issuing(
     deps: BridgeDeps, frozen_now: int
 ) -> None:
@@ -422,7 +439,9 @@ def test_multiple_stripe_line_items_dead_letter_without_issuing(
     deps.stripe = StripeAdapter(
         webhook_secret=_WEBHOOK_SECRET, api_key="sk_test", http_get=line_items
     )
-    event = make_session_completed_event(session_id="cs_two_items", metadata={})
+    event = make_session_completed_event(
+        session_id="cs_two_items", metadata={"attest_product_key": "price_TEST"}
+    )
     status, _, _ = _signed_webhook(deps, event)
 
     assert status.startswith("200")

@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import smtplib
 import ssl
+from dataclasses import replace
 from email.message import EmailMessage
 from typing import Any
 
@@ -248,6 +249,26 @@ def test_sweep_skips_receipts_at_the_delivery_attempt_cap(tmp_path: Any) -> None
     assert fakes == []
 
 
+def test_sweep_rechecks_a_stale_candidate_before_sending(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    _record_undelivered(ledger, "cs_stale")
+    snapshot = ledger.get_receipt("stripe", "cs_stale")
+    assert snapshot is not None
+    for _ in range(MAX_DELIVERY_ATTEMPTS):
+        ledger.record_delivery_failure("stripe", "cs_stale", "failed")
+    monkeypatch.setattr(ledger, "undelivered", lambda: [replace(snapshot, delivery_attempts=0)])
+    fakes: list[_FakeSMTP] = []
+
+    assert sweep_undelivered(
+        ledger=ledger,
+        delivery=Delivery(_config(), smtp_factory=_fake_factory(fakes)),
+        public_base_url="https://receipts.example.com",
+    ) == (0, 0)
+    assert fakes == []
+
+
 def test_a_raising_sweep_send_does_not_abort_later_rows(tmp_path: Any) -> None:
     ledger = Ledger(tmp_path / "ledger.sqlite3")
     _record_undelivered(ledger, "cs_bad")
@@ -266,6 +287,17 @@ def test_a_raising_sweep_send_does_not_abort_later_rows(tmp_path: Any) -> None:
     )
     assert (delivered, failures) == (1, 1)
     assert ledger.get_receipt("stripe", "cs_good").delivered_at is not None  # type: ignore[union-attr]
+
+
+def test_sweep_is_a_no_op_without_configured_delivery(tmp_path: Any) -> None:
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    _record_undelivered(ledger, "cs_no_delivery")
+
+    assert sweep_undelivered(
+        ledger=ledger,
+        delivery=Delivery(None),
+        public_base_url="https://receipts.example.com",
+    ) == (0, 0)
 
 
 # -- transport policy: TLS-only, mandatory STARTTLS on non-465 ------------
