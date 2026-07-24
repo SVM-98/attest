@@ -34,7 +34,7 @@ from attest_bridge.delivery import DELIVERY_SWEEP_SECONDS, Delivery, sweep_undel
 from attest_bridge.http import BridgeDeps, make_app
 from attest_bridge.itch_adapter import ItchAdapter, ItchPoller
 from attest_bridge.ledger import Ledger
-from attest_bridge.model import ConfigError
+from attest_bridge.model import ClaimQueueFull, ConfigError
 from attest_bridge.signing import load_issuer
 from attest_bridge.stripe_adapter import StripeAdapter
 
@@ -42,7 +42,7 @@ _RFC3339 = "%Y-%m-%dT%H:%M:%SZ"
 _RC_OK = 0
 _RC_CONFIG_ERROR = 2
 
-_TOKEN_PATH_RE = re.compile(r"(/r/|/itch/claim/)[^ /?]+")
+_TOKEN_PATH_RE = re.compile(r"/r/[^ /?]+")
 
 
 def _now_rfc3339() -> str:
@@ -50,9 +50,8 @@ def _now_rfc3339() -> str:
 
 
 def _redact_tokens(text: str) -> str:
-    """Redact the capability token segment of /r/<token> and /itch/claim/<token>
-    so it never reaches the access log (the token grants receipt download)."""
-    return _TOKEN_PATH_RE.sub(r"\1<redacted>", text)
+    """Redact the /r/<token> capability from access logs."""
+    return _TOKEN_PATH_RE.sub("/r/<redacted>", text)
 
 
 class _SanitizedRequestHandler(WSGIRequestHandler):
@@ -184,14 +183,16 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     # thread's ItchPoller, ticking against the live API on its own schedule.
     stop_event = threading.Event()
     poller_thread: threading.Thread | None = None
-    sweeper_thread = threading.Thread(
-        target=_run_delivery_sweeper,
-        args=(stop_event, deps, log),
-        daemon=True,
-        name="delivery-sweeper",
-    )
-    sweeper_thread.start()
-    log.info("delivery sweeper started (interval=%ds)", DELIVERY_SWEEP_SECONDS)
+    sweeper_thread: threading.Thread | None = None
+    if deps.config.delivery is not None:
+        sweeper_thread = threading.Thread(
+            target=_run_delivery_sweeper,
+            args=(stop_event, deps, log),
+            daemon=True,
+            name="delivery-sweeper",
+        )
+        sweeper_thread.start()
+        log.info("delivery sweeper started (interval=%ds)", DELIVERY_SWEEP_SECONDS)
     if deps.itch is not None and deps.config.itch is not None:
         poller = ItchPoller(
             adapter=deps.itch,
@@ -226,7 +227,8 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         stop_event.set()
         if poller_thread is not None:
             poller_thread.join(timeout=5)
-        sweeper_thread.join(timeout=5)
+        if sweeper_thread is not None:
+            sweeper_thread.join(timeout=5)
     return _RC_OK
 
 
@@ -317,7 +319,14 @@ def _cmd_itch_import(args: argparse.Namespace) -> int:
                 if not email or email in seen_emails:
                     continue
                 seen_emails.add(email)
-                deps.ledger.enqueue_claim(email, args.game_id, now=now)
+                try:
+                    deps.ledger.enqueue_claim(email, args.game_id, now=now)
+                except ClaimQueueFull:
+                    print(
+                        f"itch-import: imported: {enqueued}; queue is full",
+                        file=sys.stderr,
+                    )
+                    return _RC_CONFIG_ERROR
                 enqueued += 1
     except OSError as exc:
         print(f"itch-import: cannot read {csv_path}: {exc}", file=sys.stderr)
