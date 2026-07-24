@@ -20,5 +20,18 @@ reacts to their events.
 Every receipt the bridge issues survives the bridge's own death: it is a
 plain attest v0.1/v0.2 envelope, offline-verifiable with nothing but the
 issuer's public key manifest, with no dependency on the bridge process, its
-database, or its uptime ever again. See `bridge/docs/` for the webhook
-adapter contracts, catalog format, and deployment guidance.
+database, or its uptime ever again.
+
+## Get started
+
+- [`docs/setup-stripe.md`](docs/setup-stripe.md) — zero to a verified
+  receipt selling through Stripe Checkout or Payment Links, including a
+  local synthetic-webhook test you can run before touching a real account.
+- [`docs/setup-itch.md`](docs/setup-itch.md) — the same, for itch.io (a
+  claim-queue poller, not a webhook — itch.io exposes neither).
+- [`docs/deploy.md`](docs/deploy.md) — the four one-click deploy targets
+  (Docker Compose, Fly.io, Render, Cloud Run), all built from
+  [`deploy/Dockerfile`](deploy/Dockerfile), plus the TLS requirement common
+  to all of them.
+- [`examples/bridge.toml`](examples/bridge.toml) — the annotated config
+  template every setup guide above starts from.

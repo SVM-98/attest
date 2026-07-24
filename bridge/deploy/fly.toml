@@ -1,0 +1,50 @@
+# attest-bridge on Fly.io. Deploy from the REPO ROOT (the build context needs
+# the whole bridge/ tree — see bridge/deploy/Dockerfile):
+#
+#   fly apps create attest-bridge
+#   fly volumes create attest_bridge_config --region iad --size 1
+#   fly volumes create attest_bridge_secrets --region iad --size 1
+#   fly volumes create attest_bridge_data --region iad --size 1
+#   fly secrets set STRIPE_WEBHOOK_SECRET=whsec_... STRIPE_API_KEY=sk_... ITCH_API_KEY=... SMTP_PASSWORD=...
+#   fly deploy --config bridge/deploy/fly.toml
+#
+# The three volumes above start EMPTY. Populate them once, after the first
+# deploy: `fly ssh sftp shell`, then `put` bridge.toml and key-manifest.json
+# into /etc/attest-bridge, and issuer.seed / issuer.mldsa.json into /secrets.
+# See bridge/docs/deploy.md.
+app = "attest-bridge"
+primary_region = "iad"
+
+[build]
+  dockerfile = "bridge/deploy/Dockerfile"
+
+[env]
+  # Non-secret only — this whole table is safe to commit. The four secrets
+  # (STRIPE_WEBHOOK_SECRET, STRIPE_API_KEY, ITCH_API_KEY, SMTP_PASSWORD) are
+  # never set here: `fly secrets set STRIPE_WEBHOOK_SECRET=... STRIPE_API_KEY=... ITCH_API_KEY=... SMTP_PASSWORD=...`
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "10s"
+    method = "GET"
+    path = "/healthz"
+
+[[mounts]]
+  source = "attest_bridge_config"
+  destination = "/etc/attest-bridge"
+
+[[mounts]]
+  source = "attest_bridge_secrets"
+  destination = "/secrets"
+
+[[mounts]]
+  source = "attest_bridge_data"
+  destination = "/var/lib/attest-bridge"

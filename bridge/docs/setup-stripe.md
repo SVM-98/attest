@@ -1,0 +1,249 @@
+# Stripe setup: zero to a verified receipt
+
+This is the whole path from nothing to a real, offline-verifiable attest
+receipt issued automatically at the moment of sale, for a merchant selling
+through Stripe Checkout or Payment Links. Every command below is
+copy-pasteable and runs exactly as written — nothing here requires reading
+this repo's source. Budget under an hour.
+
+You will need: a terminal with Python 3.12+ and `pip install attest-receipts
+attest-bridge` (or a venv — see the root [README](../../README.md#quickstart)
+for `attest`; `attest-bridge` is not yet on PyPI, install it from a checkout:
+`pip install ./bridge`), a Stripe account (test mode is enough to complete
+every step here), and somewhere to run the bridge (see
+[deploy.md](deploy.md) for that half).
+
+## 1. Generate your issuer keypair
+
+```sh
+attest keygen --hybrid --seed-out issuer.seed --pub-out issuer.pub --mldsa-out issuer.mldsa.json
+```
+
+This writes three files: `issuer.seed` and `issuer.mldsa.json` are secrets
+(written 0600 — back them up somewhere encrypted, never commit them, never
+send them anywhere); `issuer.pub` is public. `--hybrid` is required for the
+bridge specifically — it signs every receipt with both an Ed25519 and an
+ML-DSA-65 (post-quantum) signature, and the bridge refuses to start without
+the ML-DSA leg (see step 2).
+
+## 2. Create and publish your key manifest
+
+```sh
+attest manifest init \
+  --issuer store.example.com \
+  --kid store.example.com/keys/2026-07#hybrid-1 \
+  --seed issuer.seed \
+  --mldsa-key issuer.mldsa.json \
+  --valid-from 2026-07-24T00:00:00Z \
+  --issued-at 2026-07-24T00:00:00Z \
+  --out key-manifest.json
+```
+
+Replace `store.example.com` with your own domain — `--issuer` is your DNS
+domain, and `--kid` must start with that same domain (`attest-bridge`
+rejects a mismatch at startup). The `#hybrid-1` suffix is just a label you
+choose; the grammar is `<your-domain>/keys/<label>#<name>`. `--valid-from` is
+when this key starts being valid (an ISO-8601 UTC timestamp,
+`YYYY-MM-DDTHH:MM:SSZ`); there's also an optional `--valid-to` if you want a
+hard expiry (omit it for none).
+
+`key-manifest.json` is public — it's how anyone verifying a receipt learns
+your public key. Publish it at:
+
+```
+https://store.example.com/.well-known/attest.json
+```
+
+(any static hosting works — GitHub Pages, S3, Cloudflare Pages, your existing
+web server; "publish one key" is the entire distribution mechanism, no
+registry or CA involved).
+
+## 3. Configure the bridge
+
+```sh
+cp bridge/examples/bridge.toml ./bridge.toml
+```
+
+Edit it:
+
+- `[issuer]`: `id` = your domain, `kid` = the exact `--kid` from step 2,
+  `seed_path` / `mldsa_key_path` / `manifest_path` = wherever your deploy
+  target mounts `issuer.seed` / `issuer.mldsa.json` / `key-manifest.json`
+  (see [deploy.md](deploy.md) — the shipped example already uses the
+  Docker/Fly/Render convention, `/secrets/...` and `/etc/attest-bridge/...`).
+- `[stripe]`: `webhook_secret_env = "STRIPE_WEBHOOK_SECRET"` (you'll set that
+  env var in step 5). Also set `api_key_env = "STRIPE_API_KEY"` and point it
+  at an env var holding your Stripe **secret** key (Dashboard → Developers →
+  API keys) — with this set, the bridge resolves which product was bought by
+  calling Stripe's API for you, so you never have to touch Checkout Session
+  metadata. Without an API key, you must set `metadata.attest_product_key`
+  yourself on every Checkout Session/Payment Link (advanced; not covered
+  here).
+- `[products.<price_id>]`: one table per SKU you sell, keyed by the Stripe
+  **Price ID** (Dashboard → Product catalog → your product → the price →
+  looks like `price_1Pxy...`). A purchase for a price with no matching table
+  is refused, never issued with guessed terms — this is deliberate.
+- Drop the `[itch]` table if you don't also sell on itch.io (see
+  [setup-itch.md](setup-itch.md)), and the `[delivery]` table if you're happy
+  with download-link-only (no receipt emails — see step 7).
+
+## 4. Deploy
+
+See [deploy.md](deploy.md) for the four one-click targets (Docker Compose,
+Fly.io, Render, Cloud Run) and the four secret env vars
+(`STRIPE_WEBHOOK_SECRET`, `STRIPE_API_KEY`, `ITCH_API_KEY`, `SMTP_PASSWORD` —
+set only the ones your `bridge.toml` references).
+
+## 5. Wire up the Stripe webhook
+
+Stripe Dashboard → Developers → Webhooks → **Add endpoint**:
+
+- Endpoint URL: `https://<your-bridge-host>/stripe/webhook`
+- Events to send: `checkout.session.completed` and
+  `checkout.session.async_payment_succeeded`
+- After creating it, reveal the **Signing secret** (`whsec_...`) and set it
+  as your deploy's `STRIPE_WEBHOOK_SECRET`.
+
+## 6. (Optional) Transfer-ready receipts
+
+By default a receipt is bound to the buyer's email only — perfectly valid
+forever, just not transferable. To let a buyer bind their receipt to a
+public key instead (making it eligible for a future issuer-mediated
+transfer), give Stripe a way to carry it: add a Checkout/Payment-Link custom
+field with key `attest_pubkey`, type `text`, marked optional — or set
+`metadata.attest_buyer_pubkey` yourself if you create Checkout Sessions
+programmatically. A buyer who leaves it blank gets an email-bound,
+non-transferable receipt: exactly as designed, not an error.
+
+## 7. (Optional) Zero-config buyer download
+
+Point your Checkout Session's `success_url` at:
+
+```
+https://<your-bridge-host>/stripe/receipt?session_id={CHECKOUT_SESSION_ID}
+```
+
+Stripe substitutes `{CHECKOUT_SESSION_ID}` itself; the buyer lands on a page
+that downloads their `.attest` receipt directly, with no email step needed.
+
+## 8. Test it
+
+Make a real test-mode purchase (Stripe test card `4242 4242 4242 4242`), let
+the webhook fire, and download the resulting receipt (via step 7's URL, the
+email from step 4's delivery, or your own lookup against the Ledger). Then:
+
+```sh
+attest verify receipt.attest --trust-dir <dir-containing-key-manifest.json>
+```
+
+should print `"ok": true`. That's the whole loop: a real Stripe purchase, a
+signed receipt, verified offline with nothing but the file you just
+downloaded and the manifest you published in step 2.
+
+---
+
+## Three things worth knowing before you go live
+
+> **The salt tradeoff.** Every receipt embeds its own buyer-binding salt —
+> that's what makes the file self-contained and verifiable forever, with no
+> server to ask. The flip side: anyone holding the file can test candidate
+> emails against the buyer commitment offline (it's a commitment, not
+> encryption). If you need to keep the salt separate from the receipt file
+> itself, the underlying `attest issue` CLI supports `--salt-out` for
+> hand-issuance — the bridge always embeds the salt inline, by design, since
+> it has no separate channel to hand a buyer their salt out-of-band.
+
+> **The Ledger database is a secret.** `ledger_path` (a sqlite3 file) stores
+> every issued envelope verbatim, salt included, and is created 0600. Back it
+> up **encrypted**. It is not part of the trust model — nothing `attest
+> verify` depends on it — but losing it loses your replay-dedup memory and
+> buyers' download-token links; a receipt already delivered to a buyer stays
+> valid forever regardless of what happens to this file.
+
+> **Stage 2 transparency is opt-in and off.** Everything this bridge issues
+> is a Stage 1 hybrid-signed receipt (Ed25519 + ML-DSA-65) — strong on its
+> own, but not logged to a public transparency log. If you want Stage 2
+> (an issuer key-transparency log a receipt can be corroborated against),
+> that's the separate `attest log` CLI (`init` / `append` /
+> `sign-checkpoint`), run out-of-band; the bridge doesn't wire it up for you.
+
+## Testing appendix: a local synthetic webhook
+
+You don't need a real Stripe account to exercise the whole pipeline — you can
+sign a fake `checkout.session.completed` event yourself and POST it straight
+at a locally-running bridge, using nothing but the Python standard library.
+
+Start the bridge (in a terminal where `STRIPE_WEBHOOK_SECRET` is set to any
+value — it just has to match what the script below signs with):
+
+```sh
+attest-bridge serve --config bridge.toml --host 127.0.0.1 --port 8080
+```
+
+Then, in another terminal, save this as `send_test_webhook.py` and run it —
+it builds the `Stripe-Signature` header exactly the way Stripe's own webhook
+sender does (`t=<epoch>,v1=<hex hmac>`, keyed by your `whsec_...` secret,
+signed over `f"{t}." + <raw body bytes>`):
+
+```python
+import hashlib
+import hmac
+import json
+import time
+import urllib.request
+
+BRIDGE_URL = "http://127.0.0.1:8080"
+WEBHOOK_SECRET = "whsec_testsecret123"  # must match STRIPE_WEBHOOK_SECRET
+
+
+def sign_stripe(payload: bytes, secret: str, ts: int) -> str:
+    mac = hmac.new(secret.encode(), f"{ts}.".encode() + payload, hashlib.sha256).hexdigest()
+    return f"t={ts},v1={mac}"
+
+
+event = {
+    "id": "evt_test_1",
+    "type": "checkout.session.completed",
+    "created": int(time.time()),
+    "data": {
+        "object": {
+            "id": "cs_test_1",
+            "payment_status": "paid",
+            "customer_details": {"email": "buyer@example.com"},
+            "metadata": {"attest_product_key": "price_1PxYzEXAMPLE"},
+            "amount_total": 1999,
+            "currency": "usd",
+            "custom_fields": [],
+        }
+    },
+}
+
+body = json.dumps(event).encode()
+ts = int(time.time())
+header = sign_stripe(body, WEBHOOK_SECRET, ts)
+
+req = urllib.request.Request(
+    f"{BRIDGE_URL}/stripe/webhook",
+    data=body,
+    headers={"Stripe-Signature": header, "Content-Type": "application/json"},
+    method="POST",
+)
+with urllib.request.urlopen(req) as resp:
+    print(resp.status, resp.read().decode())
+```
+
+```sh
+python3 send_test_webhook.py
+```
+
+A `200 {"ok": true}` means the bridge accepted and processed it. Download the
+receipt it just issued (the synthetic event above used session id
+`cs_test_1`):
+
+```sh
+curl "http://127.0.0.1:8080/stripe/receipt?session_id=cs_test_1" -o receipt.attest
+attest verify receipt.attest --trust-dir <dir-containing-key-manifest.json>
+```
+
+`"ok": true` closes the loop entirely offline, with no Stripe account
+involved at all.
