@@ -31,16 +31,19 @@ set (`Ledger.get_receipt`), exactly like Stripe's event/purchase dedup — see
 from __future__ import annotations
 
 import json
+import logging
 import threading
-import urllib.request
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import quote
 
+from attest_bridge._http import https_get as _default_http_get
 from attest_bridge.core import IssuingCore
 from attest_bridge.ledger import Claim, Ledger
 from attest_bridge.model import BridgeError, NormalizedPurchase, PurchaseRejected, UnmappedProduct
+
+_log = logging.getLogger("attest_bridge.itch")
 
 _RFC3339 = "%Y-%m-%dT%H:%M:%SZ"
 # itch.io's documented purchase timestamp form (space-separated, implicitly
@@ -56,22 +59,6 @@ _SKIP_STATUSES = frozenset({"refunded", "canceled"})
 
 class ItchApiError(BridgeError):
     """`api.itch.io` returned a non-200 response, or the body was unparseable."""
-
-
-def _default_http_get(url: str, headers: dict[str, str]) -> bytes:
-    """Real network call used when no `http_get` is injected.
-
-    Mirrors `stripe_adapter._default_http_get`: `urlopen` never runs against
-    anything but an `https://` URL, regardless of caller. A non-2xx response
-    makes `urlopen` raise `urllib.error.HTTPError` (an `OSError` subclass) —
-    `ItchAdapter.fetch_purchases` converts that into `ItchApiError`.
-    """
-    if not url.startswith("https://"):
-        raise ValueError(f"refusing to fetch a non-https URL: {url!r}")
-    request = urllib.request.Request(url, headers=headers)  # noqa: S310 - URL validated https:// above
-    with urllib.request.urlopen(request) as response:  # noqa: S310 - URL validated https:// above
-        data: bytes = response.read()
-        return data
 
 
 def _parse_itch_created_at(raw: Any) -> str:
@@ -159,8 +146,18 @@ class ItchAdapter:
         cancel filtering is `ItchPoller.tick`'s job, not this method's — this
         only maps fields, it never decides whether a purchase is issuable.
         """
-        purchase_id = str(raw["id"])
-        game_id = raw["game_id"]
+        if not isinstance(raw, dict):
+            raise PurchaseRejected(f"itch purchase is not an object: {raw!r}")
+        raw_id = raw.get("id")
+        if isinstance(raw_id, bool) or not isinstance(raw_id, (str, int)):
+            raise PurchaseRejected(f"itch purchase id is missing or not a scalar: {raw_id!r}")
+        raw_game_id = raw.get("game_id")
+        if isinstance(raw_game_id, bool) or not isinstance(raw_game_id, (str, int)):
+            raise PurchaseRejected(
+                f"itch purchase game_id is missing or not a scalar: {raw_game_id!r}"
+            )
+        purchase_id = str(raw_id)
+        game_id = str(raw_game_id)
         purchased_at = _parse_itch_created_at(raw.get("created_at"))
         price = raw.get("price")
         return NormalizedPurchase(
@@ -224,52 +221,66 @@ class ItchPoller:
         now_rfc3339 = now.strftime(_RFC3339)
         for claim in self._ledger.due_claims(now_rfc3339):
             try:
-                purchases = self._adapter.fetch_purchases(claim.game_id, claim.email)
+                completed, download_token = self._drain_claim(claim, now_rfc3339)
             except ItchApiError:
                 self._defer_or_exhaust(claim, now)
                 continue
-
-            completed = False
-            download_token: str | None = None
-            for raw in purchases:
-                if raw.get("status") in _SKIP_STATUSES:
-                    continue
-                purchase_id = str(raw["id"])
-                stored = self._ledger.get_receipt("itch", purchase_id)
-                if stored is None:
-                    try:
-                        normalized = self._adapter.normalize(raw, email=claim.email)
-                        self._core.process(normalized)
-                    except (PurchaseRejected, UnmappedProduct) as exc:
-                        # The purchase provably existed on the API (OI-4 is
-                        # satisfied) even though it can't be normalized or
-                        # mapped to a catalog entry: dead-letter for operator
-                        # triage, but the claim still completes below —
-                        # never left pending forever for something the API
-                        # already confirmed happened.
-                        self._ledger.add_dead_letter(
-                            "itch", purchase_id, str(exc), json.dumps(raw), now=now_rfc3339
-                        )
-                    else:
-                        stored = self._ledger.get_receipt("itch", purchase_id)
-                completed = True
-                if stored is not None and download_token is None:
-                    download_token = stored.download_token
-
-            if not completed:
-                # No actionable purchase this tick — either the API returned
-                # zero purchases, or every one it returned was refunded/
-                # canceled. Either way nothing confirms the claim yet: the
-                # buyer may be claiming before the purchase settles (or
-                # before a refund reverses), so retry exactly like an API
-                # miss rather than stranding the claim pending forever.
+            except Exception:
+                # One claim's unexpected failure (e.g. a signing IssueError) must
+                # neither abort the whole tick nor kill the sole poller thread:
+                # log it and defer this claim to retry on the normal backoff.
+                _log.exception("itch poller: unexpected error on claim %s; deferring", claim.token)
                 self._defer_or_exhaust(claim, now)
                 continue
-
+            if not completed:
+                self._defer_or_exhaust(claim, now)
+                continue
             self._ledger.complete_claim(claim.token, result_download_token=download_token)
 
+    def _drain_claim(self, claim: Claim, now_rfc3339: str) -> tuple[bool, str | None]:
+        """Fetch the claim's live purchases and issue for the actionable ones.
+        Returns (completed, download_token). Raises ItchApiError on API failure."""
+        purchases = self._adapter.fetch_purchases(claim.game_id, claim.email)
+        completed = False
+        download_token: str | None = None
+        for raw in purchases:
+            if not isinstance(raw, dict):
+                _log.warning(
+                    "itch poller: skipping non-object purchase row for claim %s", claim.token
+                )
+                continue
+            if raw.get("status") in _SKIP_STATUSES:
+                continue
+            try:
+                normalized = self._adapter.normalize(raw, email=claim.email)
+            except (PurchaseRejected, UnmappedProduct) as exc:
+                # The API confirmed this purchase (OI-4 satisfied) but it can't be
+                # normalized/mapped: dead-letter for triage; the claim still
+                # completes below. Never re-issue or synthesize a receipt here.
+                self._ledger.add_dead_letter(
+                    "itch", None, str(exc), json.dumps(raw), now=now_rfc3339
+                )
+                completed = True
+                continue
+            purchase_id = normalized.platform_purchase_id
+            stored = self._ledger.get_receipt("itch", purchase_id)
+            if stored is None:
+                try:
+                    self._core.process(normalized)
+                except (PurchaseRejected, UnmappedProduct) as exc:
+                    self._ledger.add_dead_letter(
+                        "itch", purchase_id, str(exc), json.dumps(raw), now=now_rfc3339
+                    )
+                    completed = True
+                    continue
+                stored = self._ledger.get_receipt("itch", purchase_id)
+            completed = True
+            if stored is not None and download_token is None:
+                download_token = stored.download_token
+        return completed, download_token
+
     def _defer_or_exhaust(self, claim: Claim, now: datetime) -> None:
-        if claim.attempts >= self._max_attempts:
+        if claim.attempts + 1 >= self._max_attempts:
             self._ledger.exhaust_claim(claim.token)
             return
         delay_seconds = self._backoff_base_seconds * (2**claim.attempts)
@@ -280,5 +291,10 @@ class ItchPoller:
         """Tick once, then wait `interval_seconds` (or until `stop` fires),
         forever. `stop.wait` doubles as the sleep and the shutdown signal."""
         while not stop.is_set():
-            self.tick(now=datetime.now(UTC))
+            try:
+                self.tick(now=datetime.now(UTC))
+            except Exception:
+                # Last-resort guard: tick already isolates per-claim failures, but a
+                # failure in due_claims() itself must not kill the sole daemon thread.
+                _log.exception("itch poller: tick failed; continuing")
             stop.wait(interval_seconds)

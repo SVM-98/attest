@@ -18,12 +18,14 @@ import argparse
 import csv
 import json
 import logging
+import re
 import socketserver
 import sys
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
-from wsgiref.simple_server import WSGIServer, make_server
+from typing import Any
+from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
 
 from attest_bridge.catalog import ProductCatalog
 from attest_bridge.config import load_config
@@ -40,9 +42,23 @@ _RFC3339 = "%Y-%m-%dT%H:%M:%SZ"
 _RC_OK = 0
 _RC_CONFIG_ERROR = 2
 
+_TOKEN_PATH_RE = re.compile(r"(/r/|/itch/claim/)[^ /?]+")
+
 
 def _now_rfc3339() -> str:
     return datetime.now(UTC).strftime(_RFC3339)
+
+
+def _redact_tokens(text: str) -> str:
+    """Redact the capability token segment of /r/<token> and /itch/claim/<token>
+    so it never reaches the access log (the token grants receipt download)."""
+    return _TOKEN_PATH_RE.sub(r"\1<redacted>", text)
+
+
+class _SanitizedRequestHandler(WSGIRequestHandler):
+    def log_message(self, format: str, *args: Any) -> None:
+        redacted = tuple(_redact_tokens(a) if isinstance(a, str) else a for a in args)
+        super().log_message(format, *redacted)
 
 
 class _ThreadingWSGIServer(socketserver.ThreadingMixIn, WSGIServer):
@@ -163,7 +179,13 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         )
 
     try:
-        with make_server(host, port, app, server_class=_ThreadingWSGIServer) as httpd:
+        with make_server(
+            host,
+            port,
+            app,
+            server_class=_ThreadingWSGIServer,
+            handler_class=_SanitizedRequestHandler,
+        ) as httpd:
             log.info("attest-bridge serving on %s:%d", host, port)
             httpd.serve_forever()
     finally:

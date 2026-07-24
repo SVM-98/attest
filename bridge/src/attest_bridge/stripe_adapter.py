@@ -31,10 +31,10 @@ import hashlib
 import hmac
 import json
 import time
-import urllib.request
 from collections.abc import Callable
 from typing import Any
 
+from attest_bridge._http import https_get as _default_http_get
 from attest_bridge.model import (
     BridgeError,
     ConfigError,
@@ -125,22 +125,6 @@ def verify_stripe_signature(
     # on the first mismatch's content, and never use `==` on secret-derived data.
     if not any(hmac.compare_digest(expected, candidate) for candidate in v1_candidates):
         raise StripeSignatureError("signature mismatch")
-
-
-def _default_http_get(url: str, headers: dict[str, str]) -> bytes:
-    """Real network call used when no `http_get` is injected (line-items fallback).
-
-    The line-items URL passed in by `StripeAdapter` is always the hardcoded
-    HTTPS template below (`_LINE_ITEMS_URL`), but this still enforces the
-    `http_get` contract itself: `urlopen` never runs against anything but an
-    `https://` URL, regardless of caller.
-    """
-    if not url.startswith("https://"):
-        raise ValueError(f"refusing to fetch a non-https URL: {url!r}")
-    request = urllib.request.Request(url, headers=headers)  # noqa: S310 - URL validated https:// above
-    with urllib.request.urlopen(request) as response:  # noqa: S310 - URL validated https:// above
-        data: bytes = response.read()
-        return data
 
 
 class StripeAdapter:
