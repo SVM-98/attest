@@ -39,7 +39,10 @@ class IssuerIdentity:
 def _load_seed(path: Path) -> keys.SigningKeyPair:
     try:
         text = path.read_text(encoding="utf-8").strip()
-    except (OSError, UnicodeDecodeError) as exc:
+    except (OSError, ValueError) as exc:
+        # ValueError subsumes UnicodeDecodeError (non-UTF-8 file) and the plain
+        # ValueError("embedded null byte") read_text raises for a NUL in the path
+        # (a NUL can reach seed_path via TOML config). Every read -> ConfigError.
         raise ConfigError(f"cannot read seed file {path}: {exc}") from exc
     try:
         return keys.from_seed(keys.b64u_decode(text))
@@ -50,7 +53,7 @@ def _load_seed(path: Path) -> keys.SigningKeyPair:
 def _load_mldsa(path: Path) -> pq.MLDSAKeyPair:
     try:
         text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
+    except (OSError, ValueError) as exc:  # see _load_seed: NUL-in-path / non-UTF-8
         raise ConfigError(f"cannot read ML-DSA-65 key file {path}: {exc}") from exc
     try:
         obj = json.loads(text)
@@ -76,7 +79,7 @@ def _load_mldsa(path: Path) -> pq.MLDSAKeyPair:
 def _load_manifest(path: Path) -> dict[str, Any]:
     try:
         text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
+    except (OSError, ValueError) as exc:  # see _load_seed: NUL-in-path / non-UTF-8
         raise ConfigError(f"cannot read key manifest {path}: {exc}") from exc
     try:
         obj = json.loads(text)

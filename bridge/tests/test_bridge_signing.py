@@ -358,14 +358,58 @@ def test_manifest_overlong_integer_raises_config_error(
     assert str(config.manifest_path) in str(exc_info.value)
 
 
-def test_deeply_nested_manifest_json_raises_config_error(
+def test_malformed_unclosed_manifest_json_raises_config_error(
     tmp_path: Path, hybrid_keys: pq.HybridSigningKeys, key_manifest: dict[str, object]
 ) -> None:
-    # Pathologically nested JSON exhausts the parser (JSONDecodeError or
-    # RecursionError depending on the path) — either way it must normalize to
-    # ConfigError, never escape as a raw traceback.
+    # Deeply unclosed JSON — a distinct corruption from the well-formed cases —
+    # must normalize to ConfigError, never escape as a raw traceback.
     config = _write_issuer_files(tmp_path, hybrid_keys, key_manifest)
     config.manifest_path.write_text("[" * 5000, encoding="utf-8")
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_issuer(config)
+
+    assert str(config.manifest_path) in str(exc_info.value)
+
+
+def test_nul_byte_in_seed_path_raises_config_error(
+    tmp_path: Path, hybrid_keys: pq.HybridSigningKeys, key_manifest: dict[str, object]
+) -> None:
+    # A NUL byte can reach seed_path via TOML config; Path.read_text raises a plain
+    # ValueError("embedded null byte") (neither OSError nor UnicodeDecodeError),
+    # which must still normalize to ConfigError rather than escape.
+    valid = _write_issuer_files(tmp_path, hybrid_keys, key_manifest)
+    config = IssuerConfig(
+        id=valid.id,
+        display_name=valid.display_name,
+        kid=valid.kid,
+        seed_path=Path("bad\x00path"),
+        mldsa_key_path=valid.mldsa_key_path,
+        manifest_path=valid.manifest_path,
+    )
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_issuer(config)
+
+    assert "seed file" in str(exc_info.value)
+
+
+def test_manifest_verification_recursion_error_is_mapped_to_config_error(
+    tmp_path: Path,
+    hybrid_keys: pq.HybridSigningKeys,
+    key_manifest: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Sufficiently deep manifest nesting makes attest-JCS canonicalization recurse
+    # past the interpreter limit (RecursionError) inside verify_key_manifest; that
+    # must normalize to ConfigError. Triggered deterministically via monkeypatch
+    # rather than with a fragile, env-dependent nesting depth.
+    config = _write_issuer_files(tmp_path, hybrid_keys, key_manifest)
+
+    def _raise_recursion(_manifest: dict[str, object]) -> bool:
+        raise RecursionError("maximum recursion depth exceeded")
+
+    monkeypatch.setattr("attest_bridge.signing.manifests.verify_key_manifest", _raise_recursion)
 
     with pytest.raises(ConfigError) as exc_info:
         load_issuer(config)
