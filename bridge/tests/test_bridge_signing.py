@@ -241,14 +241,28 @@ def test_manifest_mldsa_pub_mismatch_raises_config_error(
 def test_issuer_identity_repr_does_not_leak_key_material(
     tmp_path: Path, hybrid_keys: pq.HybridSigningKeys, key_manifest: dict[str, object]
 ) -> None:
-    # Constraint 10: key material is never logged. repr() / "%r" must not emit
-    # the Ed25519 seed or the ML-DSA-65 secret key.
+    # Constraint 10: key material is never emitted by repr()/"%r". The nested
+    # dataclasses render bytes as Python byte literals (b'...'), NOT base64, so
+    # assert on the real repr form and that the secret/bulky fields are absent
+    # from the repr entirely (field(repr=False)) — a b64u-only assertion would
+    # have passed against the pre-fix repr despite the leak.
     config = _write_issuer_files(tmp_path, hybrid_keys, key_manifest)
     identity = load_issuer(config)
 
     rendered = f"{identity!r}"
+    # the secret/bulky fields must not appear in the repr at all
+    assert "signing_keys=" not in rendered
+    assert "manifest_snapshot=" not in rendered
+    # private key material in its actual repr form (byte literals) and as base64
+    assert repr(hybrid_keys.ed.seed) not in rendered
+    assert repr(hybrid_keys.mldsa.sk) not in rendered
     assert keys.b64u(hybrid_keys.ed.seed) not in rendered
     assert keys.b64u(hybrid_keys.mldsa.sk) not in rendered
+    # manifest public-key bytes (would surface if manifest_snapshot were in repr)
+    assert keys.b64u(hybrid_keys.ed.pub) not in rendered
+    assert keys.b64u(hybrid_keys.mldsa.pub) not in rendered
+    # the useful, non-leaky identifier fields are still present
+    assert identity.kid in rendered
 
 
 def test_mldsa_wrong_length_pub_raises_config_error(
@@ -322,6 +336,36 @@ def test_manifest_verification_raise_is_mapped_to_config_error(
     tampered = dict(key_manifest)
     tampered["unexpected_float"] = 1.5
     config = _write_issuer_files(tmp_path, hybrid_keys, tampered)
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_issuer(config)
+
+    assert str(config.manifest_path) in str(exc_info.value)
+
+
+def test_manifest_overlong_integer_raises_config_error(
+    tmp_path: Path, hybrid_keys: pq.HybridSigningKeys, key_manifest: dict[str, object]
+) -> None:
+    # A JSON integer beyond CPython's int-string conversion limit makes json.loads
+    # raise a plain ValueError (NOT JSONDecodeError) — the loader must still map it
+    # to ConfigError, not let it escape.
+    config = _write_issuer_files(tmp_path, hybrid_keys, key_manifest)
+    config.manifest_path.write_text('{"n": ' + "9" * 5000 + "}", encoding="utf-8")
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_issuer(config)
+
+    assert str(config.manifest_path) in str(exc_info.value)
+
+
+def test_deeply_nested_manifest_json_raises_config_error(
+    tmp_path: Path, hybrid_keys: pq.HybridSigningKeys, key_manifest: dict[str, object]
+) -> None:
+    # Pathologically nested JSON exhausts the parser (JSONDecodeError or
+    # RecursionError depending on the path) — either way it must normalize to
+    # ConfigError, never escape as a raw traceback.
+    config = _write_issuer_files(tmp_path, hybrid_keys, key_manifest)
+    config.manifest_path.write_text("[" * 5000, encoding="utf-8")
 
     with pytest.raises(ConfigError) as exc_info:
         load_issuer(config)

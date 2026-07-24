@@ -28,12 +28,12 @@ class IssuerIdentity:
     issuer_id: str
     display_name: str
     kid: str
-    # repr=False: the nested SigningKeyPair.seed / MLDSAKeyPair.sk are secret;
-    # without this, repr(identity) or "%r" logging would emit both private keys.
-    # field(repr=False) sets no default, so signing_keys stays required and
-    # manifest_snapshot (also required) may follow it.
+    # repr=False on both fields: SigningKeyPair.seed / MLDSAKeyPair.sk are secret,
+    # and manifest_snapshot carries (public but byte-encoded) key material — neither
+    # belongs in repr()/"%r" output. field(repr=False) sets no default, so these
+    # stay required positional fields.
     signing_keys: pq.HybridSigningKeys = field(repr=False)
-    manifest_snapshot: dict[str, Any]
+    manifest_snapshot: dict[str, Any] = field(repr=False)
 
 
 def _load_seed(path: Path) -> keys.SigningKeyPair:
@@ -54,7 +54,10 @@ def _load_mldsa(path: Path) -> pq.MLDSAKeyPair:
         raise ConfigError(f"cannot read ML-DSA-65 key file {path}: {exc}") from exc
     try:
         obj = json.loads(text)
-    except json.JSONDecodeError as exc:
+    except (ValueError, RecursionError) as exc:
+        # ValueError covers json.JSONDecodeError AND plain ValueError (a JSON
+        # integer beyond CPython's int-string conversion limit); RecursionError
+        # covers pathologically nested input. Every corruption -> ConfigError.
         raise ConfigError(f"ML-DSA-65 key file {path} is not valid JSON: {exc}") from exc
     if not isinstance(obj, dict) or obj.get("alg") != pq.ML_DSA_65_ALG:
         raise ConfigError(
@@ -77,7 +80,9 @@ def _load_manifest(path: Path) -> dict[str, Any]:
         raise ConfigError(f"cannot read key manifest {path}: {exc}") from exc
     try:
         obj = json.loads(text)
-    except json.JSONDecodeError as exc:
+    except (ValueError, RecursionError) as exc:
+        # See _load_mldsa: ValueError also covers the overlong-integer ValueError,
+        # RecursionError covers pathological nesting. Every corruption -> ConfigError.
         raise ConfigError(f"key manifest {path} is not valid JSON: {exc}") from exc
     if not isinstance(obj, dict):
         raise ConfigError(f"key manifest {path} must be a JSON object")
@@ -97,11 +102,12 @@ def load_issuer(config: IssuerConfig) -> IssuerIdentity:
 
     try:
         manifest_ok = manifests.verify_key_manifest(manifest)
-    except (ValueError, TypeError, KeyError) as exc:
+    except (ValueError, TypeError, KeyError, RecursionError) as exc:
         # A parseable-but-malformed manifest makes verification RAISE rather than
         # return False (e.g. a float, forbidden by the attest-JCS profile, reaches
-        # canonicalization -> canon.CanonError, a ValueError). Normalize to the
-        # pinned fail-closed contract: every corruption -> ConfigError.
+        # canonicalization -> canon.CanonError, a ValueError; deep nesting ->
+        # RecursionError). Normalize to the pinned fail-closed contract: every
+        # corruption -> ConfigError.
         raise ConfigError(
             f"key manifest {config.manifest_path} could not be verified: {exc}"
         ) from exc
