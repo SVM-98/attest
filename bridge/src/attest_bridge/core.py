@@ -155,7 +155,10 @@ class IssuingCore:
         so the receipt is durably safe in the Ledger before any delivery is
         attempted. An SMTP failure is recorded (`record_delivery_failure`)
         and the receipt stays downloadable via its token link; it is never
-        lost. A receipt that already has `delivered_at` set is never resent.
+        lost. Delivery is at-least-once: a crash after SMTP acceptance and
+        before `mark_delivered` can resend this exact stored envelope during a
+        sweep; it is never re-issued. A receipt already marked delivered is
+        never resent.
         """
         outcome = self.issue_for(purchase)
 

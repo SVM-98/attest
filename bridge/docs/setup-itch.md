@@ -46,6 +46,11 @@ max_attempts = 10
 Set `ITCH_API_KEY` in your deploy environment to the key from step 1
 (alongside `STRIPE_WEBHOOK_SECRET` etc. — see [deploy.md](deploy.md)).
 
+itch claims are delivery-only-via-email, so an itch configuration also
+requires a working `[delivery]` SMTP table. The bridge rejects a config with
+`[itch]` but no delivery settings rather than accepting claims it could not
+safely deliver.
+
 Add one `[products.itch_<game_id>]` table per game you sell — the product
 key is always `itch_` followed by the itch game id (the numeric id in your
 game's itch.io URL/dashboard, not the game's slug):
@@ -93,9 +98,11 @@ https://<your-bridge-host>/itch/claim
 configured games); submitting it (`POST` to the same URL) enqueues the claim
 and returns a token. Give buyers a way to check status — poll
 `GET https://<your-bridge-host>/itch/claim/<token>` — it returns
-`{"status": "pending"}` while waiting, and once the itch API confirms the
-purchase and the poller issues the receipt, `{"status": "confirmed",
-"download_url": "https://<your-bridge-host>/r/<download-token>"}`.
+`{"status": "pending"}` while waiting, then the deliberately non-oracular
+`{"status":"processed", "detail":"If a matching itch.io purchase exists,
+its receipt has been emailed to the address you submitted."}`. The claim API
+never returns a receipt URL or other receipt-derived information: the
+salt-bearing envelope is sent only to the submitted mailbox.
 
 **CSV backfill**, for buyers who purchased before you set the bridge up, or
 in bulk: export your buyer list from the itch.io dashboard (Analytics/Sales
@@ -116,11 +123,13 @@ never resolves (its claim keeps retrying, then exhausts).
 ## 4. Test it
 
 Once the poller has run (within `poll_interval_seconds` of enqueuing), check
-a claim's status via `/itch/claim/<token>` and, once `confirmed`, download
-and verify:
+a claim's status via `/itch/claim/<token>`. If the purchase matches, the
+receipt arrives by email. Save the attached receipt with restrictive creation
+permissions and verify it:
 
 ```sh
-curl "https://<your-bridge-host>/r/<download-token>" -o receipt.attest
+umask 077
+# Save the receipt attachment received at the address submitted in the claim.
 chmod 600 receipt.attest   # the envelope carries delivery.salt, a buyer-binding secret
 attest verify receipt.attest --trust-dir <dir-containing-key-manifest.json>
 ```

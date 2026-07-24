@@ -38,8 +38,11 @@ from email.message import EmailMessage
 from typing import Any
 
 from attest_bridge.config import DeliveryConfig
+from attest_bridge.ledger import Ledger
 
 _SMTP_SSL_PORT = 465
+MAX_DELIVERY_ATTEMPTS = 10
+DELIVERY_SWEEP_SECONDS = 300
 
 SMTPFactory = Callable[[str, int], smtplib.SMTP]
 
@@ -201,3 +204,62 @@ class Delivery:
         except Exception as exc:
             return DeliveryResult(status="failed", detail=_safe_detail(exc))
         return DeliveryResult(status="sent", detail=None)
+
+
+def sweep_undelivered(
+    *, ledger: Ledger, delivery: Delivery, public_base_url: str
+) -> tuple[int, int]:
+    """Retry undelivered receipts without letting one row abort the sweep.
+
+    Delivery is at-least-once: a crash after SMTP accepts a message but before
+    `mark_delivered` can resend the same stored envelope. It is never
+    re-issued, and rows at the attempt cap remain operator-visible.
+    """
+    delivered = 0
+    failed_or_skipped = 0
+    for stored in ledger.undelivered():
+        if stored.delivery_attempts >= MAX_DELIVERY_ATTEMPTS:
+            continue
+        try:
+            envelope = json.loads(stored.envelope_json)
+            payload = envelope.get("payload")
+            work = payload.get("work") if isinstance(payload, dict) else None
+            title = work.get("title") if isinstance(work, dict) else None
+            if not isinstance(title, str):
+                raise ValueError("stored receipt has no work title")
+            result = delivery.send(
+                to_email=stored.buyer_email,
+                receipt_id=stored.receipt_id,
+                work_title=title,
+                envelope=envelope,
+                download_url=f"{public_base_url}/r/{stored.download_token}",
+                info_url=None,
+            )
+            if result.status == "sent":
+                from datetime import UTC, datetime
+
+                ledger.mark_delivered(
+                    stored.platform,
+                    stored.purchase_id,
+                    at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                )
+                delivered += 1
+            elif result.status == "failed":
+                ledger.record_delivery_failure(
+                    stored.platform,
+                    stored.purchase_id,
+                    result.detail if result.detail is not None else "delivery failed",
+                )
+                failed_or_skipped += 1
+            else:
+                failed_or_skipped += 1
+        except Exception:
+            try:
+                ledger.record_delivery_failure(
+                    stored.platform, stored.purchase_id, "delivery sweep failed"
+                )
+            except Exception:
+                failed_or_skipped += 1
+                continue
+            failed_or_skipped += 1
+    return delivered, failed_or_skipped
