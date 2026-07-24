@@ -27,7 +27,8 @@ from pathlib import Path
 from typing import Any
 from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
 
-from attest_bridge.catalog import ProductCatalog
+from attest import issue, validate
+from attest_bridge.catalog import ProductCatalog, ProductTemplate
 from attest_bridge.config import load_config
 from attest_bridge.core import IssuingCore
 from attest_bridge.delivery import DELIVERY_SWEEP_SECONDS, Delivery, sweep_undelivered
@@ -41,8 +42,10 @@ from attest_bridge.stripe_adapter import StripeAdapter
 _RFC3339 = "%Y-%m-%dT%H:%M:%SZ"
 _RC_OK = 0
 _RC_CONFIG_ERROR = 2
+_RC_INCOMPLETE = 1
 
 _TOKEN_PATH_RE = re.compile(r"/r/[^ /?]+")
+_SESSION_CAPABILITY_RE = re.compile(r"([?&]session_id=)[^&\s]+")
 
 
 def _now_rfc3339() -> str:
@@ -50,8 +53,8 @@ def _now_rfc3339() -> str:
 
 
 def _redact_tokens(text: str) -> str:
-    """Redact the /r/<token> capability from access logs."""
-    return _TOKEN_PATH_RE.sub("/r/<redacted>", text)
+    """Redact receipt capabilities from access logs."""
+    return _SESSION_CAPABILITY_RE.sub(r"\1<redacted>", _TOKEN_PATH_RE.sub("/r/<redacted>", text))
 
 
 class _SanitizedRequestHandler(WSGIRequestHandler):
@@ -145,6 +148,31 @@ def _build_deps(config_path: Path, *, log: logging.Logger) -> BridgeDeps:
         itch=itch,
         delivery=delivery,
     )
+
+
+def _catalog_payload_errors(key: str, template: ProductTemplate) -> list[str]:
+    """Validate one product through the same payload builder/schema as issuance."""
+    payload = issue.build_payload(
+        attest_version="0.2",
+        issuer_id="check-config.invalid",
+        display_name="check-config",
+        buyer_identifier="buyer@example.invalid",
+        buyer_identifier_type="email",
+        buyer_salt=b"\x00" * 16,
+        title=template.title,
+        publisher=template.publisher,
+        identifiers=dict(template.identifiers),
+        artifact_series=template.artifact_series,
+        terms_uri=template.terms_uri,
+        legal_text_sha256=template.legal_text_sha256,
+        grant=template.grant,
+        revocability=template.revocability,
+        revocation_window_days=template.revocation_window_days,
+        drm=template.drm,
+        edition=template.edition,
+        issued_at="2026-01-01T00:00:00Z",
+    )
+    return validate.validate_payload(payload)
 
 
 def _sweep_deliveries(deps: BridgeDeps) -> tuple[int, int]:
@@ -241,6 +269,15 @@ def _cmd_check_config(args: argparse.Namespace) -> int:
         print(f"config error: {exc}", file=sys.stderr)
         return _RC_CONFIG_ERROR
 
+    product_errors = {
+        key: _catalog_payload_errors(key, config.products[key]) for key in catalog.keys()
+    }
+    failed = {key: errors for key, errors in product_errors.items() if errors}
+    if failed:
+        for key, errors in failed.items():
+            print(f"config error: product {key}: {'; '.join(errors)}", file=sys.stderr)
+        return _RC_CONFIG_ERROR
+
     print(f"issuer: {issuer.issuer_id} (kid={issuer.kid})")
     print(f"public_base_url: {config.public_base_url}")
     print(f"products: {', '.join(catalog.keys()) or '(none)'}")
@@ -258,30 +295,54 @@ def _cmd_retry_failed(args: argparse.Namespace) -> int:
         return _RC_CONFIG_ERROR
 
     resolved = 0
-    still_failing = 0
     for dead_letter in deps.ledger.unresolved_dead_letters():
+        if dead_letter.platform == "itch":
+            try:
+                data = json.loads(dead_letter.raw_json)
+                claim = data.get("claim", data) if isinstance(data, dict) else None
+                email = claim.get("email") if isinstance(claim, dict) else None
+                game_id = claim.get("game_id") if isinstance(claim, dict) else None
+                if deps.itch is None or not isinstance(email, str) or not isinstance(game_id, str):
+                    raise ValueError("itch dead letter has no re-enqueueable claim")
+                deps.ledger.enqueue_claim(email, game_id, now=_now_rfc3339())
+            except Exception as exc:
+                log.warning(
+                    "retry-failed: itch dead letter %d still failing: %s", dead_letter.id, exc
+                )
+                continue
+            deps.ledger.resolve_dead_letter(dead_letter.id, now=_now_rfc3339())
+            resolved += 1
+            continue
         if dead_letter.platform != "stripe" or deps.stripe is None:
-            # Only the Stripe adapter is wired up in T8; a dead letter from a
-            # platform with no adapter configured is left for a later retry.
-            still_failing += 1
+            log.warning(
+                "retry-failed: dead letter %d has no configured recovery path", dead_letter.id
+            )
             continue
         try:
             event = json.loads(dead_letter.raw_json)
+            if not deps.stripe.wants(event):
+                deps.log.info(
+                    "retry-failed: stripe dead letter %d is not actionable", dead_letter.id
+                )
+                deps.ledger.resolve_dead_letter(dead_letter.id, now=_now_rfc3339())
+                resolved += 1
+                continue
             purchase = deps.stripe.normalize(event)
             deps.core.process(purchase)
         except Exception as exc:  # still bad input, or a transient failure — leave unresolved
-            still_failing += 1
             log.warning("retry-failed: dead letter %d still failing: %s", dead_letter.id, exc)
             continue
         deps.ledger.resolve_dead_letter(dead_letter.id, now=_now_rfc3339())
         resolved += 1
 
     delivered, delivery_failures = _sweep_deliveries(deps)
+    unresolved = len(deps.ledger.unresolved_dead_letters())
+    undelivered = len(deps.ledger.undelivered())
     print(
-        f"resolved: {resolved}, still failing: {still_failing}, "
-        f"deliveries retried: {delivered}, delivery failures: {delivery_failures}"
+        f"resolved: {resolved}, unresolved: {unresolved}, deliveries retried: {delivered}, "
+        f"delivery failures: {delivery_failures}, undelivered: {undelivered}"
     )
-    return _RC_OK
+    return _RC_OK if unresolved == 0 and undelivered == 0 else _RC_INCOMPLETE
 
 
 def _cmd_itch_import(args: argparse.Namespace) -> int:
