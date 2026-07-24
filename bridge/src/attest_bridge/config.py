@@ -96,12 +96,12 @@ def _require_str(table: Mapping[str, Any], key: str, *, context: str) -> str:
     return value
 
 
-def _optional_str(table: Mapping[str, Any], key: str, default: str) -> str:
+def _optional_str(table: Mapping[str, Any], key: str, default: str, *, context: str) -> str:
     if key not in table:
         return default
     value = table[key]
     if not isinstance(value, str) or not value:
-        raise ConfigError(f"field {key!r} must be a non-empty string")
+        raise ConfigError(f"{context}: field {key!r} must be a non-empty string")
     return value
 
 
@@ -114,12 +114,27 @@ def _require_int(table: Mapping[str, Any], key: str, *, context: str) -> int:
     return value
 
 
-def _optional_int(table: Mapping[str, Any], key: str, default: int) -> int:
+def _optional_int(table: Mapping[str, Any], key: str, default: int, *, context: str) -> int:
     if key not in table:
         return default
     value = table[key]
     if not isinstance(value, int) or isinstance(value, bool):
-        raise ConfigError(f"field {key!r} must be an integer")
+        raise ConfigError(f"{context}: field {key!r} must be an integer")
+    return value
+
+
+def _optional_str_or_none(table: Mapping[str, Any], key: str, *, context: str) -> str | None:
+    """Absent -> None; present must be a non-empty string, else ConfigError.
+
+    Unlike `_optional_str` (which substitutes a default), a genuinely optional
+    field with no default: absence is legal (None), but a PRESENT malformed or
+    empty value is a config error, never a silent drop to None.
+    """
+    if key not in table:
+        return None
+    value = table[key]
+    if not isinstance(value, str) or not value:
+        raise ConfigError(f"{context}: field {key!r} must be a non-empty string")
     return value
 
 
@@ -164,11 +179,17 @@ def _load_product(key: str, value: Any) -> ProductTemplate:
         raise ConfigError(f"[products.{key}]: must be a table")
     context = f"[products.{key}]"
 
-    identifiers_raw = value.get("identifiers", {})
-    if not isinstance(identifiers_raw, dict) or not all(
-        isinstance(k, str) and isinstance(v, str) for k, v in identifiers_raw.items()
+    # `identifiers` is a required field (no default on ProductTemplate): a missing
+    # table must fail closed, not silently load an empty identifier set.
+    if "identifiers" not in value:
+        raise ConfigError(f"{context}: missing required field 'identifiers'")
+    identifiers_raw = value["identifiers"]
+    if (
+        not isinstance(identifiers_raw, dict)
+        or not identifiers_raw
+        or not all(isinstance(k, str) and isinstance(v, str) for k, v in identifiers_raw.items())
     ):
-        raise ConfigError(f"{context}: field 'identifiers' must be a table of strings")
+        raise ConfigError(f"{context}: field 'identifiers' must be a non-empty table of strings")
 
     return ProductTemplate(
         title=_require_str(value, "title", context=context),
@@ -177,10 +198,10 @@ def _load_product(key: str, value: Any) -> ProductTemplate:
         artifact_series=_require_str(value, "artifact_series", context=context),
         terms_uri=_require_str(value, "terms_uri", context=context),
         legal_text_sha256=_require_str(value, "legal_text_sha256", context=context),
-        grant=_optional_str(value, "grant", "perpetual"),
-        revocability=_optional_str(value, "revocability", "none"),
-        drm=_optional_str(value, "drm", "drm-free"),
-        edition=value.get("edition") if isinstance(value.get("edition"), str) else None,
+        grant=_optional_str(value, "grant", "perpetual", context=context),
+        revocability=_optional_str(value, "revocability", "none", context=context),
+        drm=_optional_str(value, "drm", "drm-free", context=context),
+        edition=_optional_str_or_none(value, "edition", context=context),
     )
 
 
@@ -197,8 +218,8 @@ def _load_itch(table: Mapping[str, Any], env: Mapping[str, str]) -> ItchConfig:
     context = "[itch]"
     return ItchConfig(
         api_key=_env(env, table, "api_key", context=context),
-        poll_interval_seconds=_optional_int(table, "poll_interval_seconds", 60),
-        max_attempts=_optional_int(table, "max_attempts", 10),
+        poll_interval_seconds=_optional_int(table, "poll_interval_seconds", 60, context=context),
+        max_attempts=_optional_int(table, "max_attempts", 10, context=context),
     )
 
 

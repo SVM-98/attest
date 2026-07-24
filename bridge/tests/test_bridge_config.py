@@ -218,6 +218,42 @@ def test_missing_required_product_field_raises_config_error_naming_key_and_field
     assert "legal_text_sha256" in message
 
 
+def test_missing_identifiers_raises_config_error_naming_key_and_field(tmp_path: Path) -> None:
+    content = _VALID_TOML.replace(
+        '[products.price_1PxYzEXAMPLE.identifiers]\nissuer_sku = "EXG-001"\n', ""
+    )
+    path = _write(tmp_path, content)
+    with pytest.raises(ConfigError) as exc_info:
+        load_config(path, env=_SECRET_ENV)
+    message = str(exc_info.value)
+    assert "price_1PxYzEXAMPLE" in message
+    assert "identifiers" in message
+
+
+def test_non_string_edition_raises_config_error_naming_key_and_field(tmp_path: Path) -> None:
+    # A present-but-malformed optional field must fail closed, not silently drop to None.
+    content = _VALID_TOML.replace(
+        "[products.price_1PxYzEXAMPLE.identifiers]",
+        "edition = 123\n[products.price_1PxYzEXAMPLE.identifiers]",
+    )
+    path = _write(tmp_path, content)
+    with pytest.raises(ConfigError) as exc_info:
+        load_config(path, env=_SECRET_ENV)
+    message = str(exc_info.value)
+    assert "price_1PxYzEXAMPLE" in message
+    assert "edition" in message
+
+
+def test_empty_edition_raises_config_error(tmp_path: Path) -> None:
+    content = _VALID_TOML.replace(
+        "[products.price_1PxYzEXAMPLE.identifiers]",
+        'edition = ""\n[products.price_1PxYzEXAMPLE.identifiers]',
+    )
+    path = _write(tmp_path, content)
+    with pytest.raises(ConfigError, match="edition"):
+        load_config(path, env=_SECRET_ENV)
+
+
 def test_resolved_secret_value_never_appears_in_repr_or_error_messages(
     tmp_path: Path,
 ) -> None:
