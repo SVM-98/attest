@@ -18,6 +18,7 @@ import pytest
 from attest_bridge.config import DeliveryConfig
 from attest_bridge.delivery import (
     MAX_DELIVERY_ATTEMPTS,
+    SMTP_TIMEOUT_SECONDS,
     Delivery,
     DeliveryResult,
     sweep_undelivered,
@@ -517,3 +518,12 @@ def test_config_none_returns_skipped_no_smtp_and_never_calls_factory() -> None:
     )
     assert result == DeliveryResult(status="skipped_no_smtp", detail=None)
     assert factory_calls == []
+
+
+def test_connect_timeout_is_bounded_and_reported_as_delivery_failure() -> None:
+    def blocked_connect(host: str, port: int, timeout: float) -> _FakeSMTP:
+        assert timeout == SMTP_TIMEOUT_SECONDS
+        raise TimeoutError("connect did not greet before timeout")
+
+    result = _send(_config(), blocked_connect)
+    assert result == DeliveryResult(status="failed", detail="timeout")

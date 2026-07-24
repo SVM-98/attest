@@ -223,7 +223,7 @@ class ItchPoller:
             try:
                 completed = self._drain_claim(claim, now_rfc3339)
             except ItchApiError:
-                self._defer_or_exhaust(claim, now)
+                self._defer_or_exhaust(claim, now, api_failure=True)
                 continue
             except Exception:
                 # One claim's unexpected failure (e.g. a signing IssueError) must
@@ -260,8 +260,16 @@ class ItchPoller:
                 # The API confirmed this purchase (OI-4 satisfied) but it can't be
                 # normalized/mapped: dead-letter for triage; the claim still
                 # completes below. Never re-issue or synthesize a receipt here.
+                failed_claim = {
+                    "claim": {"email": claim.email, "game_id": claim.game_id},
+                    "purchase": raw,
+                }
                 self._ledger.add_dead_letter(
-                    "itch", None, str(exc), json.dumps(raw), now=now_rfc3339
+                    "itch",
+                    None,
+                    str(exc),
+                    json.dumps(failed_claim),
+                    now=now_rfc3339,
                 )
                 completed = True
                 continue
@@ -269,8 +277,16 @@ class ItchPoller:
             try:
                 outcome = self._core.process(normalized)
             except (PurchaseRejected, UnmappedProduct) as exc:
+                failed_claim = {
+                    "claim": {"email": claim.email, "game_id": claim.game_id},
+                    "purchase": raw,
+                }
                 self._ledger.add_dead_letter(
-                    "itch", purchase_id, str(exc), json.dumps(raw), now=now_rfc3339
+                    "itch",
+                    purchase_id,
+                    str(exc),
+                    json.dumps(failed_claim),
+                    now=now_rfc3339,
                 )
                 completed = True
                 continue
@@ -286,10 +302,22 @@ class ItchPoller:
                 self._ledger.add_claim_receipts(claim.token, 1)
         return completed and not retryable_failure
 
-    def _defer_or_exhaust(self, claim: Claim, now: datetime) -> None:
+    def _defer_or_exhaust(self, claim: Claim, now: datetime, *, api_failure: bool = False) -> None:
         if claim.attempts + 1 >= self._max_attempts:
             self._ledger.exhaust_claim(claim.token)
+            if api_failure:
+                self._ledger.add_dead_letter(
+                    "itch",
+                    None,
+                    f"claim abandoned after {claim.attempts + 1} failed API attempts",
+                    json.dumps({"email": claim.email, "game_id": claim.game_id}),
+                    now=now.strftime(_RFC3339),
+                )
             return
+        if api_failure:
+            _log.warning(
+                "itch API failure for game %s (attempt %d)", claim.game_id, claim.attempts + 1
+            )
         delay_seconds = self._backoff_base_seconds * (2**claim.attempts)
         next_attempt_at = (now + timedelta(seconds=delay_seconds)).strftime(_RFC3339)
         self._ledger.defer_claim(claim.token, next_attempt_at=next_attempt_at)

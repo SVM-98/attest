@@ -51,6 +51,7 @@ terms_uri = "https://store.example.com/attest/license-templates/standard-v1"
 legal_text_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
 # grant = "perpetual"       # default; override per-product if this SKU differs
 # revocability = "none"     # default
+# revocation_window_days = 30 # required when revocability = "refund_window"
 # drm = "drm-free"          # default
 # edition = "digital"       # optional, omit if not applicable
 [products.price_1PxYzEXAMPLE.identifiers]

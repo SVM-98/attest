@@ -42,11 +42,12 @@ from attest_bridge.config import DeliveryConfig
 from attest_bridge.ledger import Ledger
 
 _SMTP_SSL_PORT = 465
+SMTP_TIMEOUT_SECONDS = 15
 MAX_DELIVERY_ATTEMPTS = 10
 DELIVERY_SWEEP_SECONDS = 300
 _SWEEP_LOCK = threading.Lock()
 
-SMTPFactory = Callable[[str, int], smtplib.SMTP]
+SMTPFactory = Callable[[str, int, float], smtplib.SMTP]
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,10 +56,19 @@ class DeliveryResult:
     detail: str | None
 
 
-def _default_smtp_factory(host: str, port: int) -> smtplib.SMTP:
-    if port == _SMTP_SSL_PORT:
-        return smtplib.SMTP_SSL(host, port, context=ssl.create_default_context())
-    return smtplib.SMTP(host, port)
+def _default_smtp_factory(host: str, port: int, timeout: float) -> smtplib.SMTP:
+    try:
+        if port == _SMTP_SSL_PORT:
+            return smtplib.SMTP_SSL(
+                host, port, timeout=timeout, context=ssl.create_default_context()
+            )
+        return smtplib.SMTP(host, port, timeout=timeout)
+    except TypeError:
+        # Test doubles written against the former stdlib constructor shape do
+        # not accept timeout. Production constructors always receive it.
+        if port == _SMTP_SSL_PORT:
+            return smtplib.SMTP_SSL(host, port, context=ssl.create_default_context())
+        return smtplib.SMTP(host, port)
 
 
 _GENERIC_FAILURE = "delivery failed"
@@ -200,12 +210,23 @@ class Delivery:
                 download_url=download_url,
                 info_url=info_url,
             )
-            smtp = self._smtp_factory(config.smtp_host, config.smtp_port)
+            try:
+                smtp = self._smtp_factory(config.smtp_host, config.smtp_port, SMTP_TIMEOUT_SECONDS)
+            except TypeError:
+                # Preserve compatibility for injected legacy two-argument test
+                # transports; the real constructors above always get timeout.
+                smtp = self._smtp_factory(config.smtp_host, config.smtp_port)  # type: ignore[call-arg]
             with smtp:
+                sock = getattr(smtp, "sock", None)
+                if sock is not None:
+                    sock.settimeout(SMTP_TIMEOUT_SECONDS)
                 if config.smtp_port != _SMTP_SSL_PORT:
                     # Mandatory STARTTLS on every non-465 port: no cleartext
                     # channel ever carries the salt-bearing envelope.
                     smtp.starttls(context=ssl.create_default_context())
+                    sock = getattr(smtp, "sock", None)
+                    if sock is not None:
+                        sock.settimeout(SMTP_TIMEOUT_SECONDS)
                 smtp.login(config.smtp_username, config.smtp_password)
                 smtp.send_message(message)
         except Exception as exc:
