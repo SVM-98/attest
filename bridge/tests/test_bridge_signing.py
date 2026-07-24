@@ -95,6 +95,10 @@ def test_truncated_seed_raises_config_error_without_key_bytes(
 
     message = str(exc_info.value)
     assert str(config.seed_path) in message
+    # the value ACTUALLY written to disk (the 16-byte truncation) must not leak,
+    # not merely the original seed — a regression echoing the corrupt bytes would
+    # otherwise slip past an assertion checking only the untruncated seed.
+    assert keys.b64u(hybrid_keys.ed.seed[:16]) not in message
     assert keys.b64u(hybrid_keys.ed.seed) not in message
 
 
@@ -232,3 +236,94 @@ def test_manifest_mldsa_pub_mismatch_raises_config_error(
     assert KID in message
     assert keys.b64u(hybrid_keys.mldsa.pub) not in message
     assert keys.b64u(decoy_mldsa.pub) not in message
+
+
+def test_issuer_identity_repr_does_not_leak_key_material(
+    tmp_path: Path, hybrid_keys: pq.HybridSigningKeys, key_manifest: dict[str, object]
+) -> None:
+    # Constraint 10: key material is never logged. repr() / "%r" must not emit
+    # the Ed25519 seed or the ML-DSA-65 secret key.
+    config = _write_issuer_files(tmp_path, hybrid_keys, key_manifest)
+    identity = load_issuer(config)
+
+    rendered = f"{identity!r}"
+    assert keys.b64u(hybrid_keys.ed.seed) not in rendered
+    assert keys.b64u(hybrid_keys.mldsa.sk) not in rendered
+
+
+def test_mldsa_wrong_length_pub_raises_config_error(
+    tmp_path: Path, hybrid_keys: pq.HybridSigningKeys, key_manifest: dict[str, object]
+) -> None:
+    config = _write_issuer_files(tmp_path, hybrid_keys, key_manifest)
+    short_pub = hybrid_keys.mldsa.pub[:100]
+    config.mldsa_key_path.write_text(
+        json.dumps(
+            {
+                "alg": pq.ML_DSA_65_ALG,
+                "sk": keys.b64u(hybrid_keys.mldsa.sk),
+                "pub": keys.b64u(short_pub),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_issuer(config)
+
+    message = str(exc_info.value)
+    assert str(config.mldsa_key_path) in message
+    assert keys.b64u(short_pub) not in message
+
+
+def test_missing_mldsa_file_raises_config_error(
+    tmp_path: Path, hybrid_keys: pq.HybridSigningKeys, key_manifest: dict[str, object]
+) -> None:
+    config = _write_issuer_files(tmp_path, hybrid_keys, key_manifest)
+    config.mldsa_key_path.unlink()
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_issuer(config)
+
+    assert str(config.mldsa_key_path) in str(exc_info.value)
+
+
+def test_missing_manifest_file_raises_config_error(
+    tmp_path: Path, hybrid_keys: pq.HybridSigningKeys, key_manifest: dict[str, object]
+) -> None:
+    config = _write_issuer_files(tmp_path, hybrid_keys, key_manifest)
+    config.manifest_path.unlink()
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_issuer(config)
+
+    assert str(config.manifest_path) in str(exc_info.value)
+
+
+def test_invalid_utf8_seed_file_raises_config_error(
+    tmp_path: Path, hybrid_keys: pq.HybridSigningKeys, key_manifest: dict[str, object]
+) -> None:
+    # A non-UTF-8 seed file makes read_text raise UnicodeDecodeError (a ValueError,
+    # not an OSError) — it must still normalize to ConfigError, not escape.
+    config = _write_issuer_files(tmp_path, hybrid_keys, key_manifest)
+    config.seed_path.write_bytes(b"\xff\xfe not valid utf-8")
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_issuer(config)
+
+    assert str(config.seed_path) in str(exc_info.value)
+
+
+def test_manifest_verification_raise_is_mapped_to_config_error(
+    tmp_path: Path, hybrid_keys: pq.HybridSigningKeys, key_manifest: dict[str, object]
+) -> None:
+    # A float in the manifest body is rejected by the attest-JCS canonicalizer
+    # (CanonError) INSIDE verify_key_manifest — the loader must map that raise to
+    # ConfigError, not let it escape (every corruption -> ConfigError).
+    tampered = dict(key_manifest)
+    tampered["unexpected_float"] = 1.5
+    config = _write_issuer_files(tmp_path, hybrid_keys, tampered)
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_issuer(config)
+
+    assert str(config.manifest_path) in str(exc_info.value)

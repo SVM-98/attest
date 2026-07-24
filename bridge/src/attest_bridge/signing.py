@@ -14,7 +14,7 @@ decoded key bytes.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -28,14 +28,18 @@ class IssuerIdentity:
     issuer_id: str
     display_name: str
     kid: str
-    signing_keys: pq.HybridSigningKeys
+    # repr=False: the nested SigningKeyPair.seed / MLDSAKeyPair.sk are secret;
+    # without this, repr(identity) or "%r" logging would emit both private keys.
+    # field(repr=False) sets no default, so signing_keys stays required and
+    # manifest_snapshot (also required) may follow it.
+    signing_keys: pq.HybridSigningKeys = field(repr=False)
     manifest_snapshot: dict[str, Any]
 
 
 def _load_seed(path: Path) -> keys.SigningKeyPair:
     try:
         text = path.read_text(encoding="utf-8").strip()
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise ConfigError(f"cannot read seed file {path}: {exc}") from exc
     try:
         return keys.from_seed(keys.b64u_decode(text))
@@ -46,7 +50,7 @@ def _load_seed(path: Path) -> keys.SigningKeyPair:
 def _load_mldsa(path: Path) -> pq.MLDSAKeyPair:
     try:
         text = path.read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise ConfigError(f"cannot read ML-DSA-65 key file {path}: {exc}") from exc
     try:
         obj = json.loads(text)
@@ -69,7 +73,7 @@ def _load_mldsa(path: Path) -> pq.MLDSAKeyPair:
 def _load_manifest(path: Path) -> dict[str, Any]:
     try:
         text = path.read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise ConfigError(f"cannot read key manifest {path}: {exc}") from exc
     try:
         obj = json.loads(text)
@@ -91,7 +95,17 @@ def load_issuer(config: IssuerConfig) -> IssuerIdentity:
     mldsa = _load_mldsa(config.mldsa_key_path)
     manifest = _load_manifest(config.manifest_path)
 
-    if not manifests.verify_key_manifest(manifest):
+    try:
+        manifest_ok = manifests.verify_key_manifest(manifest)
+    except (ValueError, TypeError, KeyError) as exc:
+        # A parseable-but-malformed manifest makes verification RAISE rather than
+        # return False (e.g. a float, forbidden by the attest-JCS profile, reaches
+        # canonicalization -> canon.CanonError, a ValueError). Normalize to the
+        # pinned fail-closed contract: every corruption -> ConfigError.
+        raise ConfigError(
+            f"key manifest {config.manifest_path} could not be verified: {exc}"
+        ) from exc
+    if not manifest_ok:
         raise ConfigError(
             f"key manifest {config.manifest_path} failed self-consistency verification"
         )
