@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import urllib.error
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -948,6 +949,15 @@ def test_get_itch_claim_status_works_even_when_itch_not_configured(
     status, _, body = call_app(app, "GET", f"/itch/claim/{token}")
     assert status.startswith("200")
     assert json.loads(body) == {"status": "pending"}
+
+
+def test_salt_bearing_download_docs_set_umask_before_curl_output() -> None:
+    docs_root = Path(__file__).parents[1] / "docs"
+    for path in docs_root.glob("*.md"):
+        text = path.read_text(encoding="utf-8")
+        for match in re.finditer(r"curl\\b[^\\n]*\\s-o\\s", text):
+            preceding_lines = text[: match.start()].rstrip().splitlines()
+            assert preceding_lines[-1] == "umask 077"
 
 
 # -- itch-import CLI ------------------------------------------------------------
