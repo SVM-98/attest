@@ -1,7 +1,7 @@
 # itch.io setup: zero to a verified receipt
 
 Read [setup-stripe.md](setup-stripe.md) first if you haven't — steps 1–2
-(keypair + key manifest) and 4 (deploy) are identical regardless of platform;
+(keypair + key manifest) and 5 (deploy) are identical regardless of platform;
 this page only covers what's itch-specific: configuration, and how buyers
 actually get their receipt.
 
