@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -136,7 +137,7 @@ def _best_effort_purchase_id(event: dict[str, Any]) -> str | None:
 
 
 def _handle_stripe_webhook(
-    deps: BridgeDeps, environ: dict[str, Any], start_response: Any
+    deps: BridgeDeps, environ: dict[str, Any], start_response: Any, lock: threading.Lock
 ) -> Iterable[bytes]:
     stripe = deps.stripe
     if stripe is None:
@@ -154,57 +155,71 @@ def _handle_stripe_webhook(
     except StripeSignatureError:
         deps.log.warning("stripe webhook: signature verification failed")
         return _plain_response(start_response, "400 Bad Request", b"invalid signature")
-    except json.JSONDecodeError:
-        deps.log.error("stripe webhook: signature valid but body is not valid JSON")
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        # Signature valid but the body is not parseable JSON — including a body
+        # that is not even valid UTF-8 (`json.loads(b"\xff")` raises
+        # UnicodeDecodeError, not JSONDecodeError). Both are the pinned
+        # "unparseable body -> 400" row; neither must escape as a 500.
+        deps.log.error("stripe webhook: signature valid but body is not parseable JSON")
         return _plain_response(start_response, "400 Bad Request", b"malformed body")
 
     event_id = event["id"]
-    purchase: NormalizedPurchase | None = None
-    try:
-        if deps.ledger.seen_event("stripe", event_id):
-            # Replay of an event we already processed (Stripe retries on any
-            # non-2xx, or the same event legitimately arrives twice): already
-            # marked, nothing to redo.
-            return _json_response(start_response, "200 OK", {"ok": True})
+    # Serialize the check-then-act critical section (seen_event -> issue/record
+    # -> mark_event, and the delivery inside `core.process`) across the server's
+    # worker threads. The Ledger's own lock makes each statement atomic, NOT
+    # this whole workflow — so without this, two concurrent deliveries of the
+    # same event (Stripe retries aggressively) could both pass `seen_event` and
+    # then double-issue / double-deliver. One lock per app process is sufficient:
+    # a self-hosted merchant bridge is single-process and low-volume; the sig
+    # verify + JSON parse above stay outside the lock (read-only, no shared
+    # state). Cross-process concurrency is out of scope (see `cli.py`).
+    with lock:
+        purchase: NormalizedPurchase | None = None
+        try:
+            if deps.ledger.seen_event("stripe", event_id):
+                # Replay of an event we already processed (Stripe retries on any
+                # non-2xx, or the same event legitimately arrives twice): already
+                # marked, nothing to redo.
+                return _json_response(start_response, "200 OK", {"ok": True})
 
-        if not stripe.wants(event):
-            deps.log.info("stripe event %s: not actionable (type/payment_status)", event_id)
+            if not stripe.wants(event):
+                deps.log.info("stripe event %s: not actionable (type/payment_status)", event_id)
+                deps.ledger.mark_event("stripe", event_id, now=_now_rfc3339())
+                return _json_response(start_response, "200 OK", {"ok": True})
+
+            purchase = stripe.normalize(event)
+            outcome = deps.core.process(purchase)
+        except (PurchaseRejected, UnmappedProduct) as exc:
+            # Permanently-bad input: dead-letter for operator triage and mark the
+            # event seen — Stripe must not retry something that will never
+            # succeed. `raw_json` is the whole event, so `retry-failed` can
+            # re-normalize it once the merchant fixes the catalog/config.
+            purchase_id = (
+                purchase.platform_purchase_id
+                if purchase is not None
+                else _best_effort_purchase_id(event)
+            )
+            deps.ledger.add_dead_letter(
+                "stripe", purchase_id, str(exc), json.dumps(event), now=_now_rfc3339()
+            )
             deps.ledger.mark_event("stripe", event_id, now=_now_rfc3339())
+            deps.log.error("stripe event %s: dead-lettered (%s)", event_id, exc)
             return _json_response(start_response, "200 OK", {"ok": True})
+        except Exception:
+            # Signing/config/unexpected failure: fail closed. NEVER mark_event —
+            # Stripe must retry, or a transient failure would silently drop a
+            # purchase forever.
+            deps.log.exception("stripe event %s: unexpected error, not acknowledged", event_id)
+            return _plain_response(start_response, "500 Internal Server Error", b"internal error")
 
-        purchase = stripe.normalize(event)
-        outcome = deps.core.process(purchase)
-    except (PurchaseRejected, UnmappedProduct) as exc:
-        # Permanently-bad input: dead-letter for operator triage and mark the
-        # event seen — Stripe must not retry something that will never
-        # succeed. `raw_json` is the whole event, so `retry-failed` can
-        # re-normalize it once the merchant fixes the catalog/config.
-        purchase_id = (
-            purchase.platform_purchase_id
-            if purchase is not None
-            else _best_effort_purchase_id(event)
-        )
-        deps.ledger.add_dead_letter(
-            "stripe", purchase_id, str(exc), json.dumps(event), now=_now_rfc3339()
-        )
         deps.ledger.mark_event("stripe", event_id, now=_now_rfc3339())
-        deps.log.error("stripe event %s: dead-lettered (%s)", event_id, exc)
+        deps.log.info(
+            "stripe event %s: processed (receipt=%s duplicate=%s)",
+            event_id,
+            outcome.receipt_id,
+            outcome.duplicate,
+        )
         return _json_response(start_response, "200 OK", {"ok": True})
-    except Exception:
-        # Signing/config/unexpected failure: fail closed. NEVER mark_event —
-        # Stripe must retry, or a transient failure would silently drop a
-        # purchase forever.
-        deps.log.exception("stripe event %s: unexpected error, not acknowledged", event_id)
-        return _plain_response(start_response, "500 Internal Server Error", b"internal error")
-
-    deps.ledger.mark_event("stripe", event_id, now=_now_rfc3339())
-    deps.log.info(
-        "stripe event %s: processed (receipt=%s duplicate=%s)",
-        event_id,
-        outcome.receipt_id,
-        outcome.duplicate,
-    )
-    return _json_response(start_response, "200 OK", {"ok": True})
 
 
 # -- receipt download ---------------------------------------------------------
@@ -232,6 +247,11 @@ def _handle_stripe_receipt(
 
 
 def make_app(deps: BridgeDeps) -> WSGIApp:
+    # One lock per app process serializes the webhook check-then-act critical
+    # section across worker threads (see `_handle_stripe_webhook`). Downloads
+    # are read-only and never take it.
+    webhook_lock = threading.Lock()
+
     def app(environ: dict[str, Any], start_response: Any) -> Iterable[bytes]:
         method = environ.get("REQUEST_METHOD", "GET")
         path = environ.get("PATH_INFO") or "/"
@@ -239,7 +259,7 @@ def make_app(deps: BridgeDeps) -> WSGIApp:
         if method == "GET" and path == "/healthz":
             return _json_response(start_response, "200 OK", {"ok": True})
         if method == "POST" and path == "/stripe/webhook":
-            return _handle_stripe_webhook(deps, environ, start_response)
+            return _handle_stripe_webhook(deps, environ, start_response, webhook_lock)
         if method == "GET" and path.startswith("/r/"):
             token = path[len("/r/") :]
             return _handle_download(deps, start_response, token=token)

@@ -9,6 +9,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import threading
 from typing import Any
 
 import pytest
@@ -173,6 +174,10 @@ def test_e2e_signed_webhook_to_offline_verified_receipt(
     # download fallback works and round-trips the same envelope
     s, h, dl = call_app(app, "GET", "/r/" + stored.download_token)
     assert s.startswith("200")
+    # /r/ returns the stored envelope bytes VERBATIM — a reserialization
+    # regression (re-dumping with different key order/whitespace) must fail here,
+    # not merely require the reparsed JSON to match.
+    assert dl == stored.envelope_json.encode()
     assert json.loads(dl) == json.loads(stored.envelope_json)
     assert h["Content-Type"] == "application/json"
     assert h["Cache-Control"] == "no-store"
@@ -225,6 +230,20 @@ def test_valid_signature_unparseable_json_returns_400(deps: BridgeDeps, frozen_n
         app, "POST", "/stripe/webhook", body=body, headers={"Stripe-Signature": header}
     )
     assert status.startswith("400")
+
+
+def test_valid_signature_non_utf8_body_returns_400(deps: BridgeDeps, frozen_now: int) -> None:
+    # A correctly-signed but non-UTF-8 body: `json.loads` raises UnicodeDecodeError
+    # (not JSONDecodeError). The "unparseable body -> 400" row must cover it too —
+    # it must never escape the handler as a server-level 500.
+    body = b"\xff\xfe not utf-8 at all"
+    header = sign_stripe(body, _WEBHOOK_SECRET, _FROZEN_NOW)
+    app = make_app(deps)
+    status, _, _ = call_app(
+        app, "POST", "/stripe/webhook", body=body, headers={"Stripe-Signature": header}
+    )
+    assert status.startswith("400")
+    assert deps.ledger.unresolved_dead_letters() == []
 
 
 # -- policy row: event type not handled / not paid -> 200, mark_event ---
@@ -286,6 +305,46 @@ def test_replayed_event_id_returns_200_without_reprocessing(
     assert status1.startswith("200")
     assert status2.startswith("200")
     assert len(calls) == 1
+
+
+def test_concurrent_identical_webhooks_issue_exactly_one_receipt(
+    deps: BridgeDeps, frozen_now: int
+) -> None:
+    # Two worker threads deliver the SAME signed event at once (Stripe retries
+    # aggressively and the server is threaded). The webhook critical section is
+    # serialized, so exactly one receipt is issued and BOTH requests return 200.
+    # Without the lock the loser races past `seen_event` and dies with an
+    # IntegrityError -> 500 on the duplicate insert.
+    event = make_session_completed_event(
+        session_id="cs_concurrent",
+        metadata={"attest_product_key": "price_TEST"},
+        created=_FROZEN_NOW,
+    )
+    body = json.dumps(event).encode()
+    header = sign_stripe(body, _WEBHOOK_SECRET, _FROZEN_NOW)
+    app = make_app(deps)
+
+    barrier = threading.Barrier(2)
+    results_lock = threading.Lock()
+    statuses: list[str] = []
+
+    def hit() -> None:
+        barrier.wait()  # both threads enter the handler together -> real contention
+        status, _, _ = call_app(
+            app, "POST", "/stripe/webhook", body=body, headers={"Stripe-Signature": header}
+        )
+        with results_lock:
+            statuses.append(status)
+
+    threads = [threading.Thread(target=hit) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(statuses) == 2
+    assert all(s.startswith("200") for s in statuses)  # no lost-race 500
+    assert deps.ledger.get_receipt("stripe", "cs_concurrent") is not None
 
 
 # -- policy row: PurchaseRejected/UnmappedProduct -> 200 + dead letter ---
