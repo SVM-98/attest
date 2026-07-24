@@ -26,6 +26,7 @@ class ProductTemplate:
     legal_text_sha256: str
     grant: str = "perpetual"
     revocability: str = "none"
+    revocation_window_days: int | None = None
     drm: str = "drm-free"
     edition: str | None = None
 

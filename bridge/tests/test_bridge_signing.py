@@ -84,6 +84,75 @@ def test_load_issuer_happy_path(
     assert identity.manifest_snapshot == key_manifest
 
 
+def test_load_issuer_rejects_mldsa_secret_public_pairing_mismatch(
+    tmp_path: Path, hybrid_keys: pq.HybridSigningKeys, decoy_mldsa: pq.MLDSAKeyPair
+) -> None:
+    # The manifest and public half agree on B, while the file's secret half is
+    # A. Only the empirical sign/verify self-test can catch this configuration.
+    entry = manifests.key_entry(KID, hybrid_keys.ed.pub, VALID_FROM, pub_ml_dsa_65=decoy_mldsa.pub)
+    manifest = manifests.build_key_manifest(
+        ISSUER, 1, VALID_FROM, [entry], pq.HybridSigningKeys(hybrid_keys.ed, decoy_mldsa), KID
+    )
+    config = _write_issuer_files(tmp_path, hybrid_keys, manifest)
+    config.mldsa_key_path.write_text(
+        json.dumps(
+            {
+                "alg": pq.ML_DSA_65_ALG,
+                "sk": keys.b64u(hybrid_keys.mldsa.sk),
+                "pub": keys.b64u(decoy_mldsa.pub),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="ML-DSA-65 signing-key pairing"):
+        load_issuer(config)
+
+
+def test_load_issuer_rejects_manifest_for_a_different_issuer(
+    tmp_path: Path, hybrid_keys: pq.HybridSigningKeys
+) -> None:
+    entry = manifests.key_entry(
+        KID, hybrid_keys.ed.pub, VALID_FROM, pub_ml_dsa_65=hybrid_keys.mldsa.pub
+    )
+    manifest = manifests.build_key_manifest(
+        "other.example.com", 1, VALID_FROM, [entry], hybrid_keys, KID
+    )
+    config = _write_issuer_files(tmp_path, hybrid_keys, manifest)
+
+    with pytest.raises(ConfigError, match="configured issuer"):
+        load_issuer(config)
+
+
+@pytest.mark.parametrize("status", ["compromised", "revoked", "unknown"])
+def test_load_issuer_rejects_unusable_signing_key_status(
+    tmp_path: Path, hybrid_keys: pq.HybridSigningKeys, status: str
+) -> None:
+    entry = manifests.key_entry(
+        KID, hybrid_keys.ed.pub, VALID_FROM, status=status, pub_ml_dsa_65=hybrid_keys.mldsa.pub
+    )
+    manifest = manifests.build_key_manifest(ISSUER, 1, VALID_FROM, [entry], hybrid_keys, KID)
+
+    with pytest.raises(ConfigError, match="unusable status"):
+        load_issuer(_write_issuer_files(tmp_path, hybrid_keys, manifest))
+
+
+def test_load_issuer_rejects_expired_signing_key(
+    tmp_path: Path, hybrid_keys: pq.HybridSigningKeys
+) -> None:
+    entry = manifests.key_entry(
+        KID,
+        hybrid_keys.ed.pub,
+        "2020-01-01T00:00:00Z",
+        "2020-01-02T00:00:00Z",
+        pub_ml_dsa_65=hybrid_keys.mldsa.pub,
+    )
+    manifest = manifests.build_key_manifest(ISSUER, 1, VALID_FROM, [entry], hybrid_keys, KID)
+
+    with pytest.raises(ConfigError, match="validity window"):
+        load_issuer(_write_issuer_files(tmp_path, hybrid_keys, manifest))
+
+
 def test_truncated_seed_raises_config_error_without_key_bytes(
     tmp_path: Path, hybrid_keys: pq.HybridSigningKeys, key_manifest: dict[str, object]
 ) -> None:

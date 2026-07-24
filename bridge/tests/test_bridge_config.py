@@ -269,6 +269,24 @@ def test_empty_edition_raises_config_error(tmp_path: Path) -> None:
         load_config(path, env=_SECRET_ENV)
 
 
+def test_empty_itch_secret_is_rejected_at_config_load(tmp_path: Path) -> None:
+    env = dict(_SECRET_ENV)
+    env["ITCH_API_KEY"] = ""
+    with pytest.raises(ConfigError, match="ITCH_API_KEY"):
+        load_config(_write(tmp_path, _VALID_TOML), env=env)
+
+
+def test_product_exposes_revocation_window_days(tmp_path: Path) -> None:
+    content = _VALID_TOML.replace(
+        "[products.price_1PxYzEXAMPLE.identifiers]",
+        'revocability = "refund_window"\n'
+        "revocation_window_days = 30\n"
+        "[products.price_1PxYzEXAMPLE.identifiers]",
+    )
+    config = load_config(_write(tmp_path, content), env=_SECRET_ENV)
+    assert config.products["price_1PxYzEXAMPLE"].revocation_window_days == 30
+
+
 def test_resolved_secret_value_never_appears_in_repr_or_error_messages(
     tmp_path: Path,
 ) -> None:

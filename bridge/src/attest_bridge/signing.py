@@ -15,10 +15,12 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from attest import keys, manifests, pq
+from attest import verify as verifier
 from attest_bridge.config import IssuerConfig
 from attest_bridge.model import ConfigError
 
@@ -119,6 +121,12 @@ def load_issuer(config: IssuerConfig) -> IssuerIdentity:
             f"key manifest {config.manifest_path} failed self-consistency verification"
         )
 
+    if manifest.get("issuer") != config.id:
+        raise ConfigError(
+            f"key manifest {config.manifest_path} belongs to issuer "
+            f"{manifest.get('issuer')!r}, not configured issuer {config.id!r}"
+        )
+
     entry = manifests.find_key(manifest, config.kid)
     if entry is None:
         raise ConfigError(f"kid {config.kid!r} not found in key manifest {config.manifest_path}")
@@ -141,6 +149,31 @@ def load_issuer(config: IssuerConfig) -> IssuerIdentity:
             f"key/manifest mismatch for kid {config.kid!r}: the manifest's ML-DSA-65 pub does "
             f"not match the key loaded from {config.mldsa_key_path}"
         )
+
+    # Prove that each public half actually belongs to its loaded secret half.
+    # Length and manifest comparisons alone accept A.sk paired with B.pub.
+    pairing_message = b"attest-bridge signing-key pairing self-test v1"
+    try:
+        ed_ok = keys.verify_strict(pairing_message, keys.sign(pairing_message, ed), ed.pub)
+    except Exception:
+        ed_ok = False
+    if not ed_ok:
+        raise ConfigError(f"Ed25519 signing-key pairing self-test failed for {config.seed_path}")
+    try:
+        mldsa_ok = pq.verify_strict(pairing_message, pq.sign(pairing_message, mldsa), mldsa.pub)
+    except Exception:
+        mldsa_ok = False
+    if not mldsa_ok:
+        raise ConfigError(
+            f"ML-DSA-65 signing-key pairing self-test failed for {config.mldsa_key_path}"
+        )
+
+    status = entry.get("status")
+    if status not in (verifier._STATUS_ACTIVE, verifier._STATUS_RETIRED):
+        raise ConfigError(f"key {config.kid!r} has unusable status {status!r}")
+    now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if not verifier._within_validity(now, entry):
+        raise ConfigError(f"key {config.kid!r} is outside its validity window at startup")
 
     return IssuerIdentity(
         issuer_id=config.id,
