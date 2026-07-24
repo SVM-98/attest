@@ -275,15 +275,23 @@ def test_os_error_from_login_becomes_failed_result_not_a_raise() -> None:
 
 def test_failed_detail_never_contains_the_smtp_password_or_envelope_content() -> None:
     config = _config()
+    # Simulate a server/transport whose exception TEXT echoes the submitted
+    # password and message content — the sanitized detail must exclude both
+    # (only the exception category + numeric SMTP code are safe to surface).
+    leaky = smtplib.SMTPException(
+        f"535 auth failed: password {config.smtp_password} "
+        "body=not-a-real-secret-but-treat-it-like-one"
+    )
 
     def factory(host: str, port: int) -> _RaisingSMTP:
-        return _RaisingSMTP(host, port, smtplib.SMTPAuthenticationError(535, b"bad creds"))
+        return _RaisingSMTP(host, port, leaky)
 
     result = _send(config, factory)
     assert result.status == "failed"
     assert result.detail is not None
     assert config.smtp_password not in result.detail
     assert "not-a-real-secret-but-treat-it-like-one" not in result.detail
+    assert result.detail == "SMTPException"  # category only, no server text
 
 
 def test_factory_raising_on_connect_becomes_failed_result() -> None:
@@ -294,6 +302,29 @@ def test_factory_raising_on_connect_becomes_failed_result() -> None:
     assert result.status == "failed"
     assert result.detail is not None
     assert "OSError" in result.detail
+
+
+def test_non_smtp_transport_exception_becomes_failed_result_not_a_raise() -> None:
+    # A transport failure outside SMTPException/OSError (e.g. RuntimeError) must
+    # still be converted, not escape — the narrow (SMTPException, OSError) catch
+    # was insufficient for the load-bearing never-raise contract.
+    def factory(host: str, port: int) -> _RaisingSMTP:
+        return _RaisingSMTP(host, port, RuntimeError("unexpected transport state"))
+
+    result = _send(_config(), factory)
+    assert result.status == "failed"
+    assert result.detail == "RuntimeError"
+
+
+def test_message_construction_failure_becomes_failed_result_not_a_raise() -> None:
+    # _build_message runs INSIDE the guarded block: a non-serializable envelope
+    # (json.dumps -> TypeError) must become a failed result, and the transport
+    # is never reached.
+    fakes: list[_FakeSMTP] = []
+    result = _send(_config(), _fake_factory(fakes), envelope={"bad": object()})
+    assert result.status == "failed"
+    assert result.detail == "TypeError"
+    assert fakes == []
 
 
 # -- zero-config fallback ---------------------------------------------------
