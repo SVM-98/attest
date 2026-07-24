@@ -37,6 +37,7 @@ from typing import Any
 
 from attest_bridge.model import (
     BridgeError,
+    ConfigError,
     NormalizedPurchase,
     PurchaseRejected,
     decode_buyer_pubkey,
@@ -67,25 +68,41 @@ def verify_stripe_signature(
     Does NOT raise on a replayed-but-genuinely-valid signature — see the
     module docstring for why that split is deliberate.
     """
-    t: int | None = None
+    # An empty secret makes the HMAC forgeable by anyone: the empty-key MAC of
+    # any chosen body is trivially computable, so an empty secret can never
+    # authenticate a webhook. Refuse to verify against one — defence in depth,
+    # since `StripeAdapter.__init__` already rejects an empty secret at
+    # construction, but this primitive is a public entry point called directly
+    # too (T8, tests).
+    if not secret:
+        raise StripeSignatureError("refusing to verify against an empty webhook secret")
+
+    t_values: list[str] = []
     v1_candidates: list[str] = []
     for part in sig_header.split(","):
         key, _, value = part.partition("=")
         if key == "t":
-            try:
-                t = int(value)
-            except ValueError:
-                continue
+            t_values.append(value)
         elif key == "v1":
             v1_candidates.append(value)
         # "v0" (Stripe's older signing scheme) is parsed like any other
         # unrecognized key and intentionally never added to the accepted
         # candidates — it must never be sufficient to pass verification.
 
-    if t is None:
-        raise StripeSignatureError(
-            "missing or unparseable timestamp ('t') in Stripe-Signature header"
-        )
+    # Fail closed on a malformed timestamp: require EXACTLY ONE `t` (a duplicate
+    # `t=abc` appended to a valid header must not be silently skipped while the
+    # earlier valid timestamp survives) whose value is a canonical run of ASCII
+    # decimal digits. `int()` on its own is too lenient — it also accepts
+    # surrounding whitespace, a leading sign, digit-group underscores, and
+    # Unicode digits, so `t= 1784000000 ` would otherwise reconstruct the
+    # canonical integer and slip past the staleness check.
+    if len(t_values) != 1:
+        raise StripeSignatureError("Stripe-Signature header must carry exactly one timestamp ('t')")
+    ts_raw = t_values[0]
+    if not (ts_raw.isascii() and ts_raw.isdigit()):
+        raise StripeSignatureError("malformed timestamp ('t') in Stripe-Signature header")
+    t = int(ts_raw)
+
     if not v1_candidates:
         raise StripeSignatureError("no v1 signature present in Stripe-Signature header")
 
@@ -131,6 +148,12 @@ class StripeAdapter:
         api_key: str | None,
         http_get: Callable[[str, dict[str, str]], bytes] | None = None,
     ) -> None:
+        # Fail fast, before serving: an empty (or whitespace-only) webhook
+        # secret makes every inbound signature forgeable (see
+        # `verify_stripe_signature`). The config layer permits an empty
+        # env-var value, so this trust boundary must not rely on it.
+        if not webhook_secret.strip():
+            raise ConfigError("stripe webhook secret is empty")
         self._webhook_secret = webhook_secret
         self._api_key = api_key
         self._http_get = http_get if http_get is not None else _default_http_get
