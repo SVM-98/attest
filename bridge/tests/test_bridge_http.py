@@ -13,6 +13,7 @@ import threading
 from typing import Any
 
 import pytest
+from attest_bridge import http as http_mod
 from attest_bridge.config import BridgeConfig, IssuerConfig, StripeConfig
 from attest_bridge.core import IssuingCore
 from attest_bridge.delivery import Delivery
@@ -381,6 +382,84 @@ def test_missing_buyer_email_dead_letters_and_returns_200(
     assert status.startswith("200")
     assert deps.ledger.get_receipt("stripe", "cs_no_email") is None
     assert len(deps.ledger.unresolved_dead_letters()) == 1
+
+
+def test_paid_event_missing_id_is_dead_lettered_and_acknowledged(
+    deps: BridgeDeps, frozen_now: int
+) -> None:
+    event = make_session_completed_event(metadata={"attest_product_key": "price_TEST"})
+    del event["id"]
+
+    status, _, _ = _signed_webhook(deps, event)
+
+    assert status.startswith("200")
+    assert deps.ledger.unresolved_dead_letters()[0].reason == (
+        "stripe event id is missing or not a non-empty string"
+    )
+
+
+def test_paid_event_with_non_object_customer_details_is_dead_lettered(
+    deps: BridgeDeps, frozen_now: int
+) -> None:
+    event = make_session_completed_event(metadata={"attest_product_key": "price_TEST"})
+    event["data"]["object"]["customer_details"] = "x"
+
+    status, _, _ = _signed_webhook(deps, event)
+
+    assert status.startswith("200")
+    assert deps.ledger.seen_event("stripe", event["id"]) is True
+    assert len(deps.ledger.unresolved_dead_letters()) == 1
+
+
+def test_multiple_stripe_line_items_dead_letter_without_issuing(
+    deps: BridgeDeps, frozen_now: int
+) -> None:
+    def line_items(url: str, headers: dict[str, str]) -> bytes:
+        return json.dumps(
+            {"data": [{"price": {"id": "price_TEST"}}, {"price": {"id": "x"}}]}
+        ).encode()
+
+    deps.stripe = StripeAdapter(
+        webhook_secret=_WEBHOOK_SECRET, api_key="sk_test", http_get=line_items
+    )
+    event = make_session_completed_event(session_id="cs_two_items", metadata={})
+    status, _, _ = _signed_webhook(deps, event)
+
+    assert status.startswith("200")
+    assert deps.ledger.get_receipt("stripe", "cs_two_items") is None
+    assert deps.ledger.unresolved_dead_letters()[0].reason == (
+        "checkout session contains multiple line items; the bridge issues one receipt per purchase"
+    )
+
+
+def test_line_items_fetch_happens_before_the_webhook_lock(
+    deps: BridgeDeps, frozen_now: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class InspectableLock:
+        def __init__(self) -> None:
+            self.locked = False
+
+        def __enter__(self) -> None:
+            assert not self.locked
+            self.locked = True
+
+        def __exit__(self, *args: object) -> None:
+            self.locked = False
+
+    lock = InspectableLock()
+
+    def line_items(url: str, headers: dict[str, str]) -> bytes:
+        assert lock.locked is False
+        return json.dumps({"data": [{"price": {"id": "price_TEST"}}]}).encode()
+
+    monkeypatch.setattr(http_mod.threading, "Lock", lambda: lock)
+    deps.stripe = StripeAdapter(
+        webhook_secret=_WEBHOOK_SECRET, api_key="sk_test", http_get=line_items
+    )
+    event = make_session_completed_event(session_id="cs_fetch_outside_lock", metadata={})
+
+    assert _signed_webhook(deps, event)[0].startswith("200")
+    assert deps.ledger.get_receipt("stripe", "cs_fetch_outside_lock") is not None
 
 
 # -- policy row: duplicate purchase (receipt exists) -> 200, mark_event --

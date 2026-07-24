@@ -20,6 +20,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 _OPENER = urllib.request.build_opener(_NoRedirect)
+HTTP_TIMEOUT_SECONDS = 10.0
 
 
 def https_get(url: str, headers: dict[str, str]) -> bytes:
@@ -29,6 +30,6 @@ def https_get(url: str, headers: dict[str, str]) -> bytes:
     if not url.startswith("https://"):
         raise ValueError(f"refusing to fetch a non-https URL: {url!r}")
     request = urllib.request.Request(url, headers=headers)  # noqa: S310 - https validated; redirects refused
-    with _OPENER.open(request) as response:
+    with _OPENER.open(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
         data: bytes = response.read()
         return data

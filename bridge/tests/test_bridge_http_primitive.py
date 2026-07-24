@@ -31,3 +31,26 @@ def test_https_get_refuses_redirects() -> None:
 def test_https_get_rejects_non_https_url() -> None:
     with pytest.raises(ValueError, match="non-https"):
         _http.https_get("http://api.example.test/purchases", {})
+
+
+def test_https_get_passes_the_shared_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, object] = {}
+
+    class Response:
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b"{}"
+
+    class Opener:
+        def open(self, request: object, *, timeout: float) -> Response:
+            seen["timeout"] = timeout
+            return Response()
+
+    monkeypatch.setattr(_http, "_OPENER", Opener())
+    assert _http.https_get("https://api.example.test/purchases", {}) == b"{}"
+    assert seen["timeout"] == _http.HTTP_TIMEOUT_SECONDS

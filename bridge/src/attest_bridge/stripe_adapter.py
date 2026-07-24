@@ -164,7 +164,12 @@ class StripeAdapter:
         """True iff `event` is a handled type for a completed (paid) checkout."""
         if event.get("type") not in self.HANDLED_EVENT_TYPES:
             return False
-        session = event.get("data", {}).get("object", {})
+        data = event.get("data")
+        if not isinstance(data, dict):
+            raise PurchaseRejected("stripe event data is not an object")
+        session = data.get("object")
+        if not isinstance(session, dict):
+            raise PurchaseRejected("stripe event data.object is not an object")
         return bool(session.get("payment_status") == "paid")
 
     def normalize(self, event: dict[str, Any]) -> NormalizedPurchase:
@@ -174,23 +179,48 @@ class StripeAdapter:
         buyer email, no resolvable product key, or a malformed buyer pubkey
         (decoded through `decode_buyer_pubkey`, fail-before-signing).
         """
-        session = event["data"]["object"]
-        platform_purchase_id = session["id"]
+        data = event.get("data")
+        if not isinstance(data, dict):
+            raise PurchaseRejected("stripe event data is not an object")
+        session = data.get("object")
+        if not isinstance(session, dict):
+            raise PurchaseRejected("stripe event data.object is not an object")
+        platform_purchase_id = session.get("id")
+        if not isinstance(platform_purchase_id, str) or not platform_purchase_id:
+            raise PurchaseRejected("stripe session id is missing or not a non-empty string")
 
         customer_details = session.get("customer_details") or {}
+        if not isinstance(customer_details, dict):
+            raise PurchaseRejected(
+                f"stripe session {platform_purchase_id!r} customer_details is not an object"
+            )
         email = customer_details.get("email")
-        if not email:
+        if not isinstance(email, str) or not email:
             raise PurchaseRejected(
                 f"stripe session {platform_purchase_id!r} has no customer_details.email"
             )
 
-        purchased_at = rfc3339_from_unix(event["created"])
+        created = event.get("created")
+        if not isinstance(created, int) or isinstance(created, bool):
+            raise PurchaseRejected("stripe event created is missing or not an integer")
+        purchased_at = rfc3339_from_unix(created)
 
         amount_total = session.get("amount_total")
         amount = str(amount_total) if amount_total is not None else None
         currency = session.get("currency")
 
         metadata = session.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            raise PurchaseRejected(
+                f"stripe session {platform_purchase_id!r} metadata is not an object"
+            )
+        if not all(
+            isinstance(key, str) and isinstance(value, str) for key, value in metadata.items()
+        ):
+            raise PurchaseRejected(
+                f"stripe session {platform_purchase_id!r} metadata must contain string keys "
+                "and values"
+            )
         product_key = metadata.get("attest_product_key") or self._line_items_product_key(
             platform_purchase_id
         )
@@ -228,20 +258,44 @@ class StripeAdapter:
         headers = {"Authorization": f"Bearer {self._api_key}"}
         body = self._http_get(url, headers)
         data = json.loads(body)
-        items = data.get("data") or []
-        if not items:
+        if not isinstance(data, dict):
+            raise PurchaseRejected(
+                f"stripe line items for session {session_id!r} are not an object"
+            )
+        items = data.get("data")
+        if not isinstance(items, list) or not items:
             raise PurchaseRejected(f"stripe line items for session {session_id!r} are empty")
-        price = items[0].get("price") or {}
+        if len(items) > 1:
+            raise PurchaseRejected(
+                "checkout session contains multiple line items; the bridge issues one receipt "
+                "per purchase"
+            )
+        item = items[0]
+        if not isinstance(item, dict):
+            raise PurchaseRejected(f"stripe line item for session {session_id!r} is not an object")
+        price = item.get("price") or {}
+        if not isinstance(price, dict):
+            raise PurchaseRejected(
+                f"stripe line item for session {session_id!r} price is not an object"
+            )
         price_id = price.get("id")
-        if not price_id:
+        if not isinstance(price_id, str) or not price_id:
             raise PurchaseRejected(f"stripe line item for session {session_id!r} has no price.id")
         return str(price_id)
 
     @staticmethod
     def _custom_field_pubkey(session: dict[str, Any]) -> str | None:
         """OI-1 carrier #2: Checkout custom field `key="attest_pubkey"`, `type="text"`."""
-        for field in session.get("custom_fields") or []:
+        fields = session.get("custom_fields") or []
+        if not isinstance(fields, list):
+            raise PurchaseRejected("stripe session custom_fields is not a list")
+        for field in fields:
+            if not isinstance(field, dict):
+                raise PurchaseRejected("stripe session custom field is not an object")
             if field.get("key") == "attest_pubkey" and field.get("type") == "text":
-                value = (field.get("text") or {}).get("value")
+                text = field.get("text") or {}
+                if not isinstance(text, dict):
+                    raise PurchaseRejected("stripe session custom field text is not an object")
+                value = text.get("value")
                 return value if isinstance(value, str) else None
         return None
