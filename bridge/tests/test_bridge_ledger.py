@@ -1,0 +1,314 @@
+"""Ledger: sqlite3 operational-state store — idempotency, receipts, claims, dead letters.
+
+Contract (task-4-brief.md): the Ledger is NOT part of the trust model, but the
+`receipts` table stores issued envelopes verbatim (carrying `delivery.salt`), so
+the database file is a SECRET — must be 0600 on disk. Timestamps are always
+caller-supplied RFC3339 strings; the Ledger never reads a clock. Each behavior
+below gets its own test per the brief's Step 1 enumeration.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+import stat
+from pathlib import Path
+
+import pytest
+from attest_bridge.ledger import Claim, DeadLetter, Ledger, StoredReceipt
+
+NOW = "2026-07-24T10:00:00Z"
+FUTURE = "2026-07-25T10:00:00Z"
+PAST = "2026-07-23T10:00:00Z"
+
+
+@pytest.fixture
+def ledger(tmp_path: Path) -> Ledger:
+    return Ledger(tmp_path / "ledger.sqlite3")
+
+
+def _envelope() -> dict[str, object]:
+    return {
+        "attest_version": "0.2",
+        "issuer": {"id": "merchant.example.com"},
+        "delivery": {"salt": "c29tZS1zYWx0LWJ5dGVz"},
+    }
+
+
+# -- 0600 secrecy contract ----------------------------------------------------
+
+
+def test_db_file_is_created_with_mode_0600(tmp_path: Path) -> None:
+    db_path = tmp_path / "ledger.sqlite3"
+    Ledger(db_path)
+
+    mode = oct(stat.S_IMODE(os.stat(db_path).st_mode))
+
+    assert mode == "0o600"
+
+
+# -- webhook-event idempotency -------------------------------------------------
+
+
+def test_seen_event_is_false_when_unmarked(ledger: Ledger) -> None:
+    assert ledger.seen_event("stripe", "evt_1") is False
+
+
+def test_seen_event_is_true_after_mark_event(ledger: Ledger) -> None:
+    ledger.mark_event("stripe", "evt_1")
+
+    assert ledger.seen_event("stripe", "evt_1") is True
+
+
+# -- receipts -------------------------------------------------------------------
+
+
+def test_record_receipt_then_get_receipt_round_trips_every_field(ledger: Ledger) -> None:
+    envelope = _envelope()
+
+    ledger.record_receipt(
+        "stripe",
+        "cs_123",
+        "receipt-abc",
+        envelope,
+        "buyer@example.com",
+        "download-token-xyz",
+        NOW,
+    )
+
+    stored = ledger.get_receipt("stripe", "cs_123")
+
+    assert stored is not None
+    assert stored.platform == "stripe"
+    assert stored.purchase_id == "cs_123"
+    assert stored.receipt_id == "receipt-abc"
+    assert json.loads(stored.envelope_json) == envelope
+    assert stored.download_token == "download-token-xyz"  # noqa: S105 - test fixture value
+    assert stored.buyer_email == "buyer@example.com"
+    assert stored.issued_at == NOW
+    assert stored.delivered_at is None
+    assert stored.delivery_attempts == 0
+    assert stored.last_delivery_error is None
+
+
+def test_get_receipt_returns_none_when_absent(ledger: Ledger) -> None:
+    assert ledger.get_receipt("stripe", "cs_missing") is None
+
+
+def test_double_record_receipt_same_purchase_raises_integrity_error(ledger: Ledger) -> None:
+    ledger.record_receipt(
+        "stripe", "cs_dup", "receipt-1", _envelope(), "buyer@example.com", "token-1", NOW
+    )
+
+    with pytest.raises(sqlite3.IntegrityError):
+        ledger.record_receipt(
+            "stripe", "cs_dup", "receipt-2", _envelope(), "buyer@example.com", "token-2", NOW
+        )
+
+
+def test_by_download_token_hit(ledger: Ledger) -> None:
+    ledger.record_receipt(
+        "stripe", "cs_tok", "receipt-1", _envelope(), "buyer@example.com", "token-hit", NOW
+    )
+
+    stored = ledger.by_download_token("token-hit")
+
+    assert stored is not None
+    assert stored.purchase_id == "cs_tok"
+
+
+def test_by_download_token_miss(ledger: Ledger) -> None:
+    assert ledger.by_download_token("no-such-token") is None
+
+
+def test_mark_delivered_updates_delivered_at(ledger: Ledger) -> None:
+    ledger.record_receipt(
+        "stripe", "cs_del", "receipt-1", _envelope(), "buyer@example.com", "token-del", NOW
+    )
+
+    ledger.mark_delivered("stripe", "cs_del", NOW)
+
+    stored = ledger.get_receipt("stripe", "cs_del")
+    assert stored is not None
+    assert stored.delivered_at == NOW
+
+
+def test_record_delivery_failure_updates_attempts_and_error(ledger: Ledger) -> None:
+    ledger.record_receipt(
+        "stripe", "cs_fail", "receipt-1", _envelope(), "buyer@example.com", "token-fail", NOW
+    )
+
+    ledger.record_delivery_failure("stripe", "cs_fail", "SMTP connection refused")
+    ledger.record_delivery_failure("stripe", "cs_fail", "SMTP timeout")
+
+    stored = ledger.get_receipt("stripe", "cs_fail")
+    assert stored is not None
+    assert stored.delivery_attempts == 2
+    assert stored.last_delivery_error == "SMTP timeout"
+    assert stored.delivered_at is None
+
+
+def test_undelivered_returns_only_never_delivered(ledger: Ledger) -> None:
+    ledger.record_receipt(
+        "stripe", "cs_a", "receipt-a", _envelope(), "a@example.com", "token-a", NOW
+    )
+    ledger.record_receipt(
+        "stripe", "cs_b", "receipt-b", _envelope(), "b@example.com", "token-b", NOW
+    )
+    ledger.mark_delivered("stripe", "cs_a", NOW)
+
+    pending = ledger.undelivered()
+
+    assert [r.purchase_id for r in pending] == ["cs_b"]
+
+
+# -- itch claims queue ----------------------------------------------------------
+
+
+def test_enqueue_claim_returns_a_token_and_get_claim_finds_it(ledger: Ledger) -> None:
+    token = ledger.enqueue_claim("buyer@example.com", "game_1", now=NOW)
+
+    claim = ledger.get_claim(token)
+
+    assert claim is not None
+    assert claim.token == token
+    assert claim.email == "buyer@example.com"
+    assert claim.game_id == "game_1"
+    assert claim.status == "pending"
+    assert claim.attempts == 0
+    assert claim.next_attempt_at == NOW
+    assert claim.created_at == NOW
+
+
+def test_get_claim_returns_none_for_unknown_token(ledger: Ledger) -> None:
+    assert ledger.get_claim("no-such-token") is None
+
+
+def test_due_claims_includes_claim_whose_next_attempt_at_has_passed(ledger: Ledger) -> None:
+    token = ledger.enqueue_claim("buyer@example.com", "game_1", now=PAST)
+
+    due = ledger.due_claims(NOW)
+
+    assert [c.token for c in due] == [token]
+
+
+def test_due_claims_excludes_a_future_claim(ledger: Ledger) -> None:
+    ledger.enqueue_claim("buyer@example.com", "game_1", now=FUTURE)
+
+    due = ledger.due_claims(NOW)
+
+    assert due == []
+
+
+def test_defer_claim_increments_attempts_and_updates_next_attempt_at(ledger: Ledger) -> None:
+    token = ledger.enqueue_claim("buyer@example.com", "game_1", now=NOW)
+
+    ledger.defer_claim(token, next_attempt_at=FUTURE)
+
+    claim = ledger.get_claim(token)
+    assert claim is not None
+    assert claim.attempts == 1
+    assert claim.next_attempt_at == FUTURE
+    assert claim.status == "pending"
+
+
+def test_complete_claim_drops_it_from_due_claims(ledger: Ledger) -> None:
+    token = ledger.enqueue_claim("buyer@example.com", "game_1", now=PAST)
+
+    ledger.complete_claim(token)
+
+    assert ledger.due_claims(NOW) == []
+    claim = ledger.get_claim(token)
+    assert claim is not None
+    assert claim.status == "confirmed"
+
+
+def test_exhaust_claim_drops_it_from_due_claims(ledger: Ledger) -> None:
+    token = ledger.enqueue_claim("buyer@example.com", "game_1", now=PAST)
+
+    ledger.exhaust_claim(token)
+
+    assert ledger.due_claims(NOW) == []
+    claim = ledger.get_claim(token)
+    assert claim is not None
+    assert claim.status == "exhausted"
+
+
+# -- dead letters -----------------------------------------------------------------
+
+
+def test_add_dead_letter_appears_in_unresolved(ledger: Ledger) -> None:
+    ledger.add_dead_letter(
+        "stripe", "cs_bad", "unmapped product", json.dumps({"raw": True}), now=NOW
+    )
+
+    unresolved = ledger.unresolved_dead_letters()
+
+    assert len(unresolved) == 1
+    entry = unresolved[0]
+    assert entry.platform == "stripe"
+    assert entry.purchase_id == "cs_bad"
+    assert entry.reason == "unmapped product"
+    assert json.loads(entry.raw_json) == {"raw": True}
+    assert entry.created_at == NOW
+    assert entry.resolved_at is None
+
+
+def test_add_dead_letter_allows_none_purchase_id(ledger: Ledger) -> None:
+    ledger.add_dead_letter("itch", None, "malformed webhook", "{}", now=NOW)
+
+    unresolved = ledger.unresolved_dead_letters()
+
+    assert unresolved[0].purchase_id is None
+
+
+def test_resolve_dead_letter_removes_it_from_unresolved(ledger: Ledger) -> None:
+    ledger.add_dead_letter("stripe", "cs_bad", "unmapped product", "{}", now=NOW)
+    dead_letter_id = ledger.unresolved_dead_letters()[0].id
+
+    ledger.resolve_dead_letter(dead_letter_id, now=FUTURE)
+
+    assert ledger.unresolved_dead_letters() == []
+
+
+def test_stored_receipt_claim_dead_letter_are_frozen_dataclasses() -> None:
+    # Sanity check on the pinned shapes (task-4-brief.md) — mutation must
+    # raise, since later tasks treat these as immutable value objects.
+    receipt = StoredReceipt(
+        platform="stripe",
+        purchase_id="cs_1",
+        receipt_id="r_1",
+        envelope_json="{}",
+        download_token="tok",  # noqa: S106 - test fixture value
+        buyer_email="a@example.com",
+        issued_at=NOW,
+        delivered_at=None,
+        delivery_attempts=0,
+        last_delivery_error=None,
+    )
+    claim = Claim(
+        token="tok",  # noqa: S106 - test fixture value
+        email="a@example.com",
+        game_id="game_1",
+        status="pending",
+        attempts=0,
+        next_attempt_at=NOW,
+        created_at=NOW,
+    )
+    dead_letter = DeadLetter(
+        id=1,
+        platform="stripe",
+        purchase_id=None,
+        reason="x",
+        raw_json="{}",
+        created_at=NOW,
+        resolved_at=None,
+    )
+
+    with pytest.raises(AttributeError):
+        receipt.platform = "itch"  # type: ignore[misc]
+    with pytest.raises(AttributeError):
+        claim.status = "confirmed"  # type: ignore[misc]
+    with pytest.raises(AttributeError):
+        dead_letter.reason = "y"  # type: ignore[misc]
