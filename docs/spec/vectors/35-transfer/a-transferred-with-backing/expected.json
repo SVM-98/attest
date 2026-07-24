@@ -1,0 +1,10 @@
+{
+  "binding": "not_checked",
+  "errors": [],
+  "ok": false,
+  "revocation": "transferred",
+  "schema": "valid",
+  "signature": "valid",
+  "trust": "verified",
+  "warnings": []
+}

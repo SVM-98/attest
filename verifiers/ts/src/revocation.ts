@@ -1,7 +1,20 @@
-import { JsonObject, JsonValue, canonicalBytes } from './canon.js'
+import { sha256 } from '@noble/hashes/sha2'
+import { bytesToHex } from '@noble/curves/utils.js'
+import { JsonObject, JsonValue, canonicalBytes, dumps, loadsStrict, CanonError } from './canon.js'
 import { verifyKeyManifest, findKey, verifySignatureBlock } from './manifests.js'
-import { parseStrictUtc, parseIsoLenient } from './dates.js'
-import { revocationFailedVerify, outsideRefundWindow, revocationViewOversize, revocationViewOversizeRevocable, WARN } from './messages.js'
+import { parseStrictUtc, parseIsoLenient, validStage3UtcTimestamp } from './dates.js'
+import { LogKey, encodeEntry, TlogError } from './tlog.js'
+import { AnchorPolicy, validatePolicy } from './anchor.js'
+import { evaluateTransparency, validateLogKeys, TransparencyError } from './transparency.js'
+import {
+  verifyRecordSignature as verifyTransferRecordSignature,
+  verifyAuthorization as verifyTransferAuthorization,
+  recordLoggedStanding as transferRecordLoggedStanding,
+} from './transfer.js'
+import {
+  revocationFailedVerify, outsideRefundWindow, revocationViewOversize, revocationViewOversizeRevocable,
+  WARN, VERIFY_TRANSPARENCY_WARN, TRANSFER_WARN, pyRepr, codePointLength,
+} from './messages.js'
 
 function asObject(v: JsonValue | undefined): JsonObject | null {
   return v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as JsonObject) : null
@@ -11,6 +24,15 @@ function signableRecordBytes(record: JsonObject): Uint8Array {
   const body: JsonObject = Object.create(null)
   for (const k of Object.keys(record)) if (k !== 'signature') body[k] = record[k]!
   return canonicalBytes(body)
+}
+
+// G5 (v0.2 §8, TM-47): `SHA-256(JCS(record))` over the ENTIRE signed record
+// (including its `signature` member, unlike `signableRecordBytes` above,
+// which excludes it to check the signature itself) — what a
+// `revocation-record` transparency-log entry commits to. Python parity:
+// `revocation.record_hash`.
+export function recordHash(record: JsonObject): string {
+  return bytesToHex(sha256(canonicalBytes(record)))
 }
 
 // PRECONDITION: caller already established verifyKeyManifest(keyManifest) is
@@ -61,9 +83,216 @@ function refundWindowEnd(payload: JsonObject): number | null {
 // _MAX_REVOCATION_RECORDS.
 export const MAX_REVOCATION_RECORDS = 10_000
 
+const CLAIM_TYPE_REVOCATION_RECORD = 'revocation-record'
+// Mirrors verify.py's `_MAX_TRANSPARENCY_EVIDENCE_LEN` — this is the SAME
+// class of untrusted per-claim evidence bundle, just for a revocation
+// record's claim instead of a receipt/key-manifest claim.
+const MAX_REVOCATION_EVIDENCE_LEN = 10_000_000
+
+/** The single pinned origin shared by every entry in `logKeys` — trusted
+ * verifier config, never derived from untrusted evidence (mirrors
+ * verify.ts's own private `resolveLogOrigin`, duplicated here rather than
+ * imported to avoid a revocation.ts <-> verify.ts import cycle). */
+function resolveLogOrigin(logKeys: LogKey[]): string {
+  const validated = validateLogKeys(logKeys)
+  const origins = new Set(validated.map((key) => key.origin))
+  if (origins.size !== 1) {
+    throw new TransparencyError(
+      `log_keys must be a non-empty list sharing a single origin, got ${pyRepr([...origins].sort())}`,
+    )
+  }
+  return [...origins][0]!
+}
+
+function validatedRevocationEntry(candidate: Record<string, unknown>): Record<string, unknown> | null {
+  try { encodeEntry(candidate); return candidate } catch (e) { if (e instanceof TlogError) return null; throw e }
+}
+
+function isPlainRecord(v: unknown): v is Record<string, unknown> {
+  return v !== null && typeof v === 'object' && !Array.isArray(v)
+}
+
+/** G5 (v0.2 §8/§15, TM-47): True iff at least one of `effective`'s
+ * refund_window revocation records has Stage 2 evidence proving it was
+ * logged AND anchored no later than `windowEndMs` (the SAME refund-window
+ * deadline `refundWindowEnd`/the caller's own `within-window` filter already
+ * compute). Only called once the caller has established the verifier is
+ * Stage-2 capable (`logKeys`/`anchorPolicy` both supplied) and `effective`
+ * is non-empty; `revocationEvidence` may still be absent or fail to
+ * resolve, in which case this returns `false`. Every warning the shared
+ * evaluator returns for a candidate record (e.g. `anchor_note_only`,
+ * malformed-evidence reasons, `log_equivocation_detected`) is appended to
+ * `warnings` (dedup against identical strings already present) regardless
+ * of whether that record ends up timely — mirrors the direct transparency
+ * path's own `warnings.push(...result.warnings)`. Python parity:
+ * `verify._revocation_deadline_satisfied`. */
+function revocationDeadlineSatisfied(
+  effective: JsonObject[], revocationEvidence: JsonValue | null, issuerId: string | null,
+  logKeys: LogKey[], anchorPolicy: AnchorPolicy, windowEndMs: number | null, warnings: string[],
+): boolean {
+  if (revocationEvidence == null || windowEndMs === null) return false
+
+  const origin = resolveLogOrigin(logKeys)
+  validatePolicy(anchorPolicy)
+
+  let materialized: unknown
+  try {
+    const serialized = dumps(revocationEvidence)
+    if (codePointLength(serialized) > MAX_REVOCATION_EVIDENCE_LEN) return false
+    materialized = JSON.parse(serialized)
+    if (!isPlainRecord(materialized)) return false
+  } catch { return false }
+
+  for (const record of effective) {
+    let hash: string
+    try { hash = recordHash(record) } catch (e) { if (e instanceof CanonError) continue; throw e }
+    const expectedEntry = validatedRevocationEntry({
+      type: CLAIM_TYPE_REVOCATION_RECORD, issuer: issuerId, record_sha256: hash,
+    })
+    if (expectedEntry === null) continue
+    const result = evaluateTransparency(materialized as JsonObject, {
+      logKeys, expectedOrigin: origin, policy: anchorPolicy, expectedEntry,
+    })
+    for (const warning of result.warnings) {
+      if (!warnings.includes(warning)) warnings.push(warning)
+    }
+    if (!result.transparency.startsWith('anchored_before:')) continue
+    const anchoredMs = parseIsoLenient(result.transparency.slice('anchored_before:'.length))
+    if (anchoredMs === null) continue
+    if (anchoredMs <= windowEndMs) return true
+  }
+  return false
+}
+
+// v0.2 Stage 3 (§17, issuer-mediated transfer): old-receipt extinguishment
+// via a `status: "transferred"` revocation record, honored only when BACKED
+// by an authenticated, log-included transfer record (§17.3's consent gate).
+// The literal is deliberately reused for both the record's own `status`
+// field and the reachable `revocation` result value — mirrors 'revoked''s
+// existing dual use above. Python parity: verify.py's
+// `_REVOCATION_TRANSFERRED`.
+const REVOCATION_TRANSFERRED = 'transferred'
+
+// Same literal VALUE as MAX_REVOCATION_EVIDENCE_LEN above (verify.py's
+// `_MAX_TRANSPARENCY_EVIDENCE_LEN`) — bounds the WHOLE untrusted
+// `transferView` claim list (records + evidence together) before it is ever
+// materialized, mirroring `_resolve_transfer_backing`'s own bound.
+const MAX_TRANSFER_VIEW_LEN = 10_000_000
+
+/** v0.2 §17.2-§17.4 (Stage 3): the winning, BACKED transfer record for
+ * `payload`'s own `receipt_id` among `transferView`'s untrusted claims
+ * (`{record: <transfer record>, evidence: <§10.2 evidence bundle>}`), or
+ * `null` if no claim survives every gate below.
+ *
+ * `transferView`'s aggregate serialized size is bound and materialized up
+ * front, so no caller-owned getter or proxy is consulted after the boundary.
+ * `loadsStrict` preserves the verifier's bigint JSON representation while
+ * materializing the canonical serialized form.
+ *
+ * Per claim, in this exact order (§17.3's consent gate plus §17.7/§17.2):
+ *
+ * 1. `record` is an object whose `receipt_id` equals `payload`'s own — else
+ *    the claim is irrelevant to this receipt and is skipped silently.
+ * 2. `transfer.verifyRecordSignature(record, issuerManifest)` — the
+ *    issuer's own signature (hoisting `verifyKeyManifest` once here,
+ *    mirroring `classifyRevocation`'s own hoisting of the same check). On
+ *    failure: TRANSFER_WARN.REVOCATION_UNBACKED (deduplicated), skip.
+ * 3. `payload.buyer.pubkey` is a non-null string AND
+ *    `transfer.verifyAuthorization(record, pubkey)` — the OLD receipt's own
+ *    holder consented. Same unbacked warning on failure, skip.
+ * 4. If `payload.license.not_transferable_before` is present: both
+ *    timestamps parse (fail-closed) and `record.transferred_at` is not
+ *    earlier than it — else TRANSFER_WARN.NOT_YET_TRANSFERABLE, skip.
+ * 5. Stage-2 capability (`logKeys` AND `anchorPolicy` both supplied) and
+ *    `transfer.recordLoggedStanding(...)` proves this record's own
+ *    transfer-record log entry reached at least `logged` standing — else
+ *    TRANSFER_WARN.RECORD_UNLOGGED, skip.
+ *
+ * Survivors are `(leafIndex, record)` pairs; two or more is a double
+ * assignment (§17.4) — TRANSFER_WARN.DOUBLE_ASSIGNMENT — and the EARLIEST
+ * log index (first-logged) wins. Python parity:
+ * `verify._resolve_transfer_backing`.
+ */
+function resolveTransferBacking(
+  payload: JsonObject, transferView: JsonValue[], issuerManifest: JsonObject,
+  issuerId: string | null, logKeys: LogKey[] | null, anchorPolicy: AnchorPolicy | null,
+  warnings: string[],
+): JsonObject | null {
+  let materialized: JsonValue
+  try {
+    const serialized = dumps(transferView)
+    if (codePointLength(serialized) > MAX_TRANSFER_VIEW_LEN) return null
+    materialized = loadsStrict(new TextEncoder().encode(serialized))
+    if (!Array.isArray(materialized)) return null
+  } catch {
+    // Adversarial-boundary confinement (never rethrow), mirroring
+    // revocationDeadlineSatisfied: a hostile transferView list/object's own
+    // property getters must not escape as a bare exception.
+    return null
+  }
+
+  const receiptId = payload['receipt_id']
+  const manifestOk = verifyKeyManifest(issuerManifest)
+
+  const appendOnce = (warning: string) => { if (!warnings.includes(warning)) warnings.push(warning) }
+
+  const survivors = new Map<string, [number, JsonObject]>()
+  for (const claim of materialized) {
+    const c = asObject(claim)
+    if (!c) continue
+    const record = asObject(c['record'])
+    if (!record || record['receipt_id'] !== receiptId) continue
+
+    if (!manifestOk || !verifyTransferRecordSignature(record, issuerManifest)) {
+      appendOnce(TRANSFER_WARN.REVOCATION_UNBACKED)
+      continue
+    }
+
+    const buyer = asObject(payload['buyer'])
+    const holderPubkey = buyer ? buyer['pubkey'] : undefined
+    if (typeof holderPubkey !== 'string' || !verifyTransferAuthorization(record, holderPubkey)) {
+      appendOnce(TRANSFER_WARN.REVOCATION_UNBACKED)
+      continue
+    }
+
+    const license = asObject(payload['license'])
+    const notTransferableBefore = license ? license['not_transferable_before'] : undefined
+    if (notTransferableBefore !== undefined && notTransferableBefore !== null) {
+      const transferredAt = validStage3UtcTimestamp(record['transferred_at']) ? parseStrictUtc(record['transferred_at']) : null
+      const floor = validStage3UtcTimestamp(notTransferableBefore) ? parseStrictUtc(notTransferableBefore) : null
+      const honored = transferredAt !== null && floor !== null && transferredAt >= floor
+      if (!honored) {
+        appendOnce(TRANSFER_WARN.NOT_YET_TRANSFERABLE)
+        continue
+      }
+    }
+
+    let leafIndex: number | null = null
+    if (logKeys != null && anchorPolicy != null) {
+      leafIndex = transferRecordLoggedStanding(
+        record, (c['evidence'] ?? null) as JsonValue | null, issuerId ?? '', logKeys, anchorPolicy, warnings,
+      )
+    }
+    if (leafIndex === null) {
+      appendOnce(TRANSFER_WARN.RECORD_UNLOGGED)
+      continue
+    }
+
+    const hash = recordHash(record)
+    const previous = survivors.get(hash)
+    if (previous === undefined || leafIndex < previous[0]) survivors.set(hash, [leafIndex, record])
+  }
+
+  if (survivors.size === 0) return null
+  if (survivors.size > 1) appendOnce(TRANSFER_WARN.DOUBLE_ASSIGNMENT)
+  return [...survivors.values()].reduce((best, cur) => (cur[0] < best[0] ? cur : best))[1]
+}
+
 export function classifyRevocation(
   payload: JsonObject, view: JsonValue[] | null, issuerManifest: JsonObject, warnings: string[],
   errors: string[], maxRecords: number = MAX_REVOCATION_RECORDS,
+  logKeys: LogKey[] | null = null, anchorPolicy: AnchorPolicy | null = null,
+  revocationEvidence: JsonValue | null = null, transferView: JsonValue[] | null = null,
 ): string {
   if (!view || view.length === 0) return 'unknown'
 
@@ -100,24 +329,72 @@ export function classifyRevocation(
 
   const receiptId = payload['receipt_id']
   const valid: JsonObject[] = []
+  // A matching, authenticated `status: "transferred"` record (Stage 3,
+  // §17.3) is collected separately — it is not a "revoked"-status
+  // statement, so it plays no part in the "revoked"-status dispatch below.
+  const transferredMatches: JsonObject[] = []
   view.forEach((r, i) => {
     const o = asObject(r)
     if (!o || o['receipt_id'] !== receiptId) return
     if (!auth[i]) { warnings.push(revocationFailedVerify(receiptId)); return }
     if (o['status'] === 'revoked') valid.push(o)
+    else if (o['status'] === REVOCATION_TRANSFERRED) transferredMatches.push(o)
   })
 
-  if (revocability === 'none') {
-    if (valid.length > 0) { warnings.push(WARN.REVOCABILITY_NONE_IGNORED); return 'invalid_revocation_ignored' }
+  // The pre-Stage-3 "revoked"-status dispatch, unchanged — captured so its
+  // result can be checked before the Stage 3 transferred-class check runs.
+  const revokedClassResult = (): string => {
+    if (revocability === 'none') {
+      if (valid.length > 0) { warnings.push(WARN.REVOCABILITY_NONE_IGNORED); return 'invalid_revocation_ignored' }
+      return notRevoked
+    }
+    if (revocability === 'policy') return valid.length > 0 ? 'revoked' : notRevoked
+    if (revocability === 'refund_window') {
+      const end = refundWindowEnd(payload)
+      const effective = valid.filter((r) => { const ms = parseIsoLenient(r['revoked_at']); return end !== null && ms !== null && ms <= end })
+      if (effective.length > 0) {
+        // G5 (TM-47): a Stage-2-capable verifier (logKeys AND anchorPolicy
+        // both supplied — the same gate `evaluateTransparencyClaim` uses)
+        // MUST additionally apply the deadline-effectiveness rule. A verifier
+        // that never supplies them is not Stage-2 capable, so the rule does
+        // not engage and v0.1 semantics stand.
+        if (logKeys != null && anchorPolicy != null) {
+          const issuerId = typeof issuerManifest['issuer'] === 'string' ? (issuerManifest['issuer'] as string) : null
+          const timely = revocationDeadlineSatisfied(effective, revocationEvidence, issuerId, logKeys, anchorPolicy, end, warnings)
+          if (!timely) { warnings.push(VERIFY_TRANSPARENCY_WARN.REVOCATION_UNLOGGED_DEADLINE); return 'invalid_revocation_ignored' }
+        }
+        return 'revoked'
+      }
+      if (valid.length > 0) { warnings.push(outsideRefundWindow(receiptId)); return 'invalid_revocation_ignored' }
+      return notRevoked
+    }
     return notRevoked
   }
-  if (revocability === 'policy') return valid.length > 0 ? 'revoked' : notRevoked
-  if (revocability === 'refund_window') {
-    const end = refundWindowEnd(payload)
-    const effective = valid.filter((r) => { const ms = parseIsoLenient(r['revoked_at']); return end !== null && ms !== null && ms <= end })
-    if (effective.length > 0) return 'revoked'
-    if (valid.length > 0) { warnings.push(outsideRefundWindow(receiptId)); return 'invalid_revocation_ignored' }
-    return notRevoked
+
+  const revokedResult = revokedClassResult()
+  if (revokedResult === 'revoked') return revokedResult
+
+  // --- Stage 3 (§17.3): transferred-class backing, considered only once the
+  // "revoked"-status logic above did NOT itself yield "revoked" — and for
+  // ALL revocability classes, `none` included (the consent-gate principle).
+  if (transferredMatches.length > 0) {
+    if (transferView == null) {
+      // The resolver is never reached at all — this is the only place left
+      // to report the unbacked outcome.
+      if (!warnings.includes(TRANSFER_WARN.REVOCATION_UNBACKED)) warnings.push(TRANSFER_WARN.REVOCATION_UNBACKED)
+      return 'invalid_revocation_ignored'
+    }
+
+    const manifestIssuerId = typeof issuerManifest['issuer'] === 'string' ? (issuerManifest['issuer'] as string) : null
+    const winner = resolveTransferBacking(payload, transferView, issuerManifest, manifestIssuerId, logKeys, anchorPolicy, warnings)
+    if (winner !== null) return REVOCATION_TRANSFERRED
+    const alreadyWarned = [
+      TRANSFER_WARN.REVOCATION_UNBACKED, TRANSFER_WARN.RECORD_UNLOGGED,
+      TRANSFER_WARN.NOT_YET_TRANSFERABLE, TRANSFER_WARN.DOUBLE_ASSIGNMENT,
+    ].some((w) => warnings.includes(w))
+    if (!alreadyWarned) warnings.push(TRANSFER_WARN.REVOCATION_UNBACKED)
+    return 'invalid_revocation_ignored'
   }
-  return notRevoked
+
+  return revokedResult
 }

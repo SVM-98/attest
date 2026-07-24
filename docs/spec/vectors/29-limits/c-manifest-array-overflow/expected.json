@@ -1,0 +1,12 @@
+{
+  "binding": "not_checked",
+  "errors_contains": [
+    "issuer manifest exceeds 256 keys"
+  ],
+  "ok": false,
+  "revocation": "unknown",
+  "schema": "invalid",
+  "signature": "invalid",
+  "trust": "verified",
+  "warnings": []
+}

@@ -1,0 +1,12 @@
+{
+  "binding": "not_checked",
+  "errors_contains": [
+    "envelope exceeds 1048576 bytes"
+  ],
+  "ok": false,
+  "revocation": "unknown",
+  "schema": "invalid",
+  "signature": "invalid",
+  "trust": "unauthenticated_tofu",
+  "warnings": []
+}

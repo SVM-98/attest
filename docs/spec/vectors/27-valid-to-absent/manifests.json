@@ -1,4 +1,6 @@
 {
+  "artifact_manifest_chains": {},
+  "artifact_manifests": {},
   "chains": {},
   "manifests": {
     "store.example.com": {

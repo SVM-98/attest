@@ -19,7 +19,7 @@ from typing import Any
 
 import pytest
 
-from attest import cli, keys, pq, revocation, tlog, verify
+from attest import cli, keys, pq, revocation, tlog, transfer, verify
 from tests.helpers import make_payload
 
 ISSUER = "store.example.com"
@@ -778,6 +778,8 @@ def test_manifest_artifacts_builds_signed_artifact_manifest(tmp_path: Path) -> N
             f"{ISSUER}/works/EXG-001",
             "--version",
             "1",
+            "--manifest-version",
+            "1",
             "--released-at",
             VALID_FROM,
             "--artifacts",
@@ -796,7 +798,55 @@ def test_manifest_artifacts_builds_signed_artifact_manifest(tmp_path: Path) -> N
 
     key_manifest = json.loads(key_manifest_path.read_text(encoding="utf-8"))
     artifact_manifest = json.loads(out.read_text(encoding="utf-8"))
+    assert artifact_manifest["manifest_version"] == 1
     assert manifests.verify_artifact_manifest(artifact_manifest, key_manifest)
+
+
+def test_manifest_artifacts_rejects_nonpositive_manifest_version(capsys: CapSys) -> None:
+    parser = cli.build_parser()
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args(
+            [
+                "manifest",
+                "artifacts",
+                "--in",
+                "key-manifest.json",
+                "--issuer",
+                ISSUER,
+                "--series",
+                f"{ISSUER}/works/EXG-001",
+                "--version",
+                "1",
+                "--manifest-version",
+                "0",
+                "--released-at",
+                VALID_FROM,
+                "--artifacts",
+                "artifacts.json",
+                "--signing-kid",
+                KID,
+                "--signing-seed",
+                "issuer.seed",
+                "--out",
+                "artifact-manifest.json",
+            ]
+        )
+    assert exc.value.code == 2
+    assert "must be an integer >= 1" in capsys.readouterr().err
+
+
+def test_load_trust_dir_scopes_artifact_chains_by_issuer_and_series(tmp_path: Path) -> None:
+    series = "shared/works/EXG-001"
+    for issuer in (ISSUER, "other.example.com"):
+        (tmp_path / f"{issuer}.artifact.json").write_text(
+            json.dumps({"issuer": issuer, "series": series, "version": 1}), encoding="utf-8"
+        )
+    trust_store = cli._load_trust_dir(tmp_path)
+    assert set(trust_store.artifact_manifests) == {ISSUER, "other.example.com"}
+    assert trust_store.artifact_manifests[ISSUER][series]["issuer"] == ISSUER
+    assert (
+        trust_store.artifact_manifests["other.example.com"][series]["issuer"] == "other.example.com"
+    )
 
 
 def test_manifest_artifacts_hybrid_roundtrips(tmp_path: Path) -> None:
@@ -817,6 +867,8 @@ def test_manifest_artifacts_hybrid_roundtrips(tmp_path: Path) -> None:
             "--series",
             f"{ISSUER}/works/EXG-001",
             "--version",
+            "1",
+            "--manifest-version",
             "1",
             "--released-at",
             VALID_FROM,
@@ -857,6 +909,8 @@ def test_manifest_artifacts_hybrid_without_mldsa_key_errors(tmp_path: Path, caps
             f"{ISSUER}/works/EXG-001",
             "--version",
             "1",
+            "--manifest-version",
+            "1",
             "--released-at",
             VALID_FROM,
             "--artifacts",
@@ -892,6 +946,8 @@ def test_manifest_artifacts_ed_only_with_mldsa_key_errors(tmp_path: Path, capsys
             "--series",
             f"{ISSUER}/works/EXG-001",
             "--version",
+            "1",
+            "--manifest-version",
             "1",
             "--released-at",
             VALID_FROM,
@@ -930,6 +986,8 @@ def test_manifest_artifacts_wrong_mldsa_key_errors(tmp_path: Path, capsys: CapSy
             "--series",
             f"{ISSUER}/works/EXG-001",
             "--version",
+            "1",
+            "--manifest-version",
             "1",
             "--released-at",
             VALID_FROM,
@@ -2276,6 +2334,35 @@ def _minimal_anchor_evidence() -> dict[str, str]:
     return {"checkpoint": checkpoint}
 
 
+def _v2_ots_proof(checkpoint_text: str) -> dict[str, object]:
+    """Build an `--ots-proof` file whose op-chain genuinely replays from
+    `SHA256(signed_note_bytes)` (the signed-note-v2 seed) — the single
+    `["sha256"]` op, so `header_merkle_root` is just `SHA256(that seed)`.
+    Used by tests that only care about reaching code AFTER attachment-time
+    seed validation (G4/I2), not about the op-chain's own shape."""
+    signed_note_bytes = tlog.parse_checkpoint(checkpoint_text).signed_note_bytes
+    seed = hashlib.sha256(signed_note_bytes).digest()
+    return {
+        "ops": [["sha256"]],
+        "header_merkle_root": hashlib.sha256(seed).hexdigest(),
+        "header_hash": "11" * 32,
+        "header_time": 1700000000,
+    }
+
+
+def _v1_ots_proof(checkpoint_text: str) -> dict[str, object]:
+    """Same as `_v2_ots_proof` but seeded from `SHA256(note_bytes)` (the
+    legacy pre-G4 seed) — used to exercise the legacy-diagnostic error."""
+    note_bytes = tlog.parse_checkpoint(checkpoint_text).note_bytes
+    seed = hashlib.sha256(note_bytes).digest()
+    return {
+        "ops": [["sha256"]],
+        "header_merkle_root": hashlib.sha256(seed).hexdigest(),
+        "header_hash": "11" * 32,
+        "header_time": 1700000000,
+    }
+
+
 @pytest.mark.parametrize("flag", ["--transparency", "--log-keys", "--anchor-policy"])
 def test_verify_rejects_oversized_stage2_json_input(
     tmp_path: Path, capsys: CapSys, flag: str
@@ -2371,10 +2458,13 @@ def test_log_anchor_max_cap_rfc3161_token_stays_within_verifier_evidence_ceiling
     the cap must leave room for the base64 expansion PLUS checkpoint and JSON
     overhead inside the same evidence object."""
     log_dir = _log_init(tmp_path)
+    minimal_evidence = _minimal_anchor_evidence()
     evidence_path = tmp_path / "evidence.json"
-    evidence_path.write_text(json.dumps(_minimal_anchor_evidence()), encoding="utf-8")
+    evidence_path.write_text(json.dumps(minimal_evidence), encoding="utf-8")
     ots_proof_path = tmp_path / "ots-proof.json"
-    ots_proof_path.write_text("{}", encoding="utf-8")
+    ots_proof_path.write_text(
+        json.dumps(_v2_ots_proof(minimal_evidence["checkpoint"])), encoding="utf-8"
+    )
     max_cap_token = tmp_path / "max-cap-rfc3161.tsr"
     with max_cap_token.open("wb") as file:
         file.truncate(cli._MAX_STAGE2_INPUT_BYTES["rfc3161"])
@@ -2410,18 +2500,14 @@ def test_log_anchor_refuses_evidence_exceeding_verifier_ceiling(
     log_dir = _log_init(tmp_path)
     header = f"{LOG_ORIGIN}\n0\n" + base64.b64encode(bytes(32)).decode("ascii") + "\n"
     checkpoint = (
-        header
-        + "\n"
-        + "— "
-        + "n" * (tlog._MAX_NOTE_TEXT_LEN - len(header) - 10)
-        + " AA==\n"
+        header + "\n" + "— " + "n" * (tlog._MAX_NOTE_TEXT_LEN - len(header) - 10) + " AA==\n"
     )
     assert tlog.parse_checkpoint(checkpoint).origin == LOG_ORIGIN
 
     evidence_path = tmp_path / "evidence.json"
     evidence_path.write_text(json.dumps({"checkpoint": checkpoint}), encoding="utf-8")
     ots_proof_path = tmp_path / "ots-proof.json"
-    ots_proof_path.write_text("{}", encoding="utf-8")
+    ots_proof_path.write_text(json.dumps(_v2_ots_proof(checkpoint)), encoding="utf-8")
     max_cap_token = tmp_path / "max-cap-rfc3161.tsr"
     with max_cap_token.open("wb") as file:
         file.truncate(cli._MAX_STAGE2_INPUT_BYTES["rfc3161"])
@@ -2708,8 +2794,12 @@ def test_verify_crqc_horizon_before_anchor_time_caps_transparency(
     evidence_path = _log_prove(tmp_path, log_dir, 0)
 
     checkpoint_text = checkpoint_path.read_text(encoding="utf-8")
-    note_bytes = tlog.parse_checkpoint(checkpoint_text).note_bytes
-    accumulator_start = hashlib.sha256(note_bytes).digest()
+    # `attest log anchor` stamps `anchor_profile: "signed-note-v2"` on every
+    # newly-attached anchor (G4, attest-v0.2.md §11.1), so the op-chain this
+    # externally-obtained OTS proof replays must commit over the checkpoint's
+    # FULL signed note (`signed_note_bytes`), not just its unsigned header.
+    signed_note_bytes = tlog.parse_checkpoint(checkpoint_text).signed_note_bytes
+    accumulator_start = hashlib.sha256(signed_note_bytes).digest()
     header_merkle_root = hashlib.sha256(accumulator_start).digest().hex()
     header_hash = hashlib.sha256(b"attest-cli-test-anchor-header-v1").hexdigest()
     header_time = 1700000000  # transparency.py's own documented KAT: -> 2023-11-14T22:13:20Z
@@ -2797,6 +2887,272 @@ def test_verify_crqc_horizon_before_anchor_time_caps_transparency(
     result = json.loads(capsys.readouterr().out)
     assert rc == 0
     assert result["transparency"] == "not_checked"
+
+
+# --------------------------------------------------------------------------
+# I1 (attest-v0.2.md §11.1.1): single-profile rule — `log anchor` must
+# refuse to append a v2 proof to a bundle whose retained proofs are v1, and
+# must not silently relabel those retained proofs' profile.
+# --------------------------------------------------------------------------
+
+
+def test_log_anchor_refuses_to_append_v2_proof_to_existing_v1_bundle(
+    tmp_path: Path, capsys: CapSys
+) -> None:
+    minimal_evidence = _minimal_anchor_evidence()
+    checkpoint_text = minimal_evidence["checkpoint"]
+    log_dir = _log_init(tmp_path, origin=LOG_ORIGIN)
+
+    # First anchor attach: no prior proofs, so it succeeds and the tool
+    # stamps `anchor_profile: "signed-note-v2"` on the (only) retained proof
+    # — but simulate a pre-G4 bundle that already carries a `note-v1`-shaped
+    # proof by hand-writing `anchors` directly, exactly the shape pre-fix
+    # tooling could have produced (proofs present, no anchor_profile field).
+    v1_evidence = dict(minimal_evidence)
+    v1_evidence["anchors"] = {
+        "checkpoint": checkpoint_text,
+        "proofs": [{**_v1_ots_proof(checkpoint_text), "kind": "ots"}],
+    }
+    evidence_path = tmp_path / "evidence.json"
+    evidence_path.write_text(json.dumps(v1_evidence), encoding="utf-8")
+
+    ots_proof_path = tmp_path / "ots-proof.json"
+    ots_proof_path.write_text(json.dumps(_v2_ots_proof(checkpoint_text)), encoding="utf-8")
+    out_path = tmp_path / "anchored.json"
+
+    capsys.readouterr()
+    rc = cli.main(
+        [
+            "log",
+            "anchor",
+            "--dir",
+            str(log_dir),
+            "--evidence",
+            str(evidence_path),
+            "--ots-proof",
+            str(ots_proof_path),
+            "--out",
+            str(out_path),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "note-v1" in captured.err
+    assert "exactly one anchor_profile" in captured.err
+    assert "fresh signed-note-v2 bundle" in captured.err
+    assert not out_path.exists()
+
+
+def test_log_anchor_refuses_to_append_to_existing_bundle_declaring_explicit_note_v1(
+    tmp_path: Path, capsys: CapSys
+) -> None:
+    """Same refusal when the retained bundle explicitly declares
+    `anchor_profile: "note-v1"` rather than leaving it absent."""
+    minimal_evidence = _minimal_anchor_evidence()
+    checkpoint_text = minimal_evidence["checkpoint"]
+    log_dir = _log_init(tmp_path, origin=LOG_ORIGIN)
+
+    v1_evidence = dict(minimal_evidence)
+    v1_evidence["anchors"] = {
+        "checkpoint": checkpoint_text,
+        "proofs": [{**_v1_ots_proof(checkpoint_text), "kind": "ots"}],
+        "anchor_profile": "note-v1",
+    }
+    evidence_path = tmp_path / "evidence.json"
+    evidence_path.write_text(json.dumps(v1_evidence), encoding="utf-8")
+
+    ots_proof_path = tmp_path / "ots-proof.json"
+    ots_proof_path.write_text(json.dumps(_v2_ots_proof(checkpoint_text)), encoding="utf-8")
+    out_path = tmp_path / "anchored.json"
+
+    capsys.readouterr()
+    rc = cli.main(
+        [
+            "log",
+            "anchor",
+            "--dir",
+            str(log_dir),
+            "--evidence",
+            str(evidence_path),
+            "--ots-proof",
+            str(ots_proof_path),
+            "--out",
+            str(out_path),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "note-v1" in captured.err
+    assert not out_path.exists()
+
+
+def test_log_anchor_permits_appending_a_second_v2_proof_to_a_v2_bundle(
+    tmp_path: Path, capsys: CapSys
+) -> None:
+    """The single-profile rule only refuses a MISMATCHED profile — appending
+    another v2 proof to an already-v2 bundle stays allowed."""
+    minimal_evidence = _minimal_anchor_evidence()
+    checkpoint_text = minimal_evidence["checkpoint"]
+    log_dir = _log_init(tmp_path, origin=LOG_ORIGIN)
+
+    v2_evidence = dict(minimal_evidence)
+    v2_evidence["anchors"] = {
+        "checkpoint": checkpoint_text,
+        "proofs": [{**_v2_ots_proof(checkpoint_text), "kind": "ots"}],
+        "anchor_profile": "signed-note-v2",
+    }
+    evidence_path = tmp_path / "evidence.json"
+    evidence_path.write_text(json.dumps(v2_evidence), encoding="utf-8")
+
+    ots_proof_path = tmp_path / "ots-proof.json"
+    ots_proof_path.write_text(json.dumps(_v2_ots_proof(checkpoint_text)), encoding="utf-8")
+    out_path = tmp_path / "anchored.json"
+
+    capsys.readouterr()
+    rc = cli.main(
+        [
+            "log",
+            "anchor",
+            "--dir",
+            str(log_dir),
+            "--evidence",
+            str(evidence_path),
+            "--ots-proof",
+            str(ots_proof_path),
+            "--out",
+            str(out_path),
+        ]
+    )
+    capsys.readouterr()
+
+    assert rc == 0
+    written = json.loads(out_path.read_text(encoding="utf-8"))
+    assert len(written["anchors"]["proofs"]) == 2
+    assert written["anchors"]["anchor_profile"] == "signed-note-v2"
+
+
+# --------------------------------------------------------------------------
+# I2(a) (attest-v0.2.md §11.1.1): attachment-time seed validation — `log
+# anchor` refuses an --ots-proof whose op-chain does not commit over the
+# signed-note-v2 seed, with a dedicated diagnostic for the common mistake
+# of supplying a pre-G4 (note_bytes-only) proof.
+# --------------------------------------------------------------------------
+
+
+def test_log_anchor_refuses_pre_g4_note_bytes_seeded_ots_proof(
+    tmp_path: Path, capsys: CapSys
+) -> None:
+    minimal_evidence = _minimal_anchor_evidence()
+    checkpoint_text = minimal_evidence["checkpoint"]
+    log_dir = _log_init(tmp_path, origin=LOG_ORIGIN)
+
+    evidence_path = tmp_path / "evidence.json"
+    evidence_path.write_text(json.dumps(minimal_evidence), encoding="utf-8")
+    ots_proof_path = tmp_path / "ots-proof.json"
+    ots_proof_path.write_text(json.dumps(_v1_ots_proof(checkpoint_text)), encoding="utf-8")
+    out_path = tmp_path / "anchored.json"
+
+    capsys.readouterr()
+    rc = cli.main(
+        [
+            "log",
+            "anchor",
+            "--dir",
+            str(log_dir),
+            "--evidence",
+            str(evidence_path),
+            "--ots-proof",
+            str(ots_proof_path),
+            "--out",
+            str(out_path),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "pre-G4 tooling" in captured.err
+    assert "note_bytes" in captured.err
+    assert "signed-note-v2 requires the full signed note" in captured.err
+    assert not out_path.exists()
+
+
+def test_log_anchor_refuses_ots_proof_with_unrelated_seed(tmp_path: Path, capsys: CapSys) -> None:
+    minimal_evidence = _minimal_anchor_evidence()
+    log_dir = _log_init(tmp_path, origin=LOG_ORIGIN)
+
+    evidence_path = tmp_path / "evidence.json"
+    evidence_path.write_text(json.dumps(minimal_evidence), encoding="utf-8")
+    ots_proof_path = tmp_path / "ots-proof.json"
+    bogus_seed = hashlib.sha256(b"not-derived-from-this-checkpoint-at-all").digest()
+    ots_proof_path.write_text(
+        json.dumps(
+            {
+                "ops": [["sha256"]],
+                "header_merkle_root": hashlib.sha256(bogus_seed).hexdigest(),
+                "header_hash": "11" * 32,
+                "header_time": 1700000000,
+            }
+        ),
+        encoding="utf-8",
+    )
+    out_path = tmp_path / "anchored.json"
+
+    capsys.readouterr()
+    rc = cli.main(
+        [
+            "log",
+            "anchor",
+            "--dir",
+            str(log_dir),
+            "--evidence",
+            str(evidence_path),
+            "--ots-proof",
+            str(ots_proof_path),
+            "--out",
+            str(out_path),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "does not replay to its own header_merkle_root" in captured.err
+    assert "signed-note-v2 seed SHA256(signed_note_bytes)=" in captured.err
+    assert not out_path.exists()
+
+
+def test_log_anchor_accepts_v2_seeded_ots_proof(tmp_path: Path, capsys: CapSys) -> None:
+    """Positive counterpart: a genuinely v2-seeded proof is still accepted
+    (RED-first control for the two refusal tests above)."""
+    minimal_evidence = _minimal_anchor_evidence()
+    checkpoint_text = minimal_evidence["checkpoint"]
+    log_dir = _log_init(tmp_path, origin=LOG_ORIGIN)
+
+    evidence_path = tmp_path / "evidence.json"
+    evidence_path.write_text(json.dumps(minimal_evidence), encoding="utf-8")
+    ots_proof_path = tmp_path / "ots-proof.json"
+    ots_proof_path.write_text(json.dumps(_v2_ots_proof(checkpoint_text)), encoding="utf-8")
+    out_path = tmp_path / "anchored.json"
+
+    capsys.readouterr()
+    rc = cli.main(
+        [
+            "log",
+            "anchor",
+            "--dir",
+            str(log_dir),
+            "--evidence",
+            str(evidence_path),
+            "--ots-proof",
+            str(ots_proof_path),
+            "--out",
+            str(out_path),
+        ]
+    )
+    assert rc == 0
+    written = json.loads(out_path.read_text(encoding="utf-8"))
+    assert written["anchors"]["anchor_profile"] == "signed-note-v2"
 
 
 def test_export_import_carries_proofs_via_proof_dir(tmp_path: Path, capsys: CapSys) -> None:
@@ -3093,3 +3449,528 @@ def test_log_state_files_are_published_with_umask_default_modes(tmp_path: Path) 
     assert stat.S_IMODE(tile_dir.stat().st_mode) == 0o755
     for tile in tile_dir.iterdir():
         assert stat.S_IMODE(tile.stat().st_mode) == 0o644, tile.name
+
+
+# --- transfer authorize / record (v0.2 §17) ----------------------------------
+
+NEW_HOLDER_PUB_B64U = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"  # 32 zero bytes
+TRANSFERRED_AT = "2026-07-23T00:00:00Z"
+
+
+def _transfer_authorize(
+    tmp_path: Path,
+    receipt_path: Path,
+    holder_seed: Path,
+    out_name: str = "authorization.json",
+    new_holder_pubkey: str = NEW_HOLDER_PUB_B64U,
+    transferred_at: str = TRANSFERRED_AT,
+) -> Path:
+    out = tmp_path / out_name
+    rc = cli.main(
+        [
+            "transfer",
+            "authorize",
+            "--receipt",
+            str(receipt_path),
+            "--new-holder-pubkey",
+            new_holder_pubkey,
+            "--transferred-at",
+            transferred_at,
+            "--holder-seed",
+            str(holder_seed),
+            "--out",
+            str(out),
+        ]
+    )
+    assert rc == 0
+    return out
+
+
+def test_transfer_authorize_writes_verifiable_holder_signature(tmp_path: Path) -> None:
+    holder_seed, holder_pub = _keygen(tmp_path, "holder")
+    issuer_seed, _pub = _keygen(tmp_path, "issuer")
+    payload_path = _write_payload(
+        tmp_path, buyer={"pubkey": holder_pub.read_text(encoding="utf-8").strip()}
+    )
+    envelope_path = _issue(tmp_path, issuer_seed, payload_path)
+    receipt_id = json.loads(payload_path.read_text(encoding="utf-8"))["receipt_id"]
+
+    out = _transfer_authorize(tmp_path, envelope_path, holder_seed)
+
+    authorization = json.loads(out.read_text(encoding="utf-8"))
+    assert set(authorization) == {"sig"}
+    holder_kp = keys.from_seed(keys.b64u_decode(holder_seed.read_text(encoding="utf-8").strip()))
+    holder_pub_bytes = holder_kp.pub
+    message = (
+        b"Attest-transfer-authorization-v1\x00"
+        + receipt_id.encode()
+        + b"\x00"
+        + NEW_HOLDER_PUB_B64U.encode()
+        + b"\x00"
+        + TRANSFERRED_AT.encode()
+    )
+    assert keys.verify_strict(message, keys.b64u_decode(authorization["sig"]), holder_pub_bytes)
+
+
+def test_transfer_authorize_never_prints_the_signature_to_stdout(
+    tmp_path: Path, capsys: CapSys
+) -> None:
+    holder_seed, holder_pub = _keygen(tmp_path, "holder")
+    issuer_seed, _pub = _keygen(tmp_path, "issuer")
+    payload_path = _write_payload(
+        tmp_path, buyer={"pubkey": holder_pub.read_text(encoding="utf-8").strip()}
+    )
+    envelope_path = _issue(tmp_path, issuer_seed, payload_path)
+
+    capsys.readouterr()
+    out = _transfer_authorize(tmp_path, envelope_path, holder_seed)
+    captured = capsys.readouterr().out
+
+    sig_text = json.loads(out.read_text(encoding="utf-8"))["sig"]
+    assert sig_text not in captured
+
+
+@pytest.mark.parametrize("aliased_input", ("receipt", "holder-seed"))
+def test_transfer_authorize_rejects_out_aliased_with_input(
+    tmp_path: Path, capsys: CapSys, aliased_input: str
+) -> None:
+    holder_seed, holder_pub = _keygen(tmp_path, "holder")
+    issuer_seed, _pub = _keygen(tmp_path, "issuer")
+    payload_path = _write_payload(
+        tmp_path, buyer={"pubkey": holder_pub.read_text(encoding="utf-8").strip()}
+    )
+    receipt_path = _issue(tmp_path, issuer_seed, payload_path)
+    aliased_path = receipt_path if aliased_input == "receipt" else holder_seed
+    original = aliased_path.read_text(encoding="utf-8")
+
+    rc = cli.main(
+        [
+            "transfer",
+            "authorize",
+            "--receipt",
+            str(receipt_path),
+            "--new-holder-pubkey",
+            NEW_HOLDER_PUB_B64U,
+            "--transferred-at",
+            TRANSFERRED_AT,
+            "--holder-seed",
+            str(holder_seed),
+            "--out",
+            str(aliased_path),
+        ]
+    )
+
+    assert rc == 2
+    assert capsys.readouterr().err != ""
+    assert aliased_path.read_text(encoding="utf-8") == original
+
+
+def _write_authorization_sig(
+    tmp_path: Path, receipt_id: str, holder_kp: keys.SigningKeyPair
+) -> Path:
+    sig = transfer.sign_authorization(receipt_id, NEW_HOLDER_PUB_B64U, TRANSFERRED_AT, holder_kp)
+    out = tmp_path / "authorization.json"
+    out.write_text(json.dumps({"sig": keys.b64u(sig)}), encoding="utf-8")
+    return out
+
+
+def _write_transfer_receipt(
+    tmp_path: Path,
+    issuer_seed: Path,
+    holder_kp: keys.SigningKeyPair,
+    receipt_id: str,
+) -> Path:
+    payload_path = _write_payload(
+        tmp_path,
+        name="old-payload.json",
+        receipt_id=receipt_id,
+        buyer={"pubkey": keys.b64u(holder_kp.pub)},
+    )
+    return _issue(tmp_path, issuer_seed, payload_path, out_name="old-envelope.json")
+
+
+def test_transfer_record_writes_self_verifying_record(tmp_path: Path) -> None:
+    seed, _pub = _keygen(tmp_path, "issuer")
+    manifest_path = _manifest_init(tmp_path, seed)
+    holder_kp = keys.generate()
+    old_receipt_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    new_receipt_id = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
+    receipt_path = _write_transfer_receipt(tmp_path, seed, holder_kp, old_receipt_id)
+    authorization_path = _write_authorization_sig(tmp_path, old_receipt_id, holder_kp)
+    out = tmp_path / "record.json"
+
+    rc = cli.main(
+        [
+            "transfer",
+            "record",
+            "--receipt",
+            str(receipt_path),
+            "--new-receipt-id",
+            new_receipt_id,
+            "--new-holder-pubkey",
+            NEW_HOLDER_PUB_B64U,
+            "--transferred-at",
+            TRANSFERRED_AT,
+            "--holder-authorization",
+            str(authorization_path),
+            "--seed",
+            str(seed),
+            "--kid",
+            KID,
+            "--out",
+            str(out),
+        ]
+    )
+
+    assert rc == 0
+    record = json.loads(out.read_text(encoding="utf-8"))
+    key_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert set(record) == {
+        "receipt_id",
+        "new_receipt_id",
+        "new_holder_pubkey",
+        "transferred_at",
+        "holder_authorization",
+        "signature",
+    }
+    assert transfer.verify_record(record, key_manifest) is True
+    assert transfer.verify_authorization(record, keys.b64u(holder_kp.pub)) is True
+    assert record["receipt_id"] == old_receipt_id
+    assert record["new_receipt_id"] == new_receipt_id
+
+
+def test_transfer_record_with_revocation_out_writes_transferred_revocation(
+    tmp_path: Path,
+) -> None:
+    seed, _pub = _keygen(tmp_path, "issuer")
+    manifest_path = _manifest_init(tmp_path, seed)
+    holder_kp = keys.generate()
+    old_receipt_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    new_receipt_id = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
+    receipt_path = _write_transfer_receipt(tmp_path, seed, holder_kp, old_receipt_id)
+    authorization_path = _write_authorization_sig(tmp_path, old_receipt_id, holder_kp)
+    record_out = tmp_path / "record.json"
+    revocation_out = tmp_path / "revocation.json"
+
+    rc = cli.main(
+        [
+            "transfer",
+            "record",
+            "--receipt",
+            str(receipt_path),
+            "--new-receipt-id",
+            new_receipt_id,
+            "--new-holder-pubkey",
+            NEW_HOLDER_PUB_B64U,
+            "--transferred-at",
+            TRANSFERRED_AT,
+            "--holder-authorization",
+            str(authorization_path),
+            "--seed",
+            str(seed),
+            "--kid",
+            KID,
+            "--revocation-out",
+            str(revocation_out),
+            "--out",
+            str(record_out),
+        ]
+    )
+
+    assert rc == 0
+    revocation_record = json.loads(revocation_out.read_text(encoding="utf-8"))
+    key_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert revocation_record["status"] == "transferred"
+    assert revocation_record["receipt_id"] == old_receipt_id
+    assert revocation.verify_record(revocation_record, key_manifest) is True
+
+
+def test_transfer_record_hybrid_with_mldsa_seed(tmp_path: Path) -> None:
+    seed, _pub, mldsa_out = _keygen_hybrid(tmp_path, "issuer")
+    manifest_path = tmp_path / "manifest.json"
+    rc = cli.main(
+        [
+            "manifest",
+            "init",
+            "--issuer",
+            ISSUER,
+            "--kid",
+            KID,
+            "--seed",
+            str(seed),
+            "--valid-from",
+            VALID_FROM,
+            "--issued-at",
+            VALID_FROM,
+            "--mldsa-key",
+            str(mldsa_out),
+            "--out",
+            str(manifest_path),
+        ]
+    )
+    assert rc == 0
+    holder_kp = keys.generate()
+    old_receipt_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    new_receipt_id = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
+    receipt_path = _write_transfer_receipt(tmp_path, seed, holder_kp, old_receipt_id)
+    authorization_path = _write_authorization_sig(tmp_path, old_receipt_id, holder_kp)
+    out = tmp_path / "record.json"
+
+    rc = cli.main(
+        [
+            "transfer",
+            "record",
+            "--receipt",
+            str(receipt_path),
+            "--new-receipt-id",
+            new_receipt_id,
+            "--new-holder-pubkey",
+            NEW_HOLDER_PUB_B64U,
+            "--transferred-at",
+            TRANSFERRED_AT,
+            "--holder-authorization",
+            str(authorization_path),
+            "--seed",
+            str(seed),
+            "--kid",
+            KID,
+            "--mldsa-seed",
+            str(mldsa_out),
+            "--out",
+            str(out),
+        ]
+    )
+
+    assert rc == 0
+    record = json.loads(out.read_text(encoding="utf-8"))
+    assert "sig_ml_dsa_65" in record["signature"]
+    key_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert transfer.verify_record(record, key_manifest) is True
+
+
+def test_transfer_record_seed_and_out_same_path_exits_2(tmp_path: Path) -> None:
+    seed, _pub = _keygen(tmp_path, "issuer")
+    holder_kp = keys.generate()
+    old_receipt_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    receipt_path = _write_transfer_receipt(tmp_path, seed, holder_kp, old_receipt_id)
+    authorization_path = _write_authorization_sig(tmp_path, old_receipt_id, holder_kp)
+
+    rc = cli.main(
+        [
+            "transfer",
+            "record",
+            "--receipt",
+            str(receipt_path),
+            "--new-receipt-id",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+            "--new-holder-pubkey",
+            NEW_HOLDER_PUB_B64U,
+            "--transferred-at",
+            TRANSFERRED_AT,
+            "--holder-authorization",
+            str(authorization_path),
+            "--seed",
+            str(seed),
+            "--kid",
+            KID,
+            "--out",
+            str(seed),
+        ]
+    )
+
+    assert rc == 2
+
+
+@pytest.mark.parametrize(
+    "collision",
+    (
+        "out-seed",
+        "out-holder-authorization",
+        "out-mldsa-seed",
+        "out-receipt",
+        "revocation-out-out",
+        "revocation-out-seed",
+        "revocation-out-holder-authorization",
+        "revocation-out-mldsa-seed",
+        "revocation-out-receipt",
+    ),
+)
+def test_transfer_record_rejects_aliased_paths_before_writing(
+    tmp_path: Path, capsys: CapSys, collision: str
+) -> None:
+    seed, _pub, mldsa_seed = _keygen_hybrid(tmp_path, "issuer")
+    holder_kp = keys.generate()
+    old_receipt_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    receipt_path = _write_transfer_receipt(tmp_path, seed, holder_kp, old_receipt_id)
+    authorization_path = _write_authorization_sig(tmp_path, old_receipt_id, holder_kp)
+    record_out = tmp_path / "record.json"
+    revocation_out = tmp_path / "revocation.json"
+    expected_path: Path
+
+    if collision == "out-seed":
+        record_out = seed
+        expected_path = seed
+    elif collision == "out-holder-authorization":
+        record_out = authorization_path
+        expected_path = authorization_path
+    elif collision == "out-mldsa-seed":
+        record_out = mldsa_seed
+        expected_path = mldsa_seed
+    elif collision == "out-receipt":
+        record_out = receipt_path
+        expected_path = receipt_path
+    elif collision == "revocation-out-out":
+        record_out.write_text("record sentinel", encoding="utf-8")
+        revocation_out = record_out
+        expected_path = record_out
+    elif collision == "revocation-out-seed":
+        revocation_out = seed
+        expected_path = seed
+    elif collision == "revocation-out-holder-authorization":
+        revocation_out = authorization_path
+        expected_path = authorization_path
+    elif collision == "revocation-out-receipt":
+        revocation_out = receipt_path
+        expected_path = receipt_path
+    else:
+        revocation_out = mldsa_seed
+        expected_path = mldsa_seed
+    original = expected_path.read_text(encoding="utf-8")
+
+    rc = cli.main(
+        [
+            "transfer",
+            "record",
+            "--receipt",
+            str(receipt_path),
+            "--new-receipt-id",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+            "--new-holder-pubkey",
+            NEW_HOLDER_PUB_B64U,
+            "--transferred-at",
+            TRANSFERRED_AT,
+            "--holder-authorization",
+            str(authorization_path),
+            "--seed",
+            str(seed),
+            "--kid",
+            KID,
+            "--mldsa-seed",
+            str(mldsa_seed),
+            "--revocation-out",
+            str(revocation_out),
+            "--out",
+            str(record_out),
+        ]
+    )
+
+    assert rc == 2
+    assert capsys.readouterr().err != ""
+    assert expected_path.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize("authorization_kind", ("forged", "mismatched"))
+def test_transfer_record_rejects_invalid_holder_authorization_without_writing(
+    tmp_path: Path, capsys: CapSys, authorization_kind: str
+) -> None:
+    seed, _pub = _keygen(tmp_path, "issuer")
+    holder_kp = keys.generate()
+    old_receipt_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    receipt_path = _write_transfer_receipt(tmp_path, seed, holder_kp, old_receipt_id)
+    signer = keys.generate() if authorization_kind == "forged" else holder_kp
+    signed_new_holder = (
+        NEW_HOLDER_PUB_B64U
+        if authorization_kind == "forged"
+        else "__________________________________________8"
+    )
+    authorization_path = _write_authorization_sig(
+        tmp_path, old_receipt_id, signer
+    )
+    if authorization_kind == "mismatched":
+        authorization_path.write_text(
+            json.dumps(
+                {
+                    "sig": keys.b64u(
+                        transfer.sign_authorization(
+                            old_receipt_id, signed_new_holder, TRANSFERRED_AT, holder_kp
+                        )
+                    )
+                }
+            ),
+            encoding="utf-8",
+        )
+    out = tmp_path / "record.json"
+    revocation_out = tmp_path / "revocation.json"
+
+    rc = cli.main(
+        [
+            "transfer",
+            "record",
+            "--receipt",
+            str(receipt_path),
+            "--new-receipt-id",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+            "--new-holder-pubkey",
+            NEW_HOLDER_PUB_B64U,
+            "--transferred-at",
+            TRANSFERRED_AT,
+            "--holder-authorization",
+            str(authorization_path),
+            "--seed",
+            str(seed),
+            "--kid",
+            KID,
+            "--revocation-out",
+            str(revocation_out),
+            "--out",
+            str(out),
+        ]
+    )
+
+    assert rc == 2
+    assert "holder authorization" in capsys.readouterr().err
+    assert not out.exists()
+    assert not revocation_out.exists()
+
+
+def test_transfer_record_rejects_receipt_without_holder_pubkey(
+    tmp_path: Path, capsys: CapSys
+) -> None:
+    seed, _pub = _keygen(tmp_path, "issuer")
+    old_receipt_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    payload_path = _write_payload(
+        tmp_path,
+        name="old-payload.json",
+        receipt_id=old_receipt_id,
+        buyer={"pubkey": None},
+    )
+    receipt_path = _issue(tmp_path, seed, payload_path, out_name="old-envelope.json")
+    authorization_path = _write_authorization_sig(tmp_path, old_receipt_id, keys.generate())
+    out = tmp_path / "record.json"
+
+    rc = cli.main(
+        [
+            "transfer",
+            "record",
+            "--receipt",
+            str(receipt_path),
+            "--new-receipt-id",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+            "--new-holder-pubkey",
+            NEW_HOLDER_PUB_B64U,
+            "--transferred-at",
+            TRANSFERRED_AT,
+            "--holder-authorization",
+            str(authorization_path),
+            "--seed",
+            str(seed),
+            "--kid",
+            KID,
+            "--out",
+            str(out),
+        ]
+    )
+
+    assert rc == 2
+    assert "non-null buyer.pubkey" in capsys.readouterr().err
+    assert not out.exists()

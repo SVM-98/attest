@@ -26,7 +26,11 @@ _DUMMY_SIGNATURE_LINE = "— test-key AA==\n"
 
 def _checkpoint(note_bytes: bytes = NOTE_BYTES) -> tlog.Checkpoint:
     return tlog.Checkpoint(
-        origin="log.example/1", tree_size=1, root=b"\x00" * 32, note_bytes=note_bytes
+        origin="log.example/1",
+        tree_size=1,
+        root=b"\x00" * 32,
+        note_bytes=note_bytes,
+        signed_note_bytes=_checkpoint_text(note_bytes).encode(),
     )
 
 
@@ -109,6 +113,9 @@ def test_ots_proof_verifies_and_anchors_before_pinned_header_time() -> None:
     assert verdict.anchored_before == HEADER_TIME
     assert verdict.pq_surviving is True
     assert verdict.warnings == []
+    # No `anchor_profile` in the evidence -> legacy note-bytes-only
+    # commitment (G4): `note_only` flags it for `transparency.py`'s warning.
+    assert verdict.note_only is True
 
 
 def test_verify_anchor_requires_evidence_checkpoint_field() -> None:
@@ -213,6 +220,116 @@ def test_rfc3161_only_evidence_is_classical_corroboration_without_pq_or_anchor_t
     assert verdict.pq_surviving is False
     assert verdict.warnings == [
         "rfc3161 token accepted as opaque classical evidence, carries no post-horizon weight"
+    ]
+
+
+# --------------------------------------------------------------------------
+# Anchor profile v2 (G4): commitment over the FULL signed checkpoint, not
+# just its unsigned `note_bytes` header.
+# --------------------------------------------------------------------------
+
+
+def _working_chain_v2(
+    signed_note_bytes: bytes = _checkpoint_text().encode(),
+) -> tuple[list[list[str]], str]:
+    """Same op sequence as `_working_chain`, but starting from
+    `SHA256(signed_note_bytes)` — the v2 accumulator seed."""
+    sibling = bytes.fromhex("ab" * 32)
+    prefix = bytes.fromhex("cd" * 16)
+    acc = hashlib.sha256(signed_note_bytes).digest()
+    acc = acc + sibling
+    acc = hashlib.sha256(acc).digest()
+    acc = prefix + acc
+    acc = hashlib.sha256(acc).digest()
+    ops: list[list[str]] = [
+        ["append", sibling.hex()],
+        ["sha256"],
+        ["prepend", prefix.hex()],
+        ["sha256"],
+    ]
+    return ops, acc.hex()
+
+
+def test_v2_anchor_commits_over_the_full_signed_note() -> None:
+    ops, root = _working_chain_v2()
+    proof = _ots_proof(ops=ops, header_merkle_root=root)
+    evidence = {**_evidence([proof]), "anchor_profile": "signed-note-v2"}
+    verdict = anchor.verify_anchor(evidence, _checkpoint(), _policy(merkle_root=root))
+    assert verdict.anchored is True
+    assert verdict.anchored_before == HEADER_TIME
+    assert verdict.pq_surviving is True
+    assert verdict.note_only is False
+    assert verdict.warnings == []
+
+
+def test_v2_anchor_over_note_bytes_only_fails() -> None:
+    # The op-chain was built from SHA256(note_bytes) alone (the v1 seed) —
+    # under a declared v2 profile the verifier starts from
+    # SHA256(signed_note_bytes) instead, so the replayed chain lands on a
+    # different root than the one pinned for the v1-seeded chain, and the
+    # anchor does not verify. This is exactly the TM-33 property: a v1-style
+    # commitment cannot pass as v2 proof of the signed note's existence.
+    ops, root = _working_chain()
+    proof = _ots_proof(ops=ops, header_merkle_root=root)
+    evidence = {**_evidence([proof]), "anchor_profile": "signed-note-v2"}
+    verdict = anchor.verify_anchor(evidence, _checkpoint(), _policy(merkle_root=root))
+    assert verdict.anchored is False
+    assert verdict.pq_surviving is False
+    assert verdict.warnings == [
+        "proof[0]: ots op-chain result does not match header_merkle_root; anchor_profile "
+        "signed-note-v2 requires the accumulator to start from "
+        "SHA256(checkpoint.signed_note_bytes) — this evidence looks like a note-v1 "
+        "commitment presented as signed-note-v2"
+    ]
+
+
+def test_v2_anchor_mismatch_not_matching_legacy_seed_stays_generic() -> None:
+    """A v2-declared op-chain that matches NEITHER seed gets the profile-aware
+    "requires" clause but not the "looks like note-v1" diagnosis — that extra
+    clause is only added when the legacy seed's replay genuinely matches."""
+    ops, root = _working_chain(note_bytes=b"neither-seed-produces-this-root\n")
+    proof = _ots_proof(ops=ops, header_merkle_root=root)
+    evidence = {**_evidence([proof]), "anchor_profile": "signed-note-v2"}
+    verdict = anchor.verify_anchor(evidence, _checkpoint(), _policy(merkle_root=root))
+    assert verdict.anchored is False
+    assert verdict.warnings == [
+        "proof[0]: ots op-chain result does not match header_merkle_root; anchor_profile "
+        "signed-note-v2 requires the accumulator to start from SHA256(checkpoint.signed_note_bytes)"
+    ]
+
+
+def test_v1_anchor_explicit_note_v1_profile_behaves_like_absent() -> None:
+    evidence = {**_evidence([_ots_proof()]), "anchor_profile": "note-v1"}
+    verdict = anchor.verify_anchor(evidence, _checkpoint(), _policy())
+    assert verdict.anchored is True
+    assert verdict.anchored_before == HEADER_TIME
+    assert verdict.note_only is True
+    assert verdict.warnings == []
+
+
+def test_v1_anchor_explicit_null_profile_behaves_like_absent() -> None:
+    evidence = {**_evidence([_ots_proof()]), "anchor_profile": None}
+    verdict = anchor.verify_anchor(evidence, _checkpoint(), _policy())
+    assert verdict.anchored is True
+    assert verdict.note_only is True
+    assert verdict.warnings == []
+
+
+def test_verify_anchor_rejects_unrecognized_anchor_profile() -> None:
+    evidence = {**_evidence([_ots_proof()]), "anchor_profile": "signed-note-v3"}
+    verdict = anchor.verify_anchor(evidence, _checkpoint(), _policy())
+    assert verdict.anchored is False
+    assert verdict.warnings == [
+        "evidence.anchor_profile must be 'note-v1' or 'signed-note-v2', got 'signed-note-v3'"
+    ]
+
+
+def test_verify_anchor_rejects_non_string_anchor_profile() -> None:
+    evidence = {**_evidence([_ots_proof()]), "anchor_profile": 2}
+    verdict = anchor.verify_anchor(evidence, _checkpoint(), _policy())
+    assert verdict.anchored is False
+    assert verdict.warnings == [
+        "evidence.anchor_profile must be 'note-v1' or 'signed-note-v2', got 2"
     ]
 
 
@@ -408,7 +525,7 @@ def test_verify_anchor_unknown_kind_is_ignored_not_fatal() -> None:
         ("a\\b", r"'a\\b'"),
         ("\u200b", r"'\u200b'"),
         ("🎉", r"'\U0001f389'"),
-        ("\U0002EBF0", r"'\U0002ebf0'"),
+        ("\U0002ebf0", r"'\U0002ebf0'"),
         ("\x7f", r"'\x7f'"),
     ],
 )
