@@ -239,3 +239,16 @@ def test_serve_fails_fast_with_rc_2_on_config_error(
     rc = cli.main(["serve", "--config", str(missing_config)])
     assert rc == 2
     assert "config error" in capsys.readouterr().err
+
+
+# -- access-log token redaction (security review) --------------------
+
+
+def test_redact_tokens_hides_download_and_claim_tokens() -> None:
+    # /r/<download-token> and /itch/claim/<token> both carry a capability
+    # token in the path -- the default WSGI access log must never write it.
+    assert cli._redact_tokens("GET /r/abc123 HTTP/1.1") == "GET /r/<redacted> HTTP/1.1"
+    assert (
+        cli._redact_tokens("GET /itch/claim/tok9 HTTP/1.1") == "GET /itch/claim/<redacted> HTTP/1.1"
+    )
+    assert cli._redact_tokens("GET /healthz HTTP/1.1") == "GET /healthz HTTP/1.1"

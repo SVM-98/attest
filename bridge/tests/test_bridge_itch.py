@@ -290,11 +290,124 @@ def test_purchase_rejected_dead_letters_but_claim_still_completes(
     dead_letters = ledger.unresolved_dead_letters()
     assert len(dead_letters) == 1
     assert dead_letters[0].platform == "itch"
-    assert dead_letters[0].purchase_id == "5003"
+    # T9 review fix (FIX 2b): a `normalize()` failure is now caught BEFORE the
+    # purchase id is extracted (extraction only happens via
+    # `normalized.platform_purchase_id`, which never exists on this path), so
+    # the dead letter's purchase_id is None here -- a deliberate, spec-exact
+    # consequence of the crash-proofing restructure, not a regression. The
+    # raw purchase JSON (including "id": 5003) is still fully preserved in
+    # raw_json for operator triage.
+    assert dead_letters[0].purchase_id is None
+    assert '"id": 5003' in dead_letters[0].raw_json
     claim = ledger.get_claim(token)
     assert claim is not None
     assert claim.status == "confirmed"
     assert claim.result_download_token is None  # nothing to download
+
+
+# -- ItchPoller.tick: purchase-row validation + crash-proofing (FIX 2) --------
+
+
+def test_purchase_with_null_id_is_dead_lettered_not_signed_as_None(
+    ledger: Ledger, core: IssuingCore
+) -> None:
+    # A `null`/missing "id" must never be coerced to the literal string
+    # "None" and signed -- `ItchAdapter.normalize` now rejects it before any
+    # field mapping, and `_drain_claim` dead-letters it like any other
+    # unnormalizable-but-API-confirmed purchase.
+    now = datetime(2026, 7, 24, 10, 0, 0, tzinfo=UTC)
+    token = ledger.enqueue_claim("buyer@example.com", "123456", now=now.strftime(_RFC3339))
+    purchases = [_purchase_json(id=None, game_id=123456, status="settled")]
+    fake_http_get, _ = _fake_http_get(purchases)
+    adapter = ItchAdapter(api_key="itch_key", http_get=fake_http_get)
+    poller = ItchPoller(adapter=adapter, ledger=ledger, core=core)
+
+    poller.tick(now=now)
+
+    assert ledger.get_receipt("itch", "None") is None
+    dead_letters = ledger.unresolved_dead_letters()
+    assert len(dead_letters) == 1
+    assert dead_letters[0].platform == "itch"
+    claim = ledger.get_claim(token)
+    assert claim is not None
+    assert claim.status == "confirmed"
+
+
+def test_non_dict_purchase_row_is_skipped_without_crashing(
+    ledger: Ledger, core: IssuingCore
+) -> None:
+    # A malformed (non-object) row in the `purchases` list must be skipped,
+    # not crash the tick -- and a later valid row in the same response must
+    # still be issued.
+    now = datetime(2026, 7, 24, 10, 0, 0, tzinfo=UTC)
+    token = ledger.enqueue_claim("buyer@example.com", "123456", now=now.strftime(_RFC3339))
+    valid = _purchase_json(id=7001, game_id=123456, status="settled")
+    fake_http_get, _ = _fake_http_get(["garbage", valid])
+    adapter = ItchAdapter(api_key="itch_key", http_get=fake_http_get)
+    poller = ItchPoller(adapter=adapter, ledger=ledger, core=core)
+
+    poller.tick(now=now)  # must not raise
+
+    stored = ledger.get_receipt("itch", "7001")
+    assert stored is not None
+    claim = ledger.get_claim(token)
+    assert claim is not None
+    assert claim.status == "confirmed"
+
+
+def test_unexpected_core_error_defers_claim_and_poller_survives(
+    ledger: Ledger, core: IssuingCore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An unanticipated exception from `core.process` (e.g. a signing
+    # IssueError) must neither propagate out of `tick` nor abandon the claim
+    # -- it gets deferred on the normal backoff, exactly like an API miss.
+    now = datetime(2026, 7, 24, 10, 0, 0, tzinfo=UTC)
+    token = ledger.enqueue_claim("buyer@example.com", "123456", now=now.strftime(_RFC3339))
+    purchases = [_purchase_json(id=8001, game_id=123456, status="settled")]
+    fake_http_get, _ = _fake_http_get(purchases)
+    adapter = ItchAdapter(api_key="itch_key", http_get=fake_http_get)
+    poller = ItchPoller(adapter=adapter, ledger=ledger, core=core, backoff_base_seconds=60)
+
+    def boom(purchase: object) -> None:
+        raise RuntimeError("unexpected signing failure")
+
+    monkeypatch.setattr(core, "process", boom)
+
+    poller.tick(now=now)  # must not raise
+
+    assert ledger.get_receipt("itch", "8001") is None
+    claim = ledger.get_claim(token)
+    assert claim is not None
+    assert claim.status == "pending"
+    assert claim.attempts == 1
+    assert claim.next_attempt_at == (now + timedelta(seconds=60)).strftime(_RFC3339)
+
+
+def test_run_forever_survives_a_tick_exception(ledger: Ledger, core: IssuingCore) -> None:
+    # Last-resort guard: even if `tick` itself somehow raises (bypassing its
+    # own per-claim isolation), `run_forever` must not let that kill the
+    # sole daemon thread -- it logs and keeps looping.
+    import threading
+
+    fake_http_get, _ = _fake_http_get([])
+    adapter = ItchAdapter(api_key="key", http_get=fake_http_get)
+    poller = ItchPoller(adapter=adapter, ledger=ledger, core=core)
+    stop = threading.Event()
+
+    tick_count = 0
+
+    def failing_then_stopping_tick(*, now: datetime) -> None:
+        nonlocal tick_count
+        tick_count += 1
+        if tick_count == 1:
+            raise RuntimeError("due_claims() blew up")
+        stop.set()
+
+    poller.tick = failing_then_stopping_tick  # type: ignore[method-assign]
+
+    poller.run_forever(stop, interval_seconds=0)  # must return, not raise
+
+    assert tick_count == 2
 
 
 # -- ItchPoller.tick: backoff/exhaustion arithmetic ---------------------------
@@ -340,6 +453,50 @@ def test_claim_is_exhausted_after_reaching_max_attempts(ledger: Ledger, core: Is
     assert claim is not None
     assert claim.status == "exhausted"
     assert ledger.due_claims((now + timedelta(seconds=1000)).strftime(_RFC3339)) == []
+
+
+def test_claim_gets_exactly_max_attempts_api_calls(ledger: Ledger, core: IssuingCore) -> None:
+    # Off-by-one fix (FIX 1): a claim capped at `max_attempts` must get
+    # EXACTLY that many live API fetches before exhausting -- not
+    # max_attempts + 1. The old `claim.attempts >= self._max_attempts` check
+    # exhausted one tick too late, because the failing fetch that just
+    # happened isn't reflected in `claim.attempts` until AFTER
+    # `_defer_or_exhaust` increments it via `defer_claim` -- so the fetch
+    # that pushes `attempts` up to `max_attempts` was still allowed to
+    # happen, for `max_attempts + 1` fetches total.
+    now = datetime(2026, 7, 24, 10, 0, 0, tzinfo=UTC)
+    call_count = 0
+
+    def always_failing(url: str, headers: dict[str, str]) -> bytes:
+        nonlocal call_count
+        call_count += 1
+        raise urllib.error.HTTPError(url, 500, "itch API error", {}, None)  # type: ignore[arg-type]
+
+    token = ledger.enqueue_claim("buyer@example.com", "123456", now=now.strftime(_RFC3339))
+    adapter = ItchAdapter(api_key="key", http_get=always_failing)
+    poller = ItchPoller(
+        adapter=adapter, ledger=ledger, core=core, max_attempts=2, backoff_base_seconds=1
+    )
+
+    # Tick repeatedly, each time advancing `now` to (at least) the claim's own
+    # `next_attempt_at`, until it exhausts -- a generous ceiling (10 ticks) so
+    # this fails loudly (not by looping forever) if the cap ever slips.
+    current = now
+    for _ in range(10):
+        claim = ledger.get_claim(token)
+        assert claim is not None
+        if claim.status == "exhausted":
+            break
+        next_attempt_at = datetime.strptime(claim.next_attempt_at, _RFC3339).replace(tzinfo=UTC)
+        current = max(current, next_attempt_at)
+        poller.tick(now=current)
+    else:
+        pytest.fail("claim never reached 'exhausted' within 10 ticks")
+
+    final = ledger.get_claim(token)
+    assert final is not None
+    assert final.status == "exhausted"
+    assert call_count == 2  # exactly max_attempts -- never max_attempts + 1
 
 
 def test_api_success_with_zero_purchases_is_treated_like_a_miss(
