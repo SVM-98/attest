@@ -26,12 +26,20 @@ set -eu
 umask 077
 
 # materialize <dest-path> <base64-content>: decode (tolerant of GNU line-wrapped
-# base64) to a sibling temp file, then atomic rename. No secret is ever printed.
+# base64) into a unique sibling temp file created 0600 by mktemp, then atomic
+# rename into place. A failed decode removes the temp and aborts, so no partial
+# or predictably-named file is left at (or beside) the real path, and the write
+# never follows a pre-placed symlink. No secret is ever printed.
 materialize() {
     dest="$1"
-    tmp="$dest.tmp.$$"
-    mkdir -p "$(dirname "$dest")"
-    printf '%s' "$2" | base64 -d > "$tmp"
+    dir="$(dirname "$dest")"
+    mkdir -p "$dir"
+    tmp="$(mktemp "$dir/.attest-bridge.XXXXXX")"
+    if ! printf '%s' "$2" | base64 -d > "$tmp"; then
+        rm -f "$tmp"
+        echo "attest-bridge entrypoint: failed to decode material for $dest" >&2
+        exit 1
+    fi
     mv "$tmp" "$dest"
 }
 

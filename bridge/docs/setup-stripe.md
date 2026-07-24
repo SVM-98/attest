@@ -50,8 +50,10 @@ One deployment-plumbing exception: on platforms that can't mount a file
 before first boot (Render), you supply the key as a base64 environment
 variable and the container entrypoint decodes it to a `0600` file at startup,
 then unsets the variable before starting the server — so the running bridge
-still holds the key only on disk, and the base64 value lives only in your
-platform's secret store (see the Render section of [deploy.md](deploy.md)).
+still holds the key only on disk, and the base64 value's only persistent source
+is your platform's secret store (it is present in the entrypoint's environment
+only transiently, until that unset; see the Render section of
+[deploy.md](deploy.md)).
 Prefer a real mounted file (Compose bind mount, Fly `[[files]]`) when you can.
 
 ## 2. Create and publish your key manifest
