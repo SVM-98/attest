@@ -12,7 +12,11 @@ import json
 from typing import Any
 
 _INT_MAX = 2**53  # exclusive
-_MAX_DEPTH = 256  # matches the TS parser cap; bounds parse/reject-surrogate recursion
+MAX_DEPTH = 256  # matches the TS parser cap; bounds parse/reject-surrogate recursion.
+# Public (2026-07-22 fix wave): this is the single normative nesting-depth
+# ceiling attest-versioning.md §5's structural-ceilings amendment (v0.1 §11.3)
+# refers to — `validate.MAX_JSON_DEPTH` aliases this constant rather than
+# defining a second, smaller one.
 _ESCAPES = {
     0x08: "\\b",
     0x09: "\\t",
@@ -128,7 +132,7 @@ def _reject_surrogates(obj: Any) -> None:
 
 
 def _check_depth(text: str) -> None:
-    """Reject nesting beyond ``_MAX_DEPTH`` before ``json.loads`` runs, so a
+    """Reject nesting beyond ``MAX_DEPTH`` before ``json.loads`` runs, so a
     pathologically nested payload can never drive JSON parsing or surrogate
     rejection into an uncaught ``RecursionError`` (2026-07-13 review, finding 3).
     Mirrors the TS recursive-descent depth cap. Brackets inside strings are
@@ -149,7 +153,7 @@ def _check_depth(text: str) -> None:
             in_string = True
         elif ch in "[{":
             depth += 1
-            if depth > _MAX_DEPTH:
+            if depth > MAX_DEPTH:
                 raise CanonError("maximum nesting depth exceeded")
         elif ch in "]}":
             depth -= 1

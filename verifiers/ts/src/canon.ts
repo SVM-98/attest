@@ -10,7 +10,11 @@ export interface JsonObject { [k: string]: JsonValue }
 // would throw a non-CanonError RangeError). 256 is a huge margin over real attest
 // receipts (~4-5 deep) yet far below the JS stack limit, keeping the parsed tree
 // shallow enough that rejectSurrogates and the Task 5 serializer recurse safely.
-const MAX_DEPTH = 256
+// Public (2026-07-22 fix wave): the single normative nesting-depth ceiling
+// attest-versioning.md §5's structural-ceilings amendment (v0.1 §11.3)
+// refers to -- schema.ts's MAX_JSON_DEPTH aliases this rather than defining
+// a second, smaller one.
+export const MAX_DEPTH = 256
 class Reader {
   i = 0
   depth = 0

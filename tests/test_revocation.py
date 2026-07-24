@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
-from attest import keys, manifests, revocation
+from attest import canon, keys, manifests, revocation
 
 ISSUER = "store.example.com"
 KID = f"{ISSUER}/keys/test#ed25519-1"
@@ -62,6 +63,34 @@ def test_tampered_revoked_at_breaks_verification() -> None:
     record = revocation.build_record(RECEIPT_ID, "revoked", "2026-07-03T00:00:00Z", KP, KID)
     record["revoked_at"] = "2099-01-01T00:00:00Z"
     assert not revocation.verify_record(record, _key_manifest())
+
+
+# --- record_hash (G5: revocation-record log entries) -----------------------------
+
+
+def test_record_hash_is_sha256_of_canonical_bytes() -> None:
+    record = revocation.build_record(RECEIPT_ID, "revoked", "2026-07-03T00:00:00Z", KP, KID)
+    expected = hashlib.sha256(canon.canonical_bytes(record)).hexdigest()
+    assert revocation.record_hash(record) == expected
+    assert len(revocation.record_hash(record)) == 64
+
+
+def test_record_hash_covers_signature_member() -> None:
+    """Two records differing ONLY in their signature (e.g. re-signed by a
+    different key) must hash differently — `record_hash` commits to the
+    WHOLE record, not just the unsigned body (§8, G5)."""
+    record_a = revocation.build_record(RECEIPT_ID, "revoked", "2026-07-03T00:00:00Z", KP, KID)
+    record_b = revocation.build_record(
+        RECEIPT_ID, "revoked", "2026-07-03T00:00:00Z", OTHER_KP, OTHER_KID
+    )
+    assert revocation.record_hash(record_a) != revocation.record_hash(record_b)
+
+
+def test_record_hash_changes_with_tampered_status() -> None:
+    record = revocation.build_record(RECEIPT_ID, "revoked", "2026-07-03T00:00:00Z", KP, KID)
+    original = revocation.record_hash(record)
+    record["status"] = "not-revoked-anymore"
+    assert revocation.record_hash(record) != original
 
 
 def test_signer_kid_not_in_manifest_false() -> None:
