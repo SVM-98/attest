@@ -2,16 +2,24 @@
 # the whole bridge/ tree — see bridge/deploy/Dockerfile):
 #
 #   fly apps create attest-bridge
-#   fly volumes create attest_bridge_config --region iad --size 1
-#   fly volumes create attest_bridge_secrets --region iad --size 1
 #   fly volumes create attest_bridge_data --region iad --size 1
-#   fly secrets set STRIPE_WEBHOOK_SECRET=whsec_... STRIPE_API_KEY=sk_... ITCH_API_KEY=... SMTP_PASSWORD=...
+#
+# A Fly Machine can mount only ONE volume, so config + keys do NOT use
+# volumes: they ride in as base64-encoded secrets that Fly writes to disk at
+# boot (the `[[files]]` blocks below). Set them all before the first deploy:
+#
+#   fly secrets set \
+#     BRIDGE_TOML=$(cat bridge.toml | base64) \
+#     KEY_MANIFEST=$(cat key-manifest.json | base64) \
+#     ISSUER_SEED=$(cat issuer.seed | base64) \
+#     ISSUER_MLDSA=$(cat issuer.mldsa.json | base64) \
+#     STRIPE_WEBHOOK_SECRET=whsec_... STRIPE_API_KEY=sk_... ITCH_API_KEY=... SMTP_PASSWORD=...
+#
 #   fly deploy --config bridge/deploy/fly.toml
 #
-# The three volumes above start EMPTY. Populate them once, after the first
-# deploy: `fly ssh sftp shell`, then `put` bridge.toml and key-manifest.json
-# into /etc/attest-bridge, and issuer.seed / issuer.mldsa.json into /secrets.
-# See bridge/docs/deploy.md.
+# The one volume (`attest_bridge_data`) starts empty and needs no manual
+# population — it only ever holds the Ledger's sqlite3 file, which the
+# bridge creates itself on first run. See bridge/docs/deploy.md.
 app = "attest-bridge"
 primary_region = "iad"
 
@@ -19,9 +27,11 @@ primary_region = "iad"
   dockerfile = "bridge/deploy/Dockerfile"
 
 [env]
-  # Non-secret only — this whole table is safe to commit. The four secrets
-  # (STRIPE_WEBHOOK_SECRET, STRIPE_API_KEY, ITCH_API_KEY, SMTP_PASSWORD) are
-  # never set here: `fly secrets set STRIPE_WEBHOOK_SECRET=... STRIPE_API_KEY=... ITCH_API_KEY=... SMTP_PASSWORD=...`
+  # Non-secret only — this whole table is safe to commit. Everything else
+  # (the four merchant secrets STRIPE_WEBHOOK_SECRET/STRIPE_API_KEY/
+  # ITCH_API_KEY/SMTP_PASSWORD, and the four base64-encoded file secrets
+  # BRIDGE_TOML/KEY_MANIFEST/ISSUER_SEED/ISSUER_MLDSA) is `fly secrets set`,
+  # never set here.
 
 [http_service]
   internal_port = 8080
@@ -37,14 +47,27 @@ primary_region = "iad"
     method = "GET"
     path = "/healthz"
 
-[[mounts]]
-  source = "attest_bridge_config"
-  destination = "/etc/attest-bridge"
-
-[[mounts]]
-  source = "attest_bridge_secrets"
-  destination = "/secrets"
-
+# The Ledger — the ONE volume a Fly Machine can mount.
 [[mounts]]
   source = "attest_bridge_data"
   destination = "/var/lib/attest-bridge"
+
+# Config + key manifest (not secret, but private to your deployment) and
+# your signing keys (genuinely secret) — written to disk at boot from the
+# base64-encoded secrets set above, matching the paths the Dockerfile's
+# ENTRYPOINT and bridge/examples/bridge.toml already expect.
+[[files]]
+  guest_path = "/etc/attest-bridge/bridge.toml"
+  secret_name = "BRIDGE_TOML"
+
+[[files]]
+  guest_path = "/etc/attest-bridge/key-manifest.json"
+  secret_name = "KEY_MANIFEST"
+
+[[files]]
+  guest_path = "/secrets/issuer.seed"
+  secret_name = "ISSUER_SEED"
+
+[[files]]
+  guest_path = "/secrets/issuer.mldsa.json"
+  secret_name = "ISSUER_MLDSA"

@@ -7,6 +7,7 @@
 #   cp <your bridge.toml> <your key-manifest.json> etc/
 #   cp <your issuer.seed> <your issuer.mldsa.json> secrets/
 #   printf 'STRIPE_WEBHOOK_SECRET=whsec_...\n' > .env   # + STRIPE_API_KEY / ITCH_API_KEY / SMTP_PASSWORD, whichever your bridge.toml references
+#   chmod 600 .env
 #
 # See bridge/docs/setup-stripe.md and bridge/docs/deploy.md for the full walkthrough.
 services:
@@ -15,7 +16,12 @@ services:
       context: ../..
       dockerfile: bridge/deploy/Dockerfile
     ports:
-      - "8080:8080"
+      # Loopback only — the bridge speaks plain HTTP, and a webhook body /
+      # downloaded receipt both carry a buyer-binding salt (a secret in
+      # transit). Put a TLS-terminating reverse proxy (Caddy, nginx, or a
+      # tunnel) in front of this on the public interface; never publish
+      # 8080 on "0.0.0.0"/all interfaces directly.
+      - "127.0.0.1:8080:8080"
     volumes:
       - ./etc:/etc/attest-bridge:ro    # bridge.toml + key-manifest.json
       - ./secrets:/secrets:ro          # issuer.seed + issuer.mldsa.json (0600 on the host)

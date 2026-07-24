@@ -4,14 +4,29 @@ This is the whole path from nothing to a real, offline-verifiable attest
 receipt issued automatically at the moment of sale, for a merchant selling
 through Stripe Checkout or Payment Links. Every command below is
 copy-pasteable and runs exactly as written — nothing here requires reading
-this repo's source. Budget under an hour.
+this repo's source.
 
-You will need: a terminal with Python 3.12+ and `pip install attest-receipts
-attest-bridge` (or a venv — see the root [README](../../README.md#quickstart)
-for `attest`; `attest-bridge` is not yet on PyPI, install it from a checkout:
-`pip install ./bridge`), a Stripe account (test mode is enough to complete
-every step here), and somewhere to run the bridge (see
-[deploy.md](deploy.md) for that half).
+You will need: a terminal with Python 3.12+, a Stripe account (test mode is
+enough to complete every step here), and somewhere to run the bridge itself
+once it's configured (see [deploy.md](deploy.md) for that half — the deploy
+image already has `attest`/`attest-bridge` installed for running `serve`;
+you still need both CLIs on your own machine too, for steps 1, 2, 3, and 8
+below).
+
+`attest-bridge` is **not published on PyPI** (`Private :: Do Not Upload` —
+it is unreleased); never run `pip install attest-bridge` — that name may
+resolve to an unrelated package. Install it from a source checkout instead:
+
+```sh
+git clone https://github.com/SVM-98/attest.git
+cd attest
+pip install ./bridge
+```
+
+`pip install ./bridge` pulls in `attest-receipts` (the published PyPI
+package that provides the `attest` CLI used in steps 1–2 and 8) as its
+declared dependency, so this one command gives you both `attest` and
+`attest-bridge` locally.
 
 ## 1. Generate your issuer keypair
 
@@ -25,6 +40,11 @@ send them anywhere); `issuer.pub` is public. `--hybrid` is required for the
 bridge specifically — it signs every receipt with both an Ed25519 and an
 ML-DSA-65 (post-quantum) signature, and the bridge refuses to start without
 the ML-DSA leg (see step 2).
+
+The bridge's own handling of these files, once deployed, is the same
+guarantee: your signing key is read into memory only to sign a receipt, and
+is never exported, logged, or written back out by the bridge — the on-disk
+copies you mounted (or backed up) are the only copies that exist.
 
 ## 2. Create and publish your key manifest
 
@@ -87,9 +107,24 @@ Edit it:
   [setup-itch.md](setup-itch.md)), and the `[delivery]` table if you're happy
   with download-link-only (no receipt emails — see step 7).
 
+Before deploying, validate the config, keys, and product catalog in one
+shot — this catches a typo'd path or a malformed product table before it
+becomes a 500 on your first real webhook:
+
+```sh
+attest-bridge check-config --config bridge.toml
+```
+
+A clean config prints a short summary — issuer + kid, `public_base_url`,
+the product keys it found, whether `[stripe]` is configured, and whether
+delivery is SMTP or download-link-only — and exits `0`; anything wrong is
+reported as a `config error:` naming the exact field. This step never
+touches the network or creates the Ledger — it's pure local validation,
+safe to run as many times as you like while editing.
+
 ## 4. Deploy
 
-See [deploy.md](deploy.md) for the four one-click targets (Docker Compose,
+See [deploy.md](deploy.md) for the four deploy targets (Docker Compose,
 Fly.io, Render, Cloud Run) and the four secret env vars
 (`STRIPE_WEBHOOK_SECRET`, `STRIPE_API_KEY`, `ITCH_API_KEY`, `SMTP_PASSWORD` —
 set only the ones your `bridge.toml` references).
@@ -242,6 +277,7 @@ receipt it just issued (the synthetic event above used session id
 
 ```sh
 curl "http://127.0.0.1:8080/stripe/receipt?session_id=cs_test_1" -o receipt.attest
+chmod 600 receipt.attest   # the envelope carries delivery.salt, a buyer-binding secret
 attest verify receipt.attest --trust-dir <dir-containing-key-manifest.json>
 ```
 
