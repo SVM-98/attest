@@ -217,6 +217,17 @@ def test_non_canonical_timestamp_is_rejected(ts_field: str) -> None:
         _adapter().parse_event(_BODY, header, now=_T)
 
 
+def test_overlong_timestamp_is_rejected_as_signature_error_not_valueerror() -> None:
+    # A 5000-digit `t` passes the ASCII-digit gate but exceeds CPython's
+    # 4300-digit integer-parse limit; it must be rejected as a
+    # StripeSignatureError (the verifier's only-error contract), never escape as
+    # a raw ValueError that the T8 webhook handler would surface as a 500.
+    mac = hmac.new(_SECRET.encode(), f"{_T}.".encode() + _BODY, hashlib.sha256).hexdigest()
+    header = f"t={'9' * 5000},v1={mac}"
+    with pytest.raises(StripeSignatureError):
+        _adapter().parse_event(_BODY, header, now=_T)
+
+
 def test_default_http_get_refuses_a_non_https_url_before_opening() -> None:
     # The injectable `http_get` is replaced in every other test; this pins the
     # real default's https guard directly (no network — it raises before open).

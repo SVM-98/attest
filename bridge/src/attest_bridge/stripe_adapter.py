@@ -45,6 +45,10 @@ from attest_bridge.model import (
 )
 
 _DEFAULT_TOLERANCE_SECONDS = 300
+# A real unix-seconds timestamp is ~10 digits; this generous ceiling keeps the
+# value far below CPython's 4300-digit integer-string-conversion limit, so
+# `int()` on a validated timestamp can never raise (see `verify_stripe_signature`).
+_MAX_TIMESTAMP_DIGITS = 20
 _LINE_ITEMS_URL = "https://api.stripe.com/v1/checkout/sessions/{session_id}/line_items"
 
 
@@ -99,7 +103,13 @@ def verify_stripe_signature(
     if len(t_values) != 1:
         raise StripeSignatureError("Stripe-Signature header must carry exactly one timestamp ('t')")
     ts_raw = t_values[0]
-    if not (ts_raw.isascii() and ts_raw.isdigit()):
+    # ASCII decimal digits only (above), and short enough to be a real unix
+    # timestamp: an over-long digit run is malformed remote input, not a
+    # timestamp, and letting it reach `int()` would raise a raw ValueError once
+    # it crosses CPython's 4300-digit integer-parse limit — escaping this
+    # verifier's "only StripeSignatureError" contract (a 500 in the T8 handler
+    # instead of a clean rejection).
+    if not (ts_raw.isascii() and ts_raw.isdigit()) or len(ts_raw) > _MAX_TIMESTAMP_DIGITS:
         raise StripeSignatureError("malformed timestamp ('t') in Stripe-Signature header")
     t = int(ts_raw)
 
