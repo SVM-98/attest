@@ -40,9 +40,16 @@ def _now_rfc3339() -> str:
 class _ThreadingWSGIServer(socketserver.ThreadingMixIn, WSGIServer):
     """WSGI server that dispatches each request to its own thread.
 
-    Safe by construction: `Ledger` (T4) serializes every access — reads and
-    writes alike — under its own connection lock, so no additional locking
-    is added here or in `http.py`.
+    Concurrency rests on TWO distinct, both-load-bearing locks — do not remove
+    either:
+    1. `Ledger` (T4) serializes every individual access — reads and writes
+       alike — under its own connection lock, so no single statement races.
+    2. `make_app` (`http.py`) holds a per-app lock across the webhook
+       check-then-act critical section (`seen_event` -> issue/record ->
+       deliver -> `mark_event`). The Ledger lock makes each statement atomic
+       but NOT that whole workflow, so without this second lock two concurrent
+       deliveries of the same event would both pass `seen_event` and
+       double-issue / double-deliver.
     """
 
     daemon_threads = True
