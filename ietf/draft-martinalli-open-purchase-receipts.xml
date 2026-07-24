@@ -1,0 +1,1343 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rfc xmlns:xi="http://www.w3.org/2001/XInclude"
+     category="info"
+     docName="draft-martinalli-open-purchase-receipts-00"
+     ipr="trust200902"
+     submissionType="independent"
+     version="3">
+  <front>
+    <title abbrev="attest Purchase Receipts">attest: Portable, Offline-Verifiable Digital Purchase Receipts</title>
+    <author fullname="Samuele Martinalli" initials="S." surname="Martinalli">
+      <address>
+        <email>SVM-98@users.noreply.github.com</email>
+      </address>
+    </author>
+    <date year="2026" month="July" day="23"/>
+    <area>General</area>
+    <workgroup>Individual Submission</workgroup>
+    <keyword>purchase receipt</keyword>
+    <keyword>digital preservation</keyword>
+    <keyword>JSON Canonicalization Scheme</keyword>
+    <keyword>Ed25519</keyword>
+    <keyword>ML-DSA</keyword>
+    <abstract>
+      <t>This document specifies attest, a signed digital purchase-receipt
+      envelope that a buyer holds and that any party can verify offline,
+      without contacting the issuer or any third-party service. It defines
+      the receipt envelope and payload format, a restricted JSON
+      canonicalization profile ("attest-JCS", built on RFC 8785), a pinned
+      Ed25519 signature ruleset, an optional hybrid Ed25519+ML-DSA-65
+      post-quantum-resistant signature profile, issuer key and artifact
+      manifests with rotation and compromise handling, a layered
+      verification algorithm, and revocation-record semantics. This document
+      is a snapshot profile: it distills, and never supersedes, the living
+      attest specification maintained in the attest source repository. It
+      normatively specifies exactly the core receipt format and the hybrid
+      signature profile; the living specification's transparency-log,
+      anchoring, and issuer-mediated transfer material is summarized only as
+      non-normative pointers in <xref target="extensions"/> of this
+      document.</t>
+    </abstract>
+  </front>
+  <middle>
+
+    <section anchor="intro" numbered="true" toc="default">
+      <name>Introduction</name>
+      <t>A digital purchase today is ordinarily a revocable license living
+      inside one company's platform, not a thing the buyer holds. When the
+      platform shuts down, delists a title, or changes terms, the only
+      record that a purchase ever happened typically lived in the seller's
+      own database and disappears with it. Existing consumer-protection
+      efforts — disclosure requirements that a digital "purchase" is
+      actually a license, and remedies for non-conforming digital content —
+      address access and disclosure, but a legal remedy without evidence
+      that a purchase occurred is difficult to exercise once the seller's
+      records are gone.</t>
+      <t>attest defines an evidence layer for exactly that gap: a signed
+      receipt envelope the store issues once, at the point of purchase, that
+      the buyer keeps like a paper receipt and that anyone — the buyer, a
+      marketplace, a friend, a preservation project — can verify offline,
+      forever, against the issuer's own published key material. attest
+      deliberately does not keep content alive, strip DRM, host or index
+      content, process payment, or define a resale/transfer protocol on its
+      own account (transfer is addressed only by the non-normative pointer
+      in <xref target="extensions"/>); it is only the evidence layer that
+      lets whatever rights a buyer has survive the seller's disappearance.</t>
+
+      <t>Every implementation's conformance to the material this document
+      specifies is exercised by the cross-language conformance vector
+      corpus at <tt>docs/spec/vectors/</tt> in the attest source repository
+      — specifically the vector groups covering the v0.1 baseline and the
+      v0.2 hybrid profile (the living specification's own Section 15 and
+      Section 6, respectively). <tt>docs/conformance.md</tt> in that same
+      repository documents the public, adapter-based process by which any
+      independent implementation, in any language, can run that corpus
+      against its own code and self-certify conformance; that process, not
+      this document, is the operative conformance procedure.</t>
+
+      <section anchor="snapshot" numbered="true" toc="default">
+        <name>Relationship to the living specification</name>
+        <t>attest's normative source of truth is the living specification
+        maintained at <tt>docs/spec/attest-v0.1.md</tt> and
+        <tt>docs/spec/attest-v0.2.md</tt> in the attest source repository
+        (<xref target="ATTEST-REPO"/>), together with the JSON Schema and
+        the cross-language conformance vector corpus that repository also
+        carries. This document is a snapshot profile of that living
+        specification's core receipt format and hybrid signature profile:
+        it distills normative text from the living specification into
+        Internet-Draft form, but the living specification remains
+        authoritative, and a conflict between this document and the living
+        specification is resolved in the living specification's favor.
+        Within this document specifically, a payload <bcp14>MUST</bcp14>
+        satisfy the structural constraints of the core receipt schema:
+        those constraints are precisely the ones expressed by the
+        revision-pinned attest receipt JSON Schema
+        (<xref target="ATTEST-SCHEMA"/>, <tt>attest-receipt.schema.json</tt>
+        pinned at tag <tt>v0.4.0</tt>, the mirrored v0.1 revision 5 / v0.2
+        revision 6 state), EXCEPT its Stage 3 (v0.2 §17.8) holder-binding
+        conditional on <tt>license.transferable</tt> and
+        <tt>buyer.pubkey</tt>, which belongs to the Stage 3 extension
+        (<xref target="extensions"/>) and is outside this profile's
+        normative surface. This draft's own payload field registry
+        (<xref target="payload-registry"/>) is a descriptive, prose
+        summary of that same structure, kept in step with it, never a
+        second and independent normative source: the schema itself,
+        minus that one named Stage 3 conditional, is the precise
+        structural authority a conforming implementation validates
+        against (<xref target="verify"/> Step 5).</t>
+        <t>This document mirrors attest-v0.1.md at revision 5.</t>
+        <t>This document mirrors attest-v0.2.md at revision 6, for the
+        complete core/hybrid surface it normatively incorporates: Section 2
+        (the hybrid Ed25519+ML-DSA-65 signature profile itself), Section 3
+        and Section 3.1 (the hybrid verification algorithm substituted for
+        verification steps 1 and 4, and its pinned error-literal table),
+        Section 4 (manifest continuity and trust for a hybrid signer),
+        Section 6.2 (the structural ceilings that bind hybrid envelopes and
+        manifests exactly as they bind v0.1's), and Section 13 and
+        Section 13.1 (the hybrid AND-rule extended to revocation records
+        and artifact manifests, and the mixed-keyset prohibition and
+        migration ceremony); the same document's transparency, anchoring,
+        and issuer-mediated transfer material is summarized only as a
+        non-normative pointer in <xref target="extensions"/> of this
+        document and remains normative solely in the living specification,
+        never here.</t>
+        <t>A reader checking this snapshot for drift compares the two
+        revision integers declared above against the "Revision log"
+        section at the end of each named file in the living repository;
+        because those logs only grow, a later revision existing there when
+        this document is read is expected, and is not by itself a defect in
+        this document — it means the living specification has moved on and
+        this document has not yet been updated to match.</t>
+      </section>
+    </section>
+
+    <section anchor="terminology" numbered="true" toc="default">
+      <name>Conventions and Terminology</name>
+      <t>The key words "<bcp14>MUST</bcp14>", "<bcp14>MUST NOT</bcp14>",
+      "<bcp14>REQUIRED</bcp14>", "<bcp14>SHALL</bcp14>",
+      "<bcp14>SHALL NOT</bcp14>", "<bcp14>SHOULD</bcp14>",
+      "<bcp14>SHOULD NOT</bcp14>", "<bcp14>RECOMMENDED</bcp14>",
+      "<bcp14>NOT RECOMMENDED</bcp14>", "<bcp14>MAY</bcp14>", and
+      "<bcp14>OPTIONAL</bcp14>" in this document are to be interpreted as
+      described in BCP 14 <xref target="RFC2119"/> <xref target="RFC8174"/>
+      when, and only when, they appear in all capitals, as shown here.</t>
+      <t>This document uses three actor names, taken unchanged from the
+      living specification:</t>
+      <dl newline="false" spacing="normal">
+        <dt>Issuer:</dt>
+        <dd>the entity that signs receipts, identified by a DNS domain it
+        controls. A marketplace or merchant-of-record may act as issuer on
+        behalf of a named publisher.</dd>
+        <dt>Buyer:</dt>
+        <dd>the holder of an exported receipt.</dd>
+        <dt>Verifier:</dt>
+        <dd>any software that executes the verification algorithm of
+        <xref target="verify"/> against a receipt envelope.</dd>
+      </dl>
+      <t>Two terminology defusals are stated here explicitly, because each
+      collides with a term a reader may already associate with a different
+      IETF architecture:</t>
+      <t>A "receipt" in this document is a signed purchase-evidence
+      statement — the <tt>payload</tt>-plus-<tt>signatures</tt> envelope of
+      <xref target="envelope"/> — held and presented by the buyer who
+      purchased it. It is <em>not</em> a SCITT transparency-service
+      receipt in the sense of <xref target="RFC9943"/>, which is a proof
+      that a signed statement was registered in an append-only log. This
+      document defines no transparency-log registration mechanism at all;
+      the living specification's optional, non-normative-here transparency
+      layer is pointed to, but not specified, in
+      <xref target="extensions"/>.</t>
+      <t>"attest" is this project's name, chosen with no relationship
+      intended to the IETF Remote Attestation Procedures (RATS)
+      architecture <xref target="RFC9334"/>. This document makes no RATS
+      claim of any kind: it defines no Attester, no RATS-sense Verifier, no
+      Relying Party role mapping, no Evidence or Attestation Results
+      semantics, and no claim about the integrity or trustworthiness of any
+      execution environment. A reader arriving from a RATS background
+      should treat the project name as a false cognate.</t>
+    </section>
+
+    <section anchor="envelope" numbered="true" toc="default">
+      <name>Receipt Envelope</name>
+      <t>A receipt is transmitted as a JSON object with exactly three
+      top-level members: <tt>payload</tt> (the only signed content, see
+      <xref target="payload-registry"/>), <tt>signatures</tt> (an array; see
+      <xref target="sigprofiles"/> for its required shape under each
+      signature profile), and an <bcp14>OPTIONAL</bcp14>
+      <tt>delivery</tt> member.</t>
+      <t><tt>delivery</tt> is <em>unsigned</em>: it is outside
+      <tt>payload</tt> and is not covered by any signature. When present, it
+      MAY carry <tt>delivery.salt</tt> (the base64url, unpadded, encoding of
+      the 16 raw bytes used as the buyer-commitment salt, see
+      <xref target="buyer-binding"/>) and <tt>delivery.issuer_manifest</tt>
+      (a key-manifest object, see <xref target="manifests"/>, usable
+      directly as a trust-store entry). An envelope carrying
+      <tt>delivery.salt</tt> is a private artifact: implementations
+      <bcp14>MUST</bcp14> strip it before treating an envelope as generally
+      shareable. Tampering with <tt>delivery</tt> can neither forge nor
+      invalidate a receipt, because it is not itself signed; the salt it
+      may carry only has meaning insofar as it reproduces the signed
+      <tt>buyer.commitment</tt>, and any embedded manifest snapshot is
+      independently signature-checked on its own terms.</t>
+
+      <section anchor="payload-registry" numbered="true" toc="default">
+        <name>Payload field registry</name>
+        <t><tt>payload</tt> is the sole signed object. Every object below
+        permits additional, unlisted properties; an unrecognized top-level
+        <tt>payload</tt> field is signed and valid, reported only as a
+        warning (<xref target="verify"/>), never as a schema error — this
+        is the format's forward-compatibility mechanism.</t>
+        <table anchor="tbl-toplevel">
+          <name>Top-level payload fields</name>
+          <thead>
+            <tr><th>Field</th><th>Required</th><th>Semantics</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><tt>attest_version</tt></td><td>REQUIRED</td><td>Const
+            <tt>"0.1"</tt> or <tt>"0.2"</tt>; fixes the payload shape and
+            signature profile for this receipt (see
+            <xref target="sigprofiles"/>).</td></tr>
+            <tr><td><tt>receipt_id</tt></td><td>REQUIRED</td><td>A ULID
+            (Crockford base32, 26 characters, leading character
+            <tt>0</tt>-<tt>7</tt>).</td></tr>
+            <tr><td><tt>issued_at</tt></td><td>REQUIRED</td><td>UTC
+            timestamp; anchors key-validity and
+            <tt>refund_window</tt> revocation checks.</td></tr>
+            <tr><td><tt>supersedes</tt></td><td>schema-optional</td><td>ULID
+            or null; informational lineage pointer to a prior
+            <tt>receipt_id</tt>. Never an implicit revocation of the
+            superseded receipt.</td></tr>
+            <tr><td><tt>issuer</tt></td><td>REQUIRED</td><td>Object; see
+            below.</td></tr>
+            <tr><td><tt>buyer</tt></td><td>REQUIRED</td><td>Object; see
+            below.</td></tr>
+            <tr><td><tt>work</tt></td><td>REQUIRED</td><td>Object; see
+            below.</td></tr>
+            <tr><td><tt>license</tt></td><td>REQUIRED</td><td>Object; see
+            below.</td></tr>
+            <tr><td><tt>survivability</tt></td><td>REQUIRED</td><td>Object;
+            see below.</td></tr>
+          </tbody>
+        </table>
+        <table anchor="tbl-issuer">
+          <name>issuer object</name>
+          <thead><tr><th>Field</th><th>Required</th><th>Semantics</th></tr></thead>
+          <tbody>
+            <tr><td><tt>issuer.id</tt></td><td>REQUIRED</td><td>Lowercase
+            DNS domain (two or more labels); roots key discovery and
+            issuer-binding (<xref target="verify"/>).</td></tr>
+            <tr><td><tt>issuer.display_name</tt></td><td>REQUIRED</td>
+            <td>Human-readable name; carries no cryptographic
+            weight.</td></tr>
+          </tbody>
+        </table>
+        <table anchor="tbl-buyer">
+          <name>buyer object</name>
+          <thead><tr><th>Field</th><th>Required</th><th>Semantics</th></tr></thead>
+          <tbody>
+            <tr><td><tt>buyer.commitment</tt></td><td>REQUIRED</td>
+            <td>base64url, 32 decoded bytes; a scrypt commitment over a
+            normalized identifier (<xref target="buyer-binding"/>).</td></tr>
+            <tr><td><tt>buyer.identifier_type</tt></td><td>REQUIRED</td>
+            <td>Enum <tt>issuer-account</tt> | <tt>email</tt>.</td></tr>
+            <tr><td><tt>buyer.pubkey</tt></td><td>OPTIONAL</td><td>base64url,
+            32 decoded bytes, or null; Ed25519 public key for the
+            challenge-response binding path.</td></tr>
+          </tbody>
+        </table>
+        <table anchor="tbl-work">
+          <name>work object</name>
+          <thead><tr><th>Field</th><th>Required</th><th>Semantics</th></tr></thead>
+          <tbody>
+            <tr><td><tt>work.title</tt></td><td>REQUIRED</td><td/></tr>
+            <tr><td><tt>work.publisher</tt></td><td>REQUIRED</td><td>Names
+            the publisher of record.</td></tr>
+            <tr><td><tt>work.edition</tt></td><td>OPTIONAL</td><td/></tr>
+            <tr><td><tt>work.identifiers</tt></td><td>REQUIRED</td>
+            <td>Object, one or more string-valued properties (issuer-scoped
+            identifiers).</td></tr>
+            <tr><td><tt>work.artifact_series</tt></td><td>conditionally
+            required</td><td>Issuer-scoped series identifier; the current
+            artifact set for a series is resolved from issuer-signed
+            artifact manifests (<xref target="manifests"/>), never from the
+            immutable receipt. When <tt>license.revocability == "none"</tt>,
+            at least one of this field (non-empty) or
+            <tt>work.artifacts</tt> (non-empty array) MUST be present — see
+            the <tt>revocability</tt> row below.</td></tr>
+            <tr><td><tt>work.artifacts</tt></td><td>conditionally
+            required</td><td>Array of <tt>{role, platform, filename,
+            size_bytes, sha256}</tt> objects; an at-purchase snapshot, not a
+            live index. Same <tt>revocability: "none"</tt> conditional as
+            <tt>work.artifact_series</tt>, above.</td></tr>
+          </tbody>
+        </table>
+        <table anchor="tbl-license">
+          <name>license object</name>
+          <thead><tr><th>Field</th><th>Required</th><th>Semantics</th></tr></thead>
+          <tbody>
+            <tr><td><tt>grant</tt></td><td>REQUIRED</td><td>Enum
+            <tt>perpetual</tt> | <tt>subscription</tt>.</td></tr>
+            <tr><td><tt>revocability</tt></td><td>REQUIRED</td><td>Enum
+            <tt>none</tt> | <tt>refund_window</tt> | <tt>policy</tt>; governs
+            revocation-record effectiveness (<xref target="revocation"/>).
+            When <tt>revocability == "none"</tt>, the schema additionally
+            REQUIRES <tt>drm == "drm-free"</tt>,
+            <tt>survivability.redownload_right == true</tt>, and at least
+            one of a non-empty <tt>work.artifact_series</tt> or a non-empty
+            <tt>work.artifacts</tt> array; a <tt>revocability: "none"</tt>
+            payload violating any of these is schema-invalid, never merely
+            a warning.</td></tr>
+            <tr><td><tt>revocation_window_days</tt></td><td>REQUIRED iff
+            <tt>revocability == "refund_window"</tt></td><td>Integer,
+            1 to 3650; the window is anchored to <tt>issued_at</tt> and
+            evaluated against a revocation record's own signed time, never
+            the verifier's clock.</td></tr>
+            <tr><td><tt>transferable</tt></td><td>REQUIRED</td><td>Boolean.
+            This document defines no meaning for this field: it is reserved,
+            exactly as in the living specification's own core profile.
+            Meaning is assigned to it only by the living specification's
+            Stage 3 transfer profile, which is out of this document's
+            normative scope (<xref target="extensions"/>).</td></tr>
+            <tr><td><tt>not_transferable_before</tt></td><td>OPTIONAL</td>
+            <td>ISO-8601 UTC string. Reserved in the same sense as
+            <tt>transferable</tt>; carries no meaning under the material
+            this document specifies alone.</td></tr>
+            <tr><td><tt>drm</tt></td><td>REQUIRED</td><td>Enum
+            <tt>drm-free</tt> | <tt>drm-bound</tt>; a
+            <tt>drm-bound</tt> receipt otherwise verifies, with a mandatory
+            warning — except under <tt>revocability: "none"</tt> (above),
+            where <tt>drm-bound</tt> is schema-invalid, not merely
+            warned.</td></tr>
+            <tr><td><tt>terms_uri</tt></td><td>REQUIRED</td><td>URI;
+            annotation-only in schema terms, see <xref target="canon"/>.</td></tr>
+            <tr><td><tt>legal_text_sha256</tt></td><td>REQUIRED</td>
+            <td>Lowercase hex SHA-256 of the license text at
+            <tt>terms_uri</tt>, hash-binding it into the signed
+            payload.</td></tr>
+            <tr><td><tt>jurisdiction_flags</tt></td><td>OPTIONAL</td>
+            <td>Object, boolean-valued, open vocabulary.</td></tr>
+          </tbody>
+        </table>
+        <table anchor="tbl-survivability">
+          <name>survivability object</name>
+          <thead><tr><th>Field</th><th>Required</th><th>Semantics</th></tr></thead>
+          <tbody>
+            <tr><td><tt>redownload_right</tt></td><td>REQUIRED</td>
+            <td>Boolean.</td></tr>
+            <tr><td><tt>mirror_policy_uri</tt></td><td>OPTIONAL</td><td/></tr>
+            <tr><td><tt>mirror_policy_sha256</tt></td><td>OPTIONAL</td>
+            <td>Hash-binds the mirror policy text into the signed
+            payload.</td></tr>
+            <tr><td><tt>end_of_life</tt></td><td>REQUIRED</td><td>Non-empty
+            string, open versioned vocabulary; an unrecognized value is
+            valid, with warning.</td></tr>
+            <tr><td><tt>eol_commitment_uri</tt></td><td>OPTIONAL</td>
+            <td>String or null.</td></tr>
+            <tr><td><tt>eol_commitment_sha256</tt></td><td>OPTIONAL</td>
+            <td>Hash-binds a future end-of-life commitment
+            document.</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section anchor="buyer-binding" numbered="true" toc="default">
+        <name>Buyer commitment and binding</name>
+        <t>Two layered mechanisms bind a receipt to its buyer without
+        signing a plaintext identifier.</t>
+        <t><strong>Commitment (always present).</strong> With domain label the ASCII
+        string <tt>"Attest-buyer-commitment-v1"</tt>:</t>
+        <artwork><![CDATA[
+P = UTF8("Attest-buyer-commitment-v1") || 0x00
+    || UTF8(identifier_type) || 0x00 || UTF8(normalize(identifier))
+commitment = scrypt(P, salt, N=32768, r=8, p=1, dkLen=32)
+]]></artwork>
+        <t><tt>salt</tt> <bcp14>MUST</bcp14> be exactly 16 raw bytes,
+        generated per receipt by the issuer, hashed as raw bytes (never as
+        base64url text). The scrypt parameters above are fixed by this
+        profile and <bcp14>MUST NOT</bcp14> be configurable per issuer.
+        <tt>normalize()</tt> is: for <tt>identifier_type == "email"</tt>,
+        strip ASCII whitespace from both ends, apply Unicode NFC
+        normalization, then lowercase ASCII <tt>A</tt>-<tt>Z</tt> only
+        (byte-deterministic, no locale case-folding); for
+        <tt>identifier_type == "issuer-account"</tt>, apply Unicode NFC
+        normalization only. In both cases the normalized string
+        <bcp14>MUST NOT</bcp14> contain the byte <tt>0x00</tt>.</t>
+        <t>Revealing <tt>(identifier, salt)</tt> to a verifier is a
+        replayable bearer proof that also hands over the identifier itself;
+        per-receipt salts confine this to one receipt's commitment path. A
+        verifier <bcp14>MUST</bcp14> treat a disclosed identifier as
+        personal data not to be retained beyond the verification.</t>
+        <t><strong>Key binding (<tt>buyer.pubkey</tt>, optional).</strong> The
+        stronger path: an Ed25519 public key bound into the signed payload,
+        proven via non-replayable challenge-response, with domain label
+        the ASCII string <tt>"Attest-binding-challenge-v1"</tt>:</t>
+        <artwork><![CDATA[
+verifier sends nonce (>= 16 random bytes, freshly generated per challenge)
+buyer signs: UTF8("Attest-binding-challenge-v1") || 0x00
+             || receipt_id || 0x00 || nonce
+]]></artwork>
+        <t>The <tt>nonce</tt> <bcp14>MUST</bcp14> be at least 16 bytes and
+        <bcp14>MUST</bcp14> be freshly generated per challenge: without
+        that freshness requirement, a captured transcript could be
+        replayed and the challenge-response would not be the
+        non-replayable proof this binding path depends on.
+        <tt>receipt_id</tt> here is the receipt's own
+        <tt>payload.receipt_id</tt>, encoded as UTF-8 text, not decoded and
+        re-encoded. A verifier <bcp14>MUST NOT</bcp14> treat
+        <tt>buyer.pubkey</tt> equality across two receipts as proof of buyer
+        identity; keys SHOULD be per-receipt.</t>
+      </section>
+    </section>
+
+    <section anchor="canon" numbered="true" toc="default">
+      <name>Canonicalization</name>
+      <t>The signature input for a receipt is exactly
+      <tt>JCS(payload)</tt> — the output of the attest-JCS profile below —
+      encoded as UTF-8 bytes. attest-JCS follows
+      <xref target="RFC8785"/> (JSON Canonicalization Scheme) with one
+      deliberate deviation by restriction: full JCS permits any I-JSON
+      number, canonicalized via a rounding algorithm every implementation
+      must reproduce identically to stay interoperable. attest-JCS removes
+      that cross-language interoperability risk entirely by restricting
+      numbers to integers only, with magnitude strictly less than
+      2<sup>53</sup>. A conforming canonicalizer <bcp14>MUST</bcp14> accept
+      a JSON number if and only if it is such an integer, and
+      <bcp14>MUST</bcp14> reject any float, any
+      <tt>NaN</tt>/<tt>Infinity</tt>/<tt>-Infinity</tt> construct, and any
+      integer at or beyond that magnitude. This is a restriction of, never
+      an incompatible extension to, <xref target="RFC8785"/>: every
+      attest-JCS output is also a valid JCS output.</t>
+      <t>Additional parse-time requirements, applied before any signature
+      or schema step: the input <bcp14>MUST</bcp14> be valid UTF-8; a JSON
+      object containing a duplicate member name <bcp14>MUST</bcp14> be
+      rejected outright, never silently deduplicated; object keys
+      <bcp14>MUST</bcp14> be serialized in the order produced by sorting
+      their UTF-16BE code-unit sequences; and lone UTF-16 surrogates,
+      whether arriving as literal bytes or as <tt>\uXXXX</tt> escapes,
+      <bcp14>MUST</bcp14> be rejected. An over-magnitude integer is
+      rejected at this canonicalization stage, before schema validation
+      ever runs: the corresponding verification result reports
+      <tt>signature: "invalid"</tt> and <tt>schema: "not_checked"</tt>
+      (<xref target="verify"/>), never a schema-validation failure.</t>
+      <t>Encodings: signatures, commitments, salts, and public keys
+      <bcp14>MUST</bcp14> be base64url without padding
+      (<xref target="RFC4648"/> Section 5); SHA-256 hashes
+      <bcp14>MUST</bcp14> be lowercase hexadecimal; <tt>receipt_id</tt> and
+      <tt>supersedes</tt> are ULIDs (Crockford base32, 26 characters).
+      <tt>format: "uri"</tt> fields in the JSON Schema are annotation-only:
+      a conforming validator is not required to assert URI well-formedness
+      as a failure; integrity of a referenced document is guaranteed by its
+      accompanying SHA-256 hash binding, never by URI syntax.</t>
+    </section>
+
+    <section anchor="sigprofiles" numbered="true" toc="default">
+      <name>Signature Profiles</name>
+
+      <section anchor="ed25519-profile" numbered="true" toc="default">
+        <name>The ed25519 profile (attest_version "0.1")</name>
+        <t><tt>signatures</tt> <bcp14>MUST</bcp14> be a JSON array with
+        exactly one entry, carrying <tt>kid</tt> (string), <tt>sig</tt>
+        (base64url, 64 decoded bytes), and <tt>alg</tt> equal to the literal
+        string <tt>"Ed25519"</tt>. A verifier <bcp14>MUST</bcp14> reject any
+        other <tt>alg</tt> value, and <bcp14>MUST NOT</bcp14> use
+        <tt>alg</tt> to select a verification primitive: the algorithm for
+        <tt>attest_version: "0.1"</tt> is fixed by this profile, never by
+        dispatching on the signature block.</t>
+        <t>Verification uses <xref target="RFC8032"/> Edwards-Curve Digital
+        Signature Algorithm (EdDSA) under a pinned ruleset. A conforming
+        verifier <bcp14>MUST</bcp14> perform cofactorless (strict)
+        <xref target="RFC8032"/> verification and additionally
+        <bcp14>MUST</bcp14>: reject a signature whose scalar <tt>S</tt> is
+        non-canonical (<tt>S &gt;= L</tt>, the Ed25519 group order — the
+        SUF-CMA property); and reject small-order or non-canonical
+        encodings of the public key and of the signature's <tt>R</tt>
+        component (the SBS property). This pinned ruleset exists so that
+        implementations built on different cryptographic backends disagree
+        loudly, at conformance-test time, rather than silently accepting a
+        malleable signature in the field.</t>
+        <t>A receipt hash, <tt>SHA-256(JCS(payload))</tt>, is defined for
+        bundle and deduplication purposes; it <bcp14>MUST NOT</bcp14> be
+        computed over the whole envelope, which contains the unsigned,
+        malleable <tt>delivery</tt> member. This hash is distinct from — and
+        <bcp14>MUST NOT</bcp14> be confused with — the transparency-log
+        commitment the living specification's Stage 2 profile defines; that
+        construction is out of this document's normative scope
+        (<xref target="extensions"/>).</t>
+      </section>
+
+      <section anchor="hybrid-profile" numbered="true" toc="default">
+        <name>The hybrid ed25519+ml-dsa-65 profile (attest_version "0.2")</name>
+        <t>The hybrid profile pairs the classical Ed25519 primitive with
+        ML-DSA-65 <xref target="FIPS204"/>, a NIST security category 3
+        module-lattice signature scheme, so that forging a receipt requires
+        breaking <em>both</em> primitives: an attacker who breaks only
+        Ed25519 (for example, via a future cryptographically-relevant
+        quantum computer) or only ML-DSA-65 (for example, via a classical
+        cryptanalytic advance) still cannot forge a signature.</t>
+        <t>A hybrid envelope has the same three-member shape as
+        <xref target="envelope"/>; the differences are inside
+        <tt>payload.attest_version</tt> (which <bcp14>MUST</bcp14> equal the
+        literal string <tt>"0.2"</tt>) and <tt>signatures</tt>, which
+        <bcp14>MUST</bcp14> be a JSON array containing exactly two entries,
+        in this fixed order: entry 0 with <tt>alg == "Ed25519"</tt>, entry 1
+        with <tt>alg == "ML-DSA-65"</tt>. A verifier <bcp14>MUST</bcp14>
+        reject any other order, count, or <tt>alg</tt> value. Both entries
+        <bcp14>MUST</bcp14> carry the same <tt>kid</tt> — the hybrid pair is
+        one signer, not two independently resolved keys — and both
+        signatures <bcp14>MUST</bcp14> be computed over the identical
+        <tt>JCS(payload)</tt> canonical bytes: one signature input, signed
+        twice with two different keys.</t>
+        <t><strong>Composite key binding lives in the manifest.</strong> Because
+        <tt>kid</tt> itself carries no algorithm information, the binding
+        between a hybrid signer's two public keys is established entirely
+        by the key manifest (<xref target="manifests"/>): a key-entry object
+        carrying <tt>pub_ml_dsa_65</tt> (base64url, 1952 decoded bytes) is
+        what makes that entry hybrid, and a verifier <bcp14>MUST NOT</bcp14>
+        accept a hybrid signature against an entry lacking it. A manifest's
+        own <tt>manifest_signature</tt> gains an optional
+        <tt>sig_ml_dsa_65</tt> member (base64url, 3309 decoded bytes),
+        <bcp14>REQUIRED</bcp14> if and only if the signing key's own entry
+        is hybrid. This is AND-verified, fail-closed in both directions: a
+        hybrid signer's manifest signature missing its ML-DSA-65 leg
+        <bcp14>MUST</bcp14> be treated as invalid (a downgrade attempt), and
+        an Ed25519-only signer's manifest signature carrying a stray
+        ML-DSA-65 leg <bcp14>MUST</bcp14> likewise be treated as invalid.
+        The same AND-rule extends, unchanged in shape, to revocation records
+        (<xref target="revocation"/>) and artifact manifests
+        (<xref target="manifests"/>): a hybrid-keyed issuer's side-document
+        carrying only an Ed25519 signature is never honored.</t>
+        <t><strong>Mixed-keyset prohibition.</strong> An issuer that declares the
+        hybrid profile <bcp14>MUST NOT</bcp14> hold an Ed25519-only key in
+        state <tt>active</tt>: doing so would silently downgrade the
+        issuer's claimed hybrid protection back to classical-only for any
+        receipt an attacker chooses to forge under the still-active
+        classical-only sibling. Migration from an Ed25519-only key to a
+        hybrid key <bcp14>MUST</bcp14> retire (or otherwise move out of
+        <tt>active</tt>) every Ed25519-only key in the same manifest-version
+        step that introduces the hybrid key; there is no sanctioned
+        intermediate coexistence state. A verifier resolving a manifest
+        exhibiting the mixed-keyset condition for a hybrid receipt it is
+        verifying <bcp14>MUST</bcp14> emit the exact warning literal
+        <tt>mixed_keyset_active_ed_only_sibling</tt>.</t>
+        <t>Verification substitutes an eleven-step hybrid check for steps
+        1 and 4 of <xref target="verify"/> whenever
+        <tt>payload.attest_version == "0.2"</tt>: signature-count, block
+        shape, algorithm-and-order, shared-<tt>kid</tt>, and type checks on
+        the signature block; the issuer-binding and key-status checks of
+        <xref target="verify"/>, unchanged; a check that the resolved key
+        entry carries <tt>pub_ml_dsa_65</tt>; then independent verification
+        of the Ed25519 leg and the ML-DSA-65 leg. This is AND semantics:
+        both legs <bcp14>MUST</bcp14> independently verify, or the receipt
+        is invalid. Only if both legs verify does verification continue to
+        the schema, revocation, and binding steps of
+        <xref target="verify"/>, unchanged. The result vocabulary and the
+        definition of <tt>ok</tt> (<xref target="verify"/>) are unchanged by
+        this profile: it introduces no new result value, only new ways to
+        arrive at <tt>signature: "invalid"</tt>. A conforming
+        implementation <bcp14>SHOULD</bcp14> surface the nine pinned
+        hybrid error literals of the living specification's v0.2 §3.1
+        verbatim (or a superset containing them), so that
+        cross-implementation conformance testing can match on literal
+        text; <xref target="tbl-hybrid-errors"/> transcribes that table
+        verbatim.</t>
+        <table anchor="tbl-hybrid-errors">
+          <name>Hybrid error-literal table (verbatim, living specification v0.2 §3.1)</name>
+          <thead>
+            <tr><th>Literal (verbatim)</th><th>Emitted when</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><tt>hybrid envelope requires exactly two
+            signatures</tt></td><td><tt>signatures</tt> length ≠
+            2.</td></tr>
+            <tr><td><tt>malformed signature block</tt></td><td>either
+            signature entry is not an object.</td></tr>
+            <tr><td><tt>hybrid envelope requires algs Ed25519 and
+            ML-DSA-65 in order</tt></td><td>entry 0/1 <tt>alg</tt> is not
+            exactly <tt>["Ed25519", "ML-DSA-65"]</tt> in that order
+            (includes a duplicated <tt>alg</tt>).</td></tr>
+            <tr><td><tt>hybrid envelope signatures must share a single
+            kid</tt></td><td>the two entries' <tt>kid</tt> values
+            differ.</td></tr>
+            <tr><td><tt>malformed signature block: 'kid' must be a
+            string</tt></td><td>the shared <tt>kid</tt> is not a
+            string.</td></tr>
+            <tr><td><tt>malformed signature block: 'sig' must be a
+            string</tt></td><td>either signature entry's <tt>sig</tt> is
+            not a string.</td></tr>
+            <tr><td><tt>key entry for kid {kid!r} has no ML-DSA-65
+            public key</tt></td><td>the resolved manifest key entry
+            lacks <tt>pub_ml_dsa_65</tt>.</td></tr>
+            <tr><td><tt>signature verification failed</tt></td><td>the
+            Ed25519 leg fails to verify (unchanged literal from
+            v0.1).</td></tr>
+            <tr><td><tt>ML-DSA-65 signature verification
+            failed</tt></td><td>the ML-DSA-65 leg fails to
+            verify.</td></tr>
+          </tbody>
+        </table>
+      </section>
+    </section>
+
+    <section anchor="manifests" numbered="true" toc="default">
+      <name>Trust Manifests, Rotation, and Continuity</name>
+      <t>An issuer's identity is its DNS domain. An issuer SHOULD publish
+      its key manifest at <tt>https://&lt;issuer.id&gt;/.well-known/attest.json</tt>.</t>
+      <table anchor="tbl-keymanifest">
+        <name>Key manifest fields</name>
+        <thead><tr><th>Field</th><th>Required</th><th>Semantics</th></tr></thead>
+        <tbody>
+          <tr><td><tt>issuer</tt></td><td>REQUIRED</td><td>DNS domain;
+          <bcp14>MUST</bcp14> equal the domain prefix of every listed
+          <tt>kid</tt>.</td></tr>
+          <tr><td><tt>manifest_version</tt></td><td>REQUIRED</td>
+          <td>Integer, monotonically increasing per issuer; rotation
+          continuity keys off <tt>N -&gt; N+1</tt>.</td></tr>
+          <tr><td><tt>issued_at</tt></td><td>REQUIRED</td><td/></tr>
+          <tr><td><tt>keys</tt></td><td>REQUIRED</td><td>Array of key-entry
+          objects; see below.</td></tr>
+          <tr><td><tt>manifest_signature</tt></td><td>REQUIRED</td>
+          <td>Ed25519 signature (plus, for a hybrid signer, an
+          <tt>sig_ml_dsa_65</tt> member, <xref target="hybrid-profile"/>)
+          over <tt>JCS(manifest)</tt> with this member removed.</td></tr>
+        </tbody>
+      </table>
+      <table anchor="tbl-keyentry">
+        <name>Key-entry object</name>
+        <thead><tr><th>Field</th><th>Required</th><th>Semantics</th></tr></thead>
+        <tbody>
+          <tr><td><tt>kid</tt></td><td>REQUIRED</td><td>String,
+          <tt>&lt;issuer-domain&gt;/keys/&lt;label&gt;#&lt;name&gt;</tt>;
+          domain prefix <bcp14>MUST</bcp14> equal <tt>issuer</tt>.</td></tr>
+          <tr><td><tt>pub</tt></td><td>REQUIRED</td><td>base64url, 32
+          decoded bytes; Ed25519 public key.</td></tr>
+          <tr><td><tt>pub_ml_dsa_65</tt></td><td>required for a hybrid
+          signer's entry</td><td>base64url, 1952 decoded bytes,
+          <xref target="hybrid-profile"/>.</td></tr>
+          <tr><td><tt>valid_from</tt></td><td>REQUIRED</td><td/></tr>
+          <tr><td><tt>valid_to</tt></td><td>OPTIONAL</td><td>Absent or null
+          means open-ended.</td></tr>
+          <tr><td><tt>status</tt></td><td>REQUIRED</td><td>Enum
+          <tt>active</tt> | <tt>retired</tt> | <tt>compromised</tt>.</td></tr>
+        </tbody>
+      </table>
+      <t><strong>Rotation continuity is normative, not best-effort.</strong> A
+      manifest at <tt>manifest_version</tt> N+1 is auto-trusted only if it
+      was signed by a key that was <tt>active</tt> in the version-N manifest
+      already trusted; version gaps are bridgeable only by validating every
+      intermediate manifest. On a discontinuous rotation, or on conflicting
+      manifests for the same issuer, a verifier <bcp14>MUST</bcp14> report
+      <tt>trust: "unverified_rotation"</tt> and <bcp14>MUST NOT</bcp14>
+      auto-accept the manifest. For a hybrid signer, this continuity check
+      is enforced through the hybrid manifest signature
+      (<xref target="hybrid-profile"/>): a rotation manifest whose signer
+      key is hybrid but whose manifest signature has been downgraded to
+      Ed25519-only fails the AND-verified check and is therefore not validly
+      signed for continuity purposes, even though the receipt's own hybrid
+      signature may independently verify cleanly against the manifest in
+      use.</t>
+      <t><strong>Key compromise fails closed.</strong> A key marked
+      <tt>compromised</tt> invalidates all signatures ever made with it,
+      regardless of <tt>issued_at</tt>, because <tt>issued_at</tt> lives
+      inside the signed payload and is controlled by whoever holds the key.
+      A verifier <bcp14>MUST</bcp14> reject any receipt signature resolving
+      to a <tt>compromised</tt> key unconditionally. The same fail-closed
+      rule governs revocation records (<xref target="revocation"/>): one
+      signed by a key that is not <tt>status == "active"</tt> in its
+      resolving manifest <bcp14>MUST</bcp14> be ignored, with a
+      warning.</t>
+      <t><strong>Artifact manifests</strong> are separate signed side-documents, same
+      signing discipline as key manifests, carrying <tt>issuer</tt>,
+      <tt>series</tt>, <tt>version</tt>, an optional (required on manifests
+      produced after this profile's currency amendment)
+      <tt>manifest_version</tt>, <tt>released_at</tt>, the current
+      <tt>artifacts</tt> array (<xref target="payload-registry"/> shape),
+      and a <tt>manifest_signature</tt>.</t>
+      <t><strong>Acceptance is conditional on authentication, not on being
+      merely issuer-signed.</strong> A verifier <bcp14>MUST</bcp14> treat an
+      artifact manifest as authenticated only if: its resolving key
+      manifest is itself self-consistent; the manifest's signing key
+      resolves, in that key manifest, to a key-entry with
+      <tt>status == "active"</tt>; <tt>released_at</tt> falls within that
+      key's validity window; the artifact manifest's own <tt>issuer</tt>
+      field equals the resolving key manifest's <tt>issuer</tt> field; and
+      the signature verifies (for a hybrid signer, under the AND-rule of
+      <xref target="hybrid-profile"/>). An unauthenticated artifact
+      manifest contributes nothing to currency and <bcp14>MUST</bcp14> be
+      ignored, with a warning, never treated as the newest-seen state on
+      the strength of being merely issuer-signed. Two distinct,
+      differently-content manifests presented at the same
+      (issuer, <tt>artifact_series</tt>, <tt>manifest_version</tt>) tuple
+      are an equivocation and <bcp14>MUST</bcp14> be rejected, not silently
+      accepted as if one superseded the other.</t>
+      <t>Currency is scoped per (issuer, <tt>artifact_series</tt>) pair: a
+      verifier holding persistent trust state <bcp14>MUST NOT</bcp14>
+      accept, for that pair, a manifest with a lower
+      <tt>manifest_version</tt> than the newest already accepted; on
+      regression it <bcp14>MUST</bcp14> report
+      <tt>trust: "unverified_rotation"</tt>, the identical value the key-
+      manifest rotation rule above uses. A manifest lacking
+      <tt>manifest_version</tt> entirely (a legacy manifest) has no currency
+      ordering to violate and is never rejected on these grounds, only
+      warned.</t>
+      <t><strong>Offline verification and trust bootstrapping.</strong> Offline
+      verification works from a local trust store of key manifests. A
+      manifest obtained from the issuer's own domain over TLS is the root
+      of trust: a verifier that resolved a manifest this way
+      <bcp14>MUST</bcp14> report <tt>trust: "verified"</tt> (absent a
+      discontinuous rotation). A manifest that arrived by any other path —
+      for example, embedded in an export bundle, never independently
+      fetched over TLS — is unauthenticated trust-on-first-use and
+      <bcp14>MUST</bcp14> be reported as
+      <tt>trust: "unauthenticated_tofu"</tt>, never silently upgraded.</t>
+    </section>
+
+    <section anchor="verify" numbered="true" toc="default">
+      <name>Verification Algorithm</name>
+      <t>A verifier executes <tt>verify(envelope, trust_store,
+      revocation_view=None, disclosure=None)</tt>, returning a layered
+      <tt>VerificationResult</tt>. Steps are executed in order; a step that
+      rejects the input short-circuits the remaining steps, and the
+      result's <tt>revocation</tt> and <tt>binding</tt> components take
+      their safe stub values (<tt>"unknown"</tt> and
+      <tt>"not_checked"</tt>) whenever not reached.</t>
+      <t>The living specification numbers these steps 0 through 7; that
+      numbering is preserved below as explicit labels rather than by list
+      auto-numbering, since step 0 is not step 1.</t>
+      <ul empty="true">
+        <li><strong>Step 0 (preconditions):</strong> parse the input once
+        per <xref target="canon"/> (UTF-8, attest-JCS-conformant, no
+        duplicate keys). Every later step operates on this single parsed
+        object, never on the raw transmitted bytes.</li>
+        <li><strong>Step 1 (envelope well-formedness):</strong>
+        <tt>attest_version</tt> is a version this verifier supports; the
+        signature block shape matches the selected profile
+        (<xref target="sigprofiles"/>).</li>
+        <li><strong>Step 2 (issuer binding):</strong> resolve the signing
+        key only from the trust store's manifest for
+        <tt>payload.issuer.id</tt>; both the <tt>kid</tt>'s domain prefix
+        and the resolved manifest's own <tt>issuer</tt> field
+        <bcp14>MUST</bcp14> equal it.</li>
+        <li><strong>Step 3 (key checks):</strong> the key
+        <bcp14>MUST</bcp14> be present in the resolved manifest and
+        <bcp14>MUST NOT</bcp14> be <tt>"compromised"</tt>;
+        <tt>issued_at</tt> <bcp14>MUST</bcp14> fall within its validity
+        window. A <tt>"retired"</tt> key still verifies, with a
+        warning.</li>
+        <li><strong>Step 4 (signature verification):</strong> per the
+        selected profile (<xref target="sigprofiles"/>).</li>
+        <li><strong>Step 5 (schema validation):</strong> the parsed
+        payload <bcp14>MUST</bcp14> satisfy the structural constraints of
+        the core receipt schema (<xref target="ATTEST-SCHEMA"/>,
+        <tt>attest-receipt.schema.json</tt> revision-pinned at tag
+        <tt>v0.4.0</tt>), EXCEPT its Stage 3 (v0.2 §17.8)
+        holder-binding conditional on <tt>license.transferable</tt> and
+        <tt>buyer.pubkey</tt>, which belongs to the Stage 3 extension
+        (<xref target="extensions"/>) and is OUTSIDE this profile's
+        normative scope — a verifier conforming to this document's
+        core/hybrid profile alone is not required to enforce it. This
+        document's own payload field registry
+        (<xref target="payload-registry"/>) is a descriptive summary of
+        that same structure, not a second, independent normative source:
+        the schema, minus that one named conditional, is the precise
+        structural authority this step checks against.</li>
+        <li><strong>Step 6 (revocation):</strong> only if
+        <tt>revocation_view</tt> is supplied, and only if signature and
+        schema both succeeded; see <xref target="revocation"/>.</li>
+        <li><strong>Step 7 (binding):</strong> only if <tt>disclosure</tt>
+        is supplied, and only if signature and schema both succeeded; see
+        <xref target="buyer-binding"/>.</li>
+      </ul>
+      <table anchor="tbl-resultvocab">
+        <name>Result vocabulary</name>
+        <thead><tr><th>Component</th><th>Allowed values</th></tr></thead>
+        <tbody>
+          <tr><td><tt>signature</tt></td><td><tt>valid</tt> |
+          <tt>invalid</tt></td></tr>
+          <tr><td><tt>schema</tt></td><td><tt>valid</tt> |
+          <tt>invalid</tt> | <tt>not_checked</tt></td></tr>
+          <tr><td><tt>revocation</tt></td><td><tt>unknown</tt> |
+          <tt>not_revoked_as_of:&lt;T&gt;</tt> | <tt>revoked</tt> |
+          <tt>invalid_revocation_ignored</tt></td></tr>
+          <tr><td><tt>binding</tt></td><td><tt>proven</tt> |
+          <tt>not_proven</tt> | <tt>not_checked</tt></td></tr>
+          <tr><td><tt>trust</tt></td><td><tt>verified</tt> |
+          <tt>unauthenticated_tofu</tt> |
+          <tt>unverified_rotation</tt></td></tr>
+        </tbody>
+      </table>
+      <t><tt>trust</tt> is resolved as early as possible and reported at
+      its best-available value even when a later step rejects the receipt;
+      a verifier <bcp14>MUST NOT</bcp14> silently reset it on later
+      failure. <tt>ok</tt> is defined as: <tt>signature == "valid"</tt>
+      <em>and</em> <tt>schema == "valid"</tt> <em>and</em>
+      <tt>revocation != "revoked"</tt> <em>and</em> the result
+      carries no errors. <tt>invalid_revocation_ignored</tt>,
+      <tt>unknown</tt>, and any <tt>not_revoked_as_of:&lt;T&gt;</tt> value
+      do <em>not</em> affect <tt>ok</tt>.</t>
+      <t>An unrecognized top-level <tt>payload</tt> field is allowed and
+      signed, but <bcp14>MUST</bcp14> be reported as a warning, never an
+      error. A conforming verifier <bcp14>MUST</bcp14> also warn on: a
+      signing key resolved as <tt>"retired"</tt>; a <tt>"drm-bound"</tt>
+      license; an <tt>end_of_life</tt> value outside the seed vocabulary; a
+      revocation record that matched this receipt but failed
+      authentication, or that was ignored because
+      <tt>revocability == "none"</tt>, or that authenticated but fell
+      outside a <tt>refund_window</tt>. Offline verifiers with no
+      <tt>revocation_view</tt> report <tt>revocation: "unknown"</tt>
+      honestly rather than failing the whole receipt closed.</t>
+      <t><strong>Structural ceilings.</strong> A verifier <bcp14>MUST</bcp14> bound
+      the resource a hostile envelope or manifest can force it to spend
+      before any cryptographic or schema work runs, and these ceilings bind
+      every <tt>attest_version</tt> this document defines, including the
+      hybrid envelopes and manifests of <xref target="hybrid-profile"/>. The
+      revocation-view record ceiling (<xref target="revocation"/>) is a
+      distinct bound and is NOT one of these structural ceilings: it applies
+      only at Step 6, to the untrusted <tt>revocation_view</tt> input, never
+      before cryptographic or schema work runs, and is evaluated
+      independently of the table below.</t>
+      <table anchor="tbl-ceilings">
+        <name>Structural ceilings</name>
+        <thead><tr><th>Ceiling</th><th>Value</th><th>Class</th></tr></thead>
+        <tbody>
+          <tr><td>Raw envelope size</td><td>1,048,576 bytes
+          (2<sup>20</sup>)</td><td>New; MUST accept within, MAY reject
+          beyond</td></tr>
+          <tr><td>Parsed envelope tree nesting depth</td><td>256</td>
+          <td>Pre-existing parser bound; unconditional</td></tr>
+          <tr><td>Issuer key manifest <tt>keys[]</tt> length</td>
+          <td>256 entries</td><td>New; MUST accept within, MAY reject
+          beyond</td></tr>
+          <tr><td>Artifact manifest <tt>artifacts[]</tt> length</td>
+          <td>4,096 entries</td><td>New; MUST accept within, MAY reject
+          beyond</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section anchor="revocation" numbered="true" toc="default">
+      <name>Revocation</name>
+      <t>A revocation record is a minimal, issuer-signed side-document:
+      <tt>receipt_id</tt> (the receipt it refers to), <tt>status</tt>
+      (only the literal value <tt>"revoked"</tt> carries revocation meaning
+      under the material this document specifies alone),
+      <tt>revoked_at</tt> (the record's own signed time — window checks are
+      evaluated against this, never the verifier's local clock), and
+      <tt>signature</tt> (Ed25519, plus for a hybrid-keyed issuer an
+      <tt>sig_ml_dsa_65</tt> leg per the AND-rule of
+      <xref target="hybrid-profile"/>, over <tt>JCS(record)</tt> with this
+      member removed).</t>
+      <t><strong>Authentication.</strong> A verifier <bcp14>MUST</bcp14> treat a
+      revocation record as authenticated only if: its resolving key
+      manifest is itself self-consistent; its signing key resolves to a
+      key-entry with <tt>status == "active"</tt> — a <tt>compromised</tt>
+      or <tt>retired</tt> key's signature <bcp14>MUST</bcp14> be rejected
+      exactly as it would be on a receipt; <tt>revoked_at</tt> falls within
+      that key's validity window; and the signature verifies. A verifier
+      <bcp14>MUST</bcp14> fail closed (treat as unauthenticated) on any
+      malformed, wrong-typed, or missing input, rather than raising. An
+      unauthenticated record that nonetheless matches this receipt's
+      <tt>receipt_id</tt> <bcp14>MUST</bcp14> be ignored, with a
+      warning, never honored.</t>
+      <table anchor="tbl-revocationclass">
+        <name>Revocation-by-class</name>
+        <thead>
+          <tr><th><tt>license.revocability</tt></th>
+          <th>Effect of an authenticated, matching record</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><tt>none</tt></td><td>Ignored: the record is itself
+          treated as invalid, <tt>revocation: "invalid_revocation_ignored"</tt>,
+          a warning is emitted, <tt>ok</tt> is unaffected. This is the
+          irrevocability guarantee: without it, the revocation mechanism
+          would falsify every <tt>revocability: "none"</tt> receipt's own
+          claim.</td></tr>
+          <tr><td><tt>refund_window</tt></td><td>Honored only if
+          <tt>revoked_at</tt> falls at or before
+          <tt>issued_at + revocation_window_days</tt>:
+          <tt>revocation: "revoked"</tt>, <tt>ok</tt> becomes false. A
+          record that matches and authenticates but falls outside the
+          window is ignored, with a warning.</td></tr>
+          <tr><td><tt>policy</tt></td><td>Honored as-is:
+          <tt>revocation: "revoked"</tt>, <tt>ok</tt> becomes false. A
+          verifier cannot itself evaluate the referenced policy terms, so a
+          correctly signed record is trusted.</td></tr>
+        </tbody>
+      </table>
+      <t><strong>Freshness anchor.</strong> <tt>T</tt>, in
+      <tt>not_revoked_as_of:&lt;T&gt;</tt>, <bcp14>MUST</bcp14> be computed
+      as the maximum <tt>revoked_at</tt> across all authenticated records
+      the verifier consulted in the supplied revocation view, regardless of
+      which <tt>receipt_id</tt> they target — it describes how current the
+      verifier's authenticated feed is, restricted to authenticated records
+      so that a forged far-future <tt>revoked_at</tt> cannot inflate the
+      reported freshness. With zero authenticated records the result
+      <bcp14>MUST</bcp14> be the bare literal <tt>unknown</tt>.</t>
+      <t><strong>Revocation-view ceiling.</strong> A verifier <bcp14>MUST</bcp14>
+      bound the number of records it will evaluate from an untrusted
+      revocation view to 10,000. An oversized view is never truncated and
+      never raises; it fails closed for revocable receipts (an untrusted
+      view too large to evaluate cannot rule out a revocation, so it
+      <bcp14>MUST NOT</bcp14> certify the receipt: this is recorded as an
+      error, <tt>ok</tt> becomes false), while for
+      <tt>revocability: "none"</tt> receipts an oversized view is a
+      non-fatal warning instead, since a revocation record can never affect
+      <tt>ok</tt> for that class regardless of view size. This bound exists
+      independently of the Structural ceilings of <xref target="verify"/>:
+      it is a per-call record-count cap on trusted-input-shaped-as-untrusted
+      data (the <tt>revocation_view</tt> parameter), evaluated at Step 6,
+      never a wire-format or manifest-shape structural bound checked before
+      cryptographic or schema work runs.</t>
+    </section>
+
+    <section anchor="security" numbered="true" toc="default">
+      <name>Security Considerations</name>
+      <t>This section distills the security-relevant properties of the
+      material specified above; the maintained, living threat model
+      (<tt>docs/spec/attest-threat-model.md</tt> in the attest source
+      repository) is the normative-in-intent, continuously updated
+      companion analysis and takes precedence over this summary.</t>
+      <t><strong>Offline verification is trust-on-first-use unless a TLS root is
+      established.</strong> A verifier that has never fetched an issuer's key
+      manifest over TLS from that issuer's own domain reports
+      <tt>trust: "unauthenticated_tofu"</tt>, never
+      <tt>"verified"</tt>, and this document defines no registry or
+      alternate root of trust that upgrades that value; a relying party
+      that requires stronger provenance than TOFU must obtain the manifest
+      over TLS itself.</t>
+      <t><strong>Key compromise and rotation continuity are fail-closed.</strong> A
+      key marked <tt>compromised</tt> invalidates every signature ever made
+      with it, and a discontinuous manifest rotation is reported, never
+      silently auto-accepted (<xref target="manifests"/>). Both properties
+      depend on the verifier actually holding, or being able to validate, a
+      continuous manifest chain; a verifier that bootstraps trust from an
+      isolated manifest with no chain cannot detect a rollback to an
+      earlier, since-compromised state on its own.</t>
+      <t><strong>Canonicalization strictness is deliberate.</strong> attest-JCS's
+      duplicate-member rejection, integer-only number restriction, and
+      lone-surrogate rejection (<xref target="canon"/>) exist so that two
+      independent implementations parsing the same bytes always compute the
+      identical signature input; a canonicalizer bug is a silent signature
+      mismatch, not a loud parse error, which is why cross-language parity
+      on the conformance corpus (<xref target="intro"/>) is load-bearing
+      for this property rather than merely a testing convenience.</t>
+      <t><strong>Signature malleability is closed by a pinned ruleset, not by
+      trusting a library's defaults.</strong> The Ed25519 verification rules of
+      <xref target="ed25519-profile"/> (non-canonical scalar rejection,
+      small-order/non-canonical point rejection) exist because different
+      cryptographic backends do not agree on malleability handling by
+      default; implementations built on different backends are expected to
+      disagree loudly at conformance-test time rather than silently
+      accepting a malleable signature in the field.</t>
+      <t><strong>The hybrid profile's post-quantum rationale is explicit and
+      bounded.</strong> <xref target="hybrid-profile"/> defends against an
+      attacker who can break exactly one of its two primitives, whether
+      that break is a future cryptographically-relevant quantum computer
+      against Ed25519 or a classical cryptanalytic advance against
+      ML-DSA-65; it makes no claim about an attacker capable of breaking
+      both simultaneously, and the mixed-keyset prohibition
+      (<xref target="hybrid-profile"/>) exists because an issuer that
+      adopts the hybrid profile but leaves an Ed25519-only key active would
+      otherwise silently forfeit that guarantee for any receipt forged
+      under the still-active classical-only sibling.</t>
+      <t><strong>A signature establishes what was signed, never why.</strong> Nothing
+      in the material this document specifies distinguishes a voluntary
+      signature from a coerced one: a revocation record produced under
+      compulsion authenticates identically to one produced voluntarily.
+      This is a permanent boundary of what a signature scheme can prove, not
+      a gap this document proposes to close.</t>
+      <t><strong>Structural ceilings bound resource exhaustion before
+      cryptographic work runs.</strong> The ceilings of
+      <xref target="verify"/> (envelope size, manifest array lengths,
+      parse-tree nesting depth) exist so that a hostile envelope or manifest
+      cannot force a verifier to spend unbounded resources parsing or
+      evaluating it before any signature or schema check has a chance to
+      reject it outright. The revocation-view record ceiling
+      (<xref target="revocation"/>) bounds a distinct, later-evaluated
+      input — the untrusted <tt>revocation_view</tt> supplied at Step 6,
+      only once signature and schema have both already succeeded — and
+      exists independently of the pre-crypto ceilings above, for the same
+      resource-exhaustion reason applied to that later, separately-supplied
+      input.</t>
+    </section>
+
+    <section anchor="privacy" numbered="true" toc="default">
+      <name>Privacy Considerations</name>
+      <t>This section distills the privacy-relevant properties of the
+      material specified above; the maintained, living privacy
+      considerations document (<tt>docs/spec/attest-privacy.md</tt> in the
+      attest source repository) is the continuously updated companion
+      analysis, using the RFC 6973 threat vocabulary, and takes precedence
+      over this summary.</t>
+      <t><strong>The buyer object's specified fields carry no plaintext
+      identifier.</strong> The <tt>buyer</tt> object's specified properties
+      are <tt>commitment</tt>, <tt>identifier_type</tt>, and
+      <tt>pubkey</tt> (<xref target="payload-registry"/>); none of the
+      three is a plaintext identifier — <tt>commitment</tt> is a salted
+      commitment, <tt>pubkey</tt> a pseudonymous public key, and
+      <tt>identifier_type</tt> a non-personal enum
+      (<tt>issuer-account</tt> or <tt>email</tt>). This is a bounded
+      property, scoped to that
+      specified set, not a guarantee about the <tt>buyer</tt> object as a
+      whole: <xref target="payload-registry"/> permits every payload
+      object, <tt>buyer</tt> included, to carry additional, unlisted
+      properties, and a verifier running <xref target="verify"/>
+      <bcp14>MUST</bcp14> accept a nested unrecognized <tt>buyer</tt>
+      member as signed and valid, with no mandated warning. Such a member
+      is outside this guarantee and MAY carry a plaintext identifier.
+      Restricted to the specified field set, a verifier running
+      <xref target="verify"/> without a disclosure never sees a plaintext
+      identifier there, and <tt>binding</tt> is not itself a component of
+      <tt>ok</tt>. The per-receipt salt required by
+      <xref target="buyer-binding"/> means the same identifier commits to
+      an unrelated value in each receipt, confining a leaked salt's
+      exposure to that one receipt's commitment path.</t>
+      <t><strong><tt>buyer.pubkey</tt> is pseudonymous, not an identity
+      credential.</strong> It is optional, defaults to null for client-less
+      flows, and a verifier <bcp14>MUST NOT</bcp14> treat its equality
+      across two receipts as proof of buyer identity
+      (<xref target="buyer-binding"/>); this is a property this document
+      requires of a conforming verifier's own verdict, not a property the
+      wire format itself enforces against a party that chooses to reuse a
+      key.</t>
+      <t><strong>Per-receipt salting is a commitment-path control, not a
+      general unlinkability guarantee.</strong> Two receipts issued to the same
+      buyer carry unrelated <tt>commitment</tt> values, and that is the
+      entire effect of the salting requirement. Every other stable value in
+      a pair of receipts — a reused <tt>buyer.pubkey</tt>, a non-null
+      <tt>supersedes</tt> pointer, an account handle placed in
+      <tt>work.identifiers</tt>, a shared <tt>kid</tt>, or a per-buyer
+      <tt>terms_uri</tt> — remains exactly what it was, and a party holding
+      two such receipts can still join them by any of these means. This
+      document does not claim, and implementers <bcp14>MUST NOT</bcp14>
+      represent, unlinkability across a buyer's whole receipt set as a
+      property the format provides; what it provides is that the
+      commitment values themselves do not supply the join.</t>
+      <t>Pseudonymity toward third parties is not anonymity toward the
+      issuer: the issuer itself computes the commitment from an identifier
+      it holds and generates the salt, so, for as long as it retains or can
+      derive that material, it can recompute and recognize the
+      corresponding commitments. Neither this profile nor the living
+      specification requires or forbids that retention.</t>
+    </section>
+
+    <section anchor="iana" numbered="true" toc="default">
+      <name>IANA Considerations</name>
+      <t>This document has no IANA actions.</t>
+    </section>
+
+    <section anchor="extensions" numbered="true" toc="default">
+      <name>Extensions</name>
+      <t>This section is entirely <em>non-normative</em>. It points at
+      material the living specification defines and normatively governs;
+      nothing stated in this section imposes a requirement, and neither of
+      the two profiles it summarizes is part of this document's own
+      conformance surface (<xref target="intro"/>). A conforming
+      implementation of this document alone implements neither.</t>
+
+      <section anchor="ext-stage2" numbered="true" toc="default">
+        <name>Transparency logging and anchoring (pointer only)</name>
+        <t>The living specification (<tt>docs/spec/attest-v0.2.md</tt>,
+        Sections 7 through 16) defines an additive transparency layer: a
+        static, mirrorable append-only log substrate documented as a subset
+        of the C2SP tlog-tiles and tlog-checkpoint conventions, built on an
+        RFC 6962-style Merkle tree; hybrid Ed25519+ML-DSA-65-signed
+        checkpoints; an OpenTimestamps-based anchoring mechanism that proves
+        a checkpoint existed no later than a fixed, externally verifiable
+        point in time; and three purely informational
+        <tt>VerificationResult</tt> components —
+        <tt>transparency</tt>, <tt>corroboration</tt>, and
+        <tt>manifest_freshness</tt> — that a verifier implementing that
+        layer may additionally populate. The living specification states,
+        as a central and load-bearing property, that this layer never
+        upgrades <tt>trust</tt> and, with two narrowly scoped exceptions
+        it defines precisely, never changes <tt>signature</tt>,
+        <tt>schema</tt>, <tt>revocation</tt>, <tt>binding</tt>, or
+        <tt>ok</tt> for any receipt. None of this is specified normatively
+        by the present document; a reader who needs the exact mechanism is
+        directed to the living specification.</t>
+      </section>
+
+      <section anchor="ext-stage3" numbered="true" toc="default">
+        <name>Issuer-mediated transfer (pointer only)</name>
+        <t>The living specification (<tt>docs/spec/attest-v0.2.md</tt>,
+        Section 17) defines an issuer-mediated protocol that gives the
+        reserved <tt>license.transferable</tt> field
+        (<xref target="payload-registry"/>) its first assigned meaning: an
+        issuer-signed transfer record, logged in the transparency layer of
+        <xref target="ext-stage2"/>, that extinguishes an old receipt via a
+        new reachable value of the revocation component
+        (<tt>revocation: "transferred"</tt>) and issues a new receipt to an
+        incoming holder, with a separate chain-of-title audit surface for
+        tracing a receipt's transfer history. This profile is layered on
+        top of the transparency layer of <xref target="ext-stage2"/> and
+        requires it. None of this is specified normatively by the present
+        document, including the one new reachable revocation value it
+        introduces; a reader who needs the exact mechanism, its consent
+        gate, or its chain-of-title diagnostics is directed to the living
+        specification.</t>
+      </section>
+    </section>
+
+  </middle>
+
+  <back>
+    <references>
+      <name>Normative References</name>
+      <reference anchor="RFC2119" target="https://www.rfc-editor.org/info/rfc2119">
+        <front>
+          <title>Key words for use in RFCs to Indicate Requirement Levels</title>
+          <author initials="S." surname="Bradner" fullname="S. Bradner"/>
+          <date year="1997" month="March"/>
+        </front>
+        <seriesInfo name="BCP" value="14"/>
+        <seriesInfo name="RFC" value="2119"/>
+        <seriesInfo name="DOI" value="10.17487/RFC2119"/>
+      </reference>
+      <reference anchor="RFC8174" target="https://www.rfc-editor.org/info/rfc8174">
+        <front>
+          <title>Ambiguity of Uppercase vs Lowercase in RFC 2119 Key Words</title>
+          <author initials="B." surname="Leiba" fullname="B. Leiba"/>
+          <date year="2017" month="May"/>
+        </front>
+        <seriesInfo name="BCP" value="14"/>
+        <seriesInfo name="RFC" value="8174"/>
+        <seriesInfo name="DOI" value="10.17487/RFC8174"/>
+      </reference>
+      <reference anchor="RFC8785" target="https://www.rfc-editor.org/info/rfc8785">
+        <front>
+          <title>JSON Canonicalization Scheme (JCS)</title>
+          <author initials="A." surname="Rundgren" fullname="A. Rundgren"/>
+          <author initials="B." surname="Jordan" fullname="B. Jordan"/>
+          <author initials="S." surname="Erdtman" fullname="S. Erdtman"/>
+          <date year="2020" month="June"/>
+        </front>
+        <seriesInfo name="RFC" value="8785"/>
+        <seriesInfo name="DOI" value="10.17487/RFC8785"/>
+      </reference>
+      <reference anchor="RFC8032" target="https://www.rfc-editor.org/info/rfc8032">
+        <front>
+          <title>Edwards-Curve Digital Signature Algorithm (EdDSA)</title>
+          <author initials="S." surname="Josefsson" fullname="S. Josefsson"/>
+          <author initials="I." surname="Liusvaara" fullname="I. Liusvaara"/>
+          <date year="2017" month="January"/>
+        </front>
+        <seriesInfo name="RFC" value="8032"/>
+        <seriesInfo name="DOI" value="10.17487/RFC8032"/>
+      </reference>
+      <reference anchor="RFC4648" target="https://www.rfc-editor.org/info/rfc4648">
+        <front>
+          <title>The Base16, Base32, and Base64 Data Encodings</title>
+          <author initials="S." surname="Josefsson" fullname="S. Josefsson"/>
+          <date year="2006" month="October"/>
+        </front>
+        <seriesInfo name="RFC" value="4648"/>
+        <seriesInfo name="DOI" value="10.17487/RFC4648"/>
+      </reference>
+      <reference anchor="FIPS204" target="https://csrc.nist.gov/pubs/fips/204/final">
+        <front>
+          <title>Module-Lattice-Based Digital Signature Standard</title>
+          <author>
+            <organization>National Institute of Standards and Technology</organization>
+          </author>
+          <date year="2024" month="August"/>
+        </front>
+        <seriesInfo name="FIPS" value="204"/>
+      </reference>
+      <reference anchor="ATTEST-SCHEMA" target="https://github.com/SVM-98/attest/blob/v0.4.0/docs/spec/schema/attest-receipt.schema.json">
+        <front>
+          <title>attest receipt JSON Schema (attest-receipt.schema.json), revision-pinned</title>
+          <author initials="S." surname="Martinalli" fullname="S. Martinalli"/>
+          <date year="2026"/>
+        </front>
+        <annotation>The machine-readable structural authority this profile's
+        Step 5 (<xref target="verify"/>) validates against, pinned at tag
+        <tt>v0.4.0</tt> — the released specification state carrying the
+        mirrored v0.1 revision 5 / v0.2 revision 6 (<xref target="snapshot"/>).
+        The tag is an immutable target, so a later change to the repository's
+        working schema cannot silently alter this document's normative payload
+        constraints. Its Stage 3 (v0.2 §17.8) holder-binding conditional is
+        outside this profile's normative surface (see Step 5).</annotation>
+      </reference>
+    </references>
+    <references>
+      <name>Informative References</name>
+      <reference anchor="RFC9334" target="https://www.rfc-editor.org/info/rfc9334">
+        <front>
+          <title>Remote ATtestation procedureS (RATS) Architecture</title>
+          <author initials="H." surname="Birkholz" fullname="H. Birkholz"/>
+          <author initials="D." surname="Thaler" fullname="D. Thaler"/>
+          <author initials="M." surname="Richardson" fullname="M. Richardson"/>
+          <author initials="N." surname="Smith" fullname="N. Smith"/>
+          <author initials="W." surname="Pan" fullname="W. Pan"/>
+          <date year="2023" month="January"/>
+        </front>
+        <seriesInfo name="RFC" value="9334"/>
+        <seriesInfo name="DOI" value="10.17487/RFC9334"/>
+      </reference>
+      <reference anchor="RFC9943" target="https://www.rfc-editor.org/info/rfc9943">
+        <front>
+          <title>An Architecture for Trustworthy and Transparent Digital Supply Chains</title>
+          <author>
+            <organization>IETF SCITT Working Group</organization>
+          </author>
+          <date year="2026" month="June"/>
+        </front>
+        <seriesInfo name="RFC" value="9943"/>
+        <annotation>Cited in this document for its architectural definition
+        of a SCITT "receipt" as inclusion evidence, distinguished in
+        <xref target="terminology"/> and <xref target="existing-standards"/>
+        from attest's own, unrelated use of the word "receipt."</annotation>
+      </reference>
+      <reference anchor="RFC7515" target="https://www.rfc-editor.org/info/rfc7515">
+        <front>
+          <title>JSON Web Signature (JWS)</title>
+          <author initials="M." surname="Jones" fullname="M. Jones"/>
+          <author initials="J." surname="Bradley" fullname="J. Bradley"/>
+          <author initials="N." surname="Sakimura" fullname="N. Sakimura"/>
+          <date year="2015" month="May"/>
+        </front>
+        <seriesInfo name="RFC" value="7515"/>
+        <seriesInfo name="DOI" value="10.17487/RFC7515"/>
+      </reference>
+      <reference anchor="RFC9052" target="https://www.rfc-editor.org/info/rfc9052">
+        <front>
+          <title>CBOR Object Signing and Encryption (COSE): Structures and Process</title>
+          <author initials="J." surname="Schaad" fullname="J. Schaad"/>
+          <date year="2022" month="August"/>
+        </front>
+        <seriesInfo name="RFC" value="9052"/>
+        <seriesInfo name="DOI" value="10.17487/RFC9052"/>
+      </reference>
+      <reference anchor="W3C.VC-DATA-MODEL" target="https://www.w3.org/TR/vc-data-model-2.0/">
+        <front>
+          <title>Verifiable Credentials Data Model v2.0</title>
+          <author>
+            <organization>World Wide Web Consortium (W3C)</organization>
+          </author>
+          <date year="2025"/>
+        </front>
+      </reference>
+      <reference anchor="C2PA" target="https://c2pa.org/specifications/specifications/2.2/specs/C2PA_Specification.html">
+        <front>
+          <title>C2PA Technical Specification</title>
+          <author>
+            <organization>Coalition for Content Provenance and Authenticity (C2PA)</organization>
+          </author>
+          <date year="2025"/>
+        </front>
+      </reference>
+      <reference anchor="ATTEST-REPO" target="https://github.com/SVM-98/attest">
+        <front>
+          <title>attest: Portable, Offline-Verifiable Digital Purchase Receipts (source repository)</title>
+          <author initials="S." surname="Martinalli" fullname="S. Martinalli"/>
+          <date year="2026"/>
+        </front>
+        <annotation>The living, normative specification
+        (<tt>docs/spec/attest-v0.1.md</tt>, <tt>docs/spec/attest-v0.2.md</tt>),
+        the JSON Schema (referenced normatively and revision-pinned as
+        <xref target="ATTEST-SCHEMA"/>), the standards-relationship annex
+        (<tt>docs/spec/attest-standards-relationship.md</tt>), the maintained
+        threat model and privacy considerations, and the cross-language
+        conformance vector corpus this document distills all live in this
+        repository. This document mirrors specific, declared revisions of
+        it; see <xref target="snapshot"/>.</annotation>
+      </reference>
+    </references>
+
+    <section anchor="existing-standards" numbered="true" toc="default">
+      <name>Relationship to Existing Standards</name>
+      <t>This appendix is a compressed distillation of a companion document
+      in the attest source repository,
+      <tt>docs/spec/attest-standards-relationship.md</tt>
+      (<xref target="ATTEST-REPO"/>), which is the canonical source for
+      this material and states each boundary at full length, including what
+      a future bridge to a given standard could look like. This appendix is
+      necessarily incomplete relative to that document and defers to it on
+      any point of detail.</t>
+      <t><strong>W3C Verifiable Credentials
+      <xref target="W3C.VC-DATA-MODEL"/>.</strong> The VC Data Model describes an
+      open-world claim shape secured by a plurality of possible proof
+      suites. attest's payload has a fixed required core with a single
+      mandatory canonicalization profile (<xref target="canon"/>), made
+      cross-language-safe by a shared conformance corpus rather than by
+      proof-suite negotiation; the two models trade in opposite directions
+      on purpose. An attest envelope could in principle be carried inside a
+      credential's subject as an opaque, independently verifiable object;
+      neither specification depends on the other.</t>
+      <t><strong>eIDAS 2.0 and the EUDI Wallet.</strong> eIDAS 2.0 attests to
+      identity and regulated attributes through a wallet-mediated, legally
+      tiered apparatus (qualified and public-sector electronic attestations
+      of attributes). attest attests to a merchant's grant of a license,
+      verified entirely offline with no wallet, attestation provider, or
+      Member State supervision anywhere in its path. The two frameworks
+      attest to different kinds of fact for different kinds of relying
+      party.</t>
+      <t><strong>JOSE/JWS <xref target="RFC7515"/> and COSE
+      <xref target="RFC9052"/>.</strong> Both formats sign the producer's own
+      serialized payload bytes as transmitted (or a deterministic
+      re-encoding derived from them), which is exactly what makes detached
+      content a first-class feature of each. attest inverts that
+      relationship: its signature input is the canonical re-derivation of
+      the parsed payload (<xref target="canon"/>), recomputable from a
+      parsed JSON object in any language with no side channel and no
+      preserved wire form to keep — at the cost of requiring every
+      implementation to canonicalize identically, which is exactly the
+      cross-language risk the conformance corpus
+      (<xref target="intro"/>) exists to make checkable rather than merely
+      asserted.</t>
+      <t><strong>RFC 8785 (JCS).</strong> attest-JCS (<xref target="canon"/>) is a
+      restriction of, not an alternative to, <xref target="RFC8785"/>:
+      every attest-JCS output is also a valid RFC 8785 output. What
+      attest-JCS adds — the integer-only number restriction, duplicate-
+      member rejection, and lone-surrogate rejection — narrows the
+      accepted input set within RFC 8785's own envelope; it never departs
+      from it.</t>
+      <t><strong>C2PA <xref target="C2PA"/>.</strong> A C2PA manifest answers what an asset is and how it
+      was produced. attest answers a different, adjacent question about
+      the same asset: that a license to hold or use a copy of it was
+      granted, by whom, to whom, and under what terms. A C2PA-signed
+      asset and an attest receipt for the same underlying artifact are not
+      in tension and can coexist without any new mechanism in either
+      specification.</t>
+      <t><strong>SCITT and RFC 9943.</strong> A SCITT "receipt" is a transparency
+      service's proof that a signed statement was registered — evidence of
+      inclusion in an append-only log. An attest "receipt" is the signed
+      purchase statement itself
+      (<xref target="terminology"/>). The two protocols use one word for
+      two different things. Where the living specification's Stage 2 log
+      substrate (<xref target="ext-stage2"/>) genuinely does touch SCITT's
+      territory — an append-only, Merkle-tree-based registration and
+      inclusion-proof substrate — that overlap is real: attest's log
+      applies the same class of transparency-log machinery to a narrower,
+      purchase-evidence-specific evidence model, keeping the log strictly
+      corroborative and never authoritative over a receipt's own
+      signature-based validity.</t>
+      <t><strong>RATS (RFC 9334).</strong> Restated from
+      <xref target="terminology"/>: "attest" is a project name chosen with
+      no relationship to the RATS architecture, and this document's
+      protocol makes no RATS claim — no Attester, Verifier, or Relying
+      Party role mapping in the RATS sense, and no Evidence, Attestation
+      Results, or execution-environment endorsement semantics.</t>
+    </section>
+  </back>
+</rfc>
