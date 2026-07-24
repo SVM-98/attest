@@ -51,7 +51,8 @@ CREATE TABLE IF NOT EXISTS claims (
   token TEXT PRIMARY KEY, email TEXT NOT NULL, game_id TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending',
   attempts INTEGER NOT NULL DEFAULT 0,
-  next_attempt_at TEXT NOT NULL, created_at TEXT NOT NULL);
+  next_attempt_at TEXT NOT NULL, created_at TEXT NOT NULL,
+  result_download_token TEXT);
 CREATE TABLE IF NOT EXISTS dead_letters (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   platform TEXT NOT NULL, purchase_id TEXT, reason TEXT NOT NULL,
@@ -82,6 +83,11 @@ class Claim:
     attempts: int
     next_attempt_at: str
     created_at: str
+    # Set by `complete_claim` (T9): the download token of the receipt this
+    # claim resolved to, once its itch purchase is API-confirmed. Defaults to
+    # None so pre-T9 construction sites (existing T4 tests/callers) are
+    # unaffected -- purely additive.
+    result_download_token: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +125,7 @@ def _claim_from_row(row: sqlite3.Row) -> Claim:
         attempts=row["attempts"],
         next_attempt_at=row["next_attempt_at"],
         created_at=row["created_at"],
+        result_download_token=row["result_download_token"],
     )
 
 
@@ -280,9 +287,18 @@ class Ledger:
             ).fetchall()
         return [_claim_from_row(row) for row in rows]
 
-    def complete_claim(self, token: str) -> None:
+    def complete_claim(self, token: str, *, result_download_token: str | None = None) -> None:
+        # `result_download_token` records the receipt's download token
+        # (T9's poller passes it once an itch purchase is API-confirmed and
+        # issued/already-present); it stays NULL when a claim completes
+        # without ever producing a receipt (e.g. a dead-lettered purchase --
+        # the purchase provably existed on the API, so the claim is done,
+        # but there is nothing to download).
         with self._lock, self._conn:
-            self._conn.execute("UPDATE claims SET status = 'confirmed' WHERE token = ?", (token,))
+            self._conn.execute(
+                "UPDATE claims SET status = 'confirmed', result_download_token = ? WHERE token = ?",
+                (result_download_token, token),
+            )
 
     def defer_claim(self, token: str, *, next_attempt_at: str) -> None:
         with self._lock, self._conn:
