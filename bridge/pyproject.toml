@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling==1.31.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "attest-bridge"
+version = "0.1.0"
+description = "attest webhook bridge — self-hosted purchase-event to signed-receipt issuer (UNRELEASED)"
+requires-python = ">=3.12"
+dependencies = ["attest-receipts"]
+classifiers = ["Private :: Do Not Upload"]
+
+[project.scripts]
+attest-bridge = "attest_bridge.cli:main"
+
+[tool.uv.sources]
+attest-receipts = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/attest_bridge"]
