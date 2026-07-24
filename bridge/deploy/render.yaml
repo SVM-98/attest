@@ -1,0 +1,36 @@
+# attest-bridge on Render (Blueprint). From the Render dashboard: New -> Blueprint
+# -> point at this repo -> Render finds this file at bridge/deploy/render.yaml
+# once you pick it in the "Blueprint file" field (it does not need to live at
+# the repo root). See bridge/docs/deploy.md for the one manual step Render
+# can't do from YAML: after the service exists, upload the four merchant
+# files below as "Secret Files" from the dashboard (Environment tab) — each
+# lands at /etc/secrets/<filename> at runtime:
+#   bridge.toml, key-manifest.json, issuer.seed, issuer.mldsa.json
+# bridge.toml itself is uploaded as a Secret File here (not because its
+# content is secret — it isn't, once *_env values are stripped — but because
+# that's the one path every other Secret File also lands under, so
+# `--config` can point at all of them with a single mount).
+services:
+  - type: web
+    name: attest-bridge
+    runtime: docker
+    dockerfilePath: ./bridge/deploy/Dockerfile
+    dockerContext: .
+    plan: starter
+    healthCheckPath: /healthz
+    # Overrides the Dockerfile's ENTRYPOINT: bridge.toml (and everything it
+    # points at) lives under /etc/secrets on Render, not /etc/attest-bridge.
+    dockerCommand: "attest-bridge serve --config /etc/secrets/bridge.toml --host 0.0.0.0 --port 8080"
+    disk:
+      name: attest-bridge-ledger
+      mountPath: /var/lib/attest-bridge
+      sizeGB: 1
+    envVars:
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: STRIPE_API_KEY
+        sync: false
+      - key: ITCH_API_KEY
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false

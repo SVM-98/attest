@@ -1,0 +1,28 @@
+# One-command self-hosted deploy (a VPS, a home server, ...). Run from the
+# REPO ROOT: `docker compose -f bridge/deploy/docker-compose.yml up -d`
+# (the build context is the repo root — see bridge/deploy/Dockerfile).
+#
+# Before the first `up`, next to this file (bridge/deploy/):
+#   mkdir -p etc secrets
+#   cp <your bridge.toml> <your key-manifest.json> etc/
+#   cp <your issuer.seed> <your issuer.mldsa.json> secrets/
+#   printf 'STRIPE_WEBHOOK_SECRET=whsec_...\n' > .env   # + STRIPE_API_KEY / ITCH_API_KEY / SMTP_PASSWORD, whichever your bridge.toml references
+#
+# See bridge/docs/setup-stripe.md and bridge/docs/deploy.md for the full walkthrough.
+services:
+  attest-bridge:
+    build:
+      context: ../..
+      dockerfile: bridge/deploy/Dockerfile
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./etc:/etc/attest-bridge:ro    # bridge.toml + key-manifest.json
+      - ./secrets:/secrets:ro          # issuer.seed + issuer.mldsa.json (0600 on the host)
+      - ledger-data:/var/lib/attest-bridge   # the Ledger's sqlite3 file — the only writable mount
+    env_file:
+      - .env
+    restart: unless-stopped
+
+volumes:
+  ledger-data:
