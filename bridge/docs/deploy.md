@@ -9,6 +9,11 @@ consider it; it is not a safe target for this particular service. Every
 target needs the same four things somewhere on the machine/container it
 runs on:
 
+The container installs the published `attest-receipts` package, not this
+checkout's workspace override. It requires `attest-receipts>=0.4.0`; pin a
+published version explicitly in your own deployment if reproducibility across
+image rebuilds matters.
+
 - `bridge.toml` and `key-manifest.json` (config + the public key manifest —
   not secret, but private to your deployment; the container's `ENTRYPOINT`
   always reads these from `/etc/attest-bridge/`, whether they arrive as a

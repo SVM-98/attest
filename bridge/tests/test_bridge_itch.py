@@ -521,7 +521,9 @@ def test_api_error_defers_claim_with_exponential_backoff(ledger: Ledger, core: I
     ).strftime(_RFC3339)
 
 
-def test_claim_is_exhausted_after_reaching_max_attempts(ledger: Ledger, core: IssuingCore) -> None:
+def test_claim_is_exhausted_after_reaching_max_attempts(
+    ledger: Ledger, core: IssuingCore, caplog: pytest.LogCaptureFixture
+) -> None:
     now = datetime(2026, 7, 24, 10, 0, 0, tzinfo=UTC)
     token = ledger.enqueue_claim("buyer@example.com", "123456", now=now.strftime(_RFC3339))
     adapter = ItchAdapter(api_key="key", http_get=_failing_http_get())
@@ -537,6 +539,9 @@ def test_claim_is_exhausted_after_reaching_max_attempts(ledger: Ledger, core: Is
     assert claim is not None
     assert claim.status == "exhausted"
     assert ledger.due_claims((now + timedelta(seconds=1000)).strftime(_RFC3339)) == []
+    assert "game 123456 (attempt 1)" in caplog.text
+    dead_letters = ledger.unresolved_dead_letters()
+    assert dead_letters[-1].reason == "claim abandoned after 2 failed API attempts"
 
 
 def test_claim_gets_exactly_max_attempts_api_calls(ledger: Ledger, core: IssuingCore) -> None:

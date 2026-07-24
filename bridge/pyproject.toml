@@ -7,7 +7,7 @@ name = "attest-bridge"
 version = "0.1.0"
 description = "attest webhook bridge — self-hosted purchase-event to signed-receipt issuer (UNRELEASED)"
 requires-python = ">=3.12"
-dependencies = ["attest-receipts"]
+dependencies = ["attest-receipts>=0.4.0"]
 classifiers = ["Private :: Do Not Upload"]
 
 [project.scripts]
