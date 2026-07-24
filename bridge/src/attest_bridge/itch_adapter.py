@@ -221,7 +221,7 @@ class ItchPoller:
         now_rfc3339 = now.strftime(_RFC3339)
         for claim in self._ledger.due_claims(now_rfc3339):
             try:
-                completed, download_token = self._drain_claim(claim, now_rfc3339)
+                completed, receipts_issued = self._drain_claim(claim, now_rfc3339)
             except ItchApiError:
                 self._defer_or_exhaust(claim, now)
                 continue
@@ -235,14 +235,18 @@ class ItchPoller:
             if not completed:
                 self._defer_or_exhaust(claim, now)
                 continue
-            self._ledger.complete_claim(claim.token, result_download_token=download_token)
+            self._ledger.complete_claim(claim.token, receipts_issued=receipts_issued)
 
-    def _drain_claim(self, claim: Claim, now_rfc3339: str) -> tuple[bool, str | None]:
+    def _drain_claim(self, claim: Claim, now_rfc3339: str) -> tuple[bool, int]:
         """Fetch the claim's live purchases and issue for the actionable ones.
-        Returns (completed, download_token). Raises ItchApiError on API failure."""
+        Returns (completed, receipts_issued). Every API-confirmed purchase is
+        independently processed, so one malformed purchase cannot prevent a
+        later purchase in the same response from being issued and emailed.
+        Raises ItchApiError on API failure."""
         purchases = self._adapter.fetch_purchases(claim.game_id, claim.email)
         completed = False
-        download_token: str | None = None
+        receipts_issued = 0
+        retryable_failure = False
         for raw in purchases:
             if not isinstance(raw, dict):
                 _log.warning(
@@ -263,21 +267,25 @@ class ItchPoller:
                 completed = True
                 continue
             purchase_id = normalized.platform_purchase_id
-            stored = self._ledger.get_receipt("itch", purchase_id)
-            if stored is None:
-                try:
-                    self._core.process(normalized)
-                except (PurchaseRejected, UnmappedProduct) as exc:
-                    self._ledger.add_dead_letter(
-                        "itch", purchase_id, str(exc), json.dumps(raw), now=now_rfc3339
-                    )
-                    completed = True
-                    continue
-                stored = self._ledger.get_receipt("itch", purchase_id)
+            try:
+                outcome = self._core.process(normalized)
+            except (PurchaseRejected, UnmappedProduct) as exc:
+                self._ledger.add_dead_letter(
+                    "itch", purchase_id, str(exc), json.dumps(raw), now=now_rfc3339
+                )
+                completed = True
+                continue
+            except Exception:
+                # Do not let one transient signing/storage failure starve a
+                # second purchase returned for this same claim. The claim stays
+                # pending for retry after the remaining rows are attempted.
+                _log.exception("itch poller: failed purchase %s; continuing", purchase_id)
+                retryable_failure = True
+                continue
             completed = True
-            if stored is not None and download_token is None:
-                download_token = stored.download_token
-        return completed, download_token
+            if not outcome.duplicate:
+                receipts_issued += 1
+        return completed and not retryable_failure, receipts_issued
 
     def _defer_or_exhaust(self, claim: Claim, now: datetime) -> None:
         if claim.attempts + 1 >= self._max_attempts:

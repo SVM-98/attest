@@ -36,6 +36,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from attest_bridge.model import ClaimQueueFull
+
+MAX_PENDING_CLAIMS = 1000
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
   platform TEXT NOT NULL, event_id TEXT NOT NULL, received_at TEXT NOT NULL,
@@ -52,7 +56,7 @@ CREATE TABLE IF NOT EXISTS claims (
   status TEXT NOT NULL DEFAULT 'pending',
   attempts INTEGER NOT NULL DEFAULT 0,
   next_attempt_at TEXT NOT NULL, created_at TEXT NOT NULL,
-  result_download_token TEXT);
+  receipts_issued INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS dead_letters (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   platform TEXT NOT NULL, purchase_id TEXT, reason TEXT NOT NULL,
@@ -83,11 +87,10 @@ class Claim:
     attempts: int
     next_attempt_at: str
     created_at: str
-    # Set by `complete_claim` (T9): the download token of the receipt this
-    # claim resolved to, once its itch purchase is API-confirmed. Defaults to
-    # None so pre-T9 construction sites (existing T4 tests/callers) are
-    # unaffected -- purely additive.
-    result_download_token: str | None = None
+    # Operator-only count of receipts issued while resolving this claim. It is
+    # intentionally never an HTTP response field: claim status must not reveal
+    # whether an address owns a particular game.
+    receipts_issued: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,7 +128,7 @@ def _claim_from_row(row: sqlite3.Row) -> Claim:
         attempts=row["attempts"],
         next_attempt_at=row["next_attempt_at"],
         created_at=row["created_at"],
-        result_download_token=row["result_download_token"],
+        receipts_issued=row["receipts_issued"],
     )
 
 
@@ -258,8 +261,24 @@ class Ledger:
     # -- itch claims queue (the poller "cursor") -----------------------------
 
     def enqueue_claim(self, email: str, game_id: str, *, now: str) -> str:
-        token = secrets.token_urlsafe(32)
         with self._lock, self._conn:
+            # This lookup and potential insert deliberately share one lock and
+            # transaction: otherwise concurrent submissions could both miss the
+            # existing pending row or race past the queue cap.
+            existing = self._conn.execute(
+                "SELECT token FROM claims WHERE email = ? AND game_id = ? "
+                "AND status = 'pending' ORDER BY created_at LIMIT 1",
+                (email, game_id),
+            ).fetchone()
+            if existing is not None:
+                return str(existing["token"])
+            pending = self._conn.execute(
+                "SELECT COUNT(*) AS count FROM claims WHERE status = 'pending'"
+            ).fetchone()
+            assert pending is not None
+            if int(pending["count"]) >= MAX_PENDING_CLAIMS:
+                raise ClaimQueueFull("claim queue is full")
+            token = secrets.token_urlsafe(32)
             self._conn.execute(
                 """
                 INSERT INTO claims (token, email, game_id, status, attempts,
@@ -287,17 +306,16 @@ class Ledger:
             ).fetchall()
         return [_claim_from_row(row) for row in rows]
 
-    def complete_claim(self, token: str, *, result_download_token: str | None = None) -> None:
-        # `result_download_token` records the receipt's download token
-        # (T9's poller passes it once an itch purchase is API-confirmed and
-        # issued/already-present); it stays NULL when a claim completes
-        # without ever producing a receipt (e.g. a dead-lettered purchase --
-        # the purchase provably existed on the API, so the claim is done,
-        # but there is nothing to download).
+    def complete_claim(self, token: str, *, receipts_issued: int) -> None:
+        """Mark a claim terminal and retain only an operator-visible count.
+
+        No receipt identifier or download capability is associated with the
+        claim row: claims are delivered to the submitted mailbox only.
+        """
         with self._lock, self._conn:
             self._conn.execute(
-                "UPDATE claims SET status = 'confirmed', result_download_token = ? WHERE token = ?",
-                (result_download_token, token),
+                "UPDATE claims SET status = 'confirmed', receipts_issued = ? WHERE token = ?",
+                (receipts_issued, token),
             )
 
     def defer_claim(self, token: str, *, next_attempt_at: str) -> None:

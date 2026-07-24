@@ -269,6 +269,12 @@ def load_config(path: Path, env: Mapping[str, str] | None = None) -> BridgeConfi
     itch_table = _optional_table(data, "itch", context="config")
     delivery_table = _optional_table(data, "delivery", context="config")
 
+    # itch claim resolution attaches a salt-bearing receipt and is deliberately
+    # delivery-only-via-email. A download-link-only deployment must therefore
+    # fail before it can accept any itch claims.
+    if itch_table is not None and delivery_table is None:
+        raise ConfigError("[itch] requires a usable [delivery] SMTP section")
+
     return BridgeConfig(
         public_base_url=public_base_url,
         ledger_path=ledger_path,
