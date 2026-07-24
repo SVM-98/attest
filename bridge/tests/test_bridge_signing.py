@@ -1,0 +1,234 @@
+"""SigningKeyProvider: load the merchant's hybrid signing key + key manifest, fail-fast.
+
+Contract under test (task-3-brief.md): `load_issuer` reads the exact on-disk
+formats `attest keygen`/`manifest init` write, cross-checks the loaded key
+material against its own key manifest, and raises `ConfigError` — naming the
+file path and/or kid, NEVER decoded key bytes — on any corruption. The
+cross-check (manifest entry `pub`/`pub_ml_dsa_65` must match the loaded
+Ed25519/ML-DSA-65 public keys) exists so a mis-configured key/manifest pair is
+caught at startup, before the first webhook.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+from attest_bridge.config import IssuerConfig
+from attest_bridge.model import ConfigError
+from attest_bridge.signing import IssuerIdentity, load_issuer
+from conftest import DISPLAY_NAME, ISSUER, KID, VALID_FROM
+
+from attest import keys, manifests, pq
+
+
+@pytest.fixture(scope="module")
+def decoy_mldsa() -> pq.MLDSAKeyPair:
+    """A second, independently generated ML-DSA-65 keypair — used only to build
+    a manifest entry whose declared pub differs from the loaded signing key's
+    pub while the manifest stays self-consistent (signed by this decoy)."""
+    return pq.generate()
+
+
+def _write_issuer_files(
+    tmp_path: Path,
+    hybrid_keys: pq.HybridSigningKeys,
+    manifest: dict[str, object],
+    *,
+    kid: str = KID,
+) -> IssuerConfig:
+    seed_path = tmp_path / "issuer.seed"
+    seed_path.write_text(keys.b64u(hybrid_keys.ed.seed) + "\n", encoding="utf-8")
+
+    mldsa_path = tmp_path / "issuer.mldsa.json"
+    mldsa_path.write_text(
+        json.dumps(
+            {
+                "alg": pq.ML_DSA_65_ALG,
+                "sk": keys.b64u(hybrid_keys.mldsa.sk),
+                "pub": keys.b64u(hybrid_keys.mldsa.pub),
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+    manifest_path = tmp_path / "key-manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    return IssuerConfig(
+        id=ISSUER,
+        display_name=DISPLAY_NAME,
+        kid=kid,
+        seed_path=seed_path,
+        mldsa_key_path=mldsa_path,
+        manifest_path=manifest_path,
+    )
+
+
+def test_load_issuer_happy_path(
+    tmp_path: Path, hybrid_keys: pq.HybridSigningKeys, key_manifest: dict[str, object]
+) -> None:
+    config = _write_issuer_files(tmp_path, hybrid_keys, key_manifest)
+
+    identity = load_issuer(config)
+
+    assert isinstance(identity, IssuerIdentity)
+    assert identity.issuer_id == ISSUER
+    assert identity.display_name == DISPLAY_NAME
+    assert identity.kid == KID
+    assert identity.signing_keys.ed.pub == hybrid_keys.ed.pub
+    assert identity.signing_keys.mldsa.pub == hybrid_keys.mldsa.pub
+    assert identity.manifest_snapshot == key_manifest
+
+
+def test_truncated_seed_raises_config_error_without_key_bytes(
+    tmp_path: Path, hybrid_keys: pq.HybridSigningKeys, key_manifest: dict[str, object]
+) -> None:
+    config = _write_issuer_files(tmp_path, hybrid_keys, key_manifest)
+    config.seed_path.write_text(keys.b64u(hybrid_keys.ed.seed[:16]) + "\n", encoding="utf-8")
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_issuer(config)
+
+    message = str(exc_info.value)
+    assert str(config.seed_path) in message
+    assert keys.b64u(hybrid_keys.ed.seed) not in message
+
+
+def test_mldsa_wrong_alg_raises_config_error(
+    tmp_path: Path, hybrid_keys: pq.HybridSigningKeys, key_manifest: dict[str, object]
+) -> None:
+    config = _write_issuer_files(tmp_path, hybrid_keys, key_manifest)
+    config.mldsa_key_path.write_text(
+        json.dumps(
+            {
+                "alg": "X",
+                "sk": keys.b64u(hybrid_keys.mldsa.sk),
+                "pub": keys.b64u(hybrid_keys.mldsa.pub),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_issuer(config)
+
+    message = str(exc_info.value)
+    assert str(config.mldsa_key_path) in message
+    assert keys.b64u(hybrid_keys.mldsa.sk) not in message
+
+
+def test_mldsa_wrong_length_sk_raises_config_error(
+    tmp_path: Path, hybrid_keys: pq.HybridSigningKeys, key_manifest: dict[str, object]
+) -> None:
+    config = _write_issuer_files(tmp_path, hybrid_keys, key_manifest)
+    short_sk = hybrid_keys.mldsa.sk[:100]
+    config.mldsa_key_path.write_text(
+        json.dumps(
+            {
+                "alg": pq.ML_DSA_65_ALG,
+                "sk": keys.b64u(short_sk),
+                "pub": keys.b64u(hybrid_keys.mldsa.pub),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_issuer(config)
+
+    message = str(exc_info.value)
+    assert str(config.mldsa_key_path) in message
+    assert keys.b64u(short_sk) not in message
+
+
+def test_missing_seed_file_raises_config_error(
+    tmp_path: Path, hybrid_keys: pq.HybridSigningKeys, key_manifest: dict[str, object]
+) -> None:
+    config = _write_issuer_files(tmp_path, hybrid_keys, key_manifest)
+    config.seed_path.unlink()
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_issuer(config)
+
+    assert str(config.seed_path) in str(exc_info.value)
+
+
+def test_self_inconsistent_manifest_raises_config_error(
+    tmp_path: Path, hybrid_keys: pq.HybridSigningKeys, key_manifest: dict[str, object]
+) -> None:
+    tampered = dict(key_manifest)
+    tampered["issued_at"] = "2020-01-01T00:00:00Z"  # invalidates the manifest's own signature
+    config = _write_issuer_files(tmp_path, hybrid_keys, tampered)
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_issuer(config)
+
+    assert str(config.manifest_path) in str(exc_info.value)
+
+
+def test_kid_absent_from_manifest_raises_config_error_naming_kid(
+    tmp_path: Path, hybrid_keys: pq.HybridSigningKeys, key_manifest: dict[str, object]
+) -> None:
+    missing_kid = f"{ISSUER}/keys/2027-01#missing"
+    config = _write_issuer_files(tmp_path, hybrid_keys, key_manifest, kid=missing_kid)
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_issuer(config)
+
+    assert missing_kid in str(exc_info.value)
+
+
+def test_manifest_ed25519_pub_mismatch_raises_config_error(
+    tmp_path: Path, hybrid_keys: pq.HybridSigningKeys
+) -> None:
+    # Manifest entry for KID carries a DIFFERENT Ed25519 pub than the one the
+    # seed file on disk decodes to — self-consistent (signed by the decoy leg
+    # that matches the entry), but a key/manifest mismatch against the loaded key.
+    decoy_ed = keys.from_seed(bytes([7]) * 32)
+    entry = manifests.key_entry(KID, decoy_ed.pub, VALID_FROM, pub_ml_dsa_65=hybrid_keys.mldsa.pub)
+    mismatched_manifest = manifests.build_key_manifest(
+        ISSUER,
+        1,
+        VALID_FROM,
+        [entry],
+        pq.HybridSigningKeys(ed=decoy_ed, mldsa=hybrid_keys.mldsa),
+        KID,
+    )
+    config = _write_issuer_files(tmp_path, hybrid_keys, mismatched_manifest)
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_issuer(config)
+
+    message = str(exc_info.value)
+    assert KID in message
+    assert keys.b64u(hybrid_keys.ed.pub) not in message
+    assert keys.b64u(decoy_ed.pub) not in message
+
+
+def test_manifest_mldsa_pub_mismatch_raises_config_error(
+    tmp_path: Path, hybrid_keys: pq.HybridSigningKeys, decoy_mldsa: pq.MLDSAKeyPair
+) -> None:
+    # Same idea, ML-DSA-65 leg: entry's pub_ml_dsa_65 belongs to a different,
+    # independently generated key than the one the mldsa file on disk holds.
+    entry = manifests.key_entry(KID, hybrid_keys.ed.pub, VALID_FROM, pub_ml_dsa_65=decoy_mldsa.pub)
+    mismatched_manifest = manifests.build_key_manifest(
+        ISSUER,
+        1,
+        VALID_FROM,
+        [entry],
+        pq.HybridSigningKeys(ed=hybrid_keys.ed, mldsa=decoy_mldsa),
+        KID,
+    )
+    config = _write_issuer_files(tmp_path, hybrid_keys, mismatched_manifest)
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_issuer(config)
+
+    message = str(exc_info.value)
+    assert KID in message
+    assert keys.b64u(hybrid_keys.mldsa.pub) not in message
+    assert keys.b64u(decoy_mldsa.pub) not in message
