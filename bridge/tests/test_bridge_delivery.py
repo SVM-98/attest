@@ -333,12 +333,15 @@ def test_default_factory_uses_smtp_ssl_for_port_465(monkeypatch: pytest.MonkeyPa
     calls: list[tuple[str, int]] = []
 
     class _RecordingSSL(_FakeSMTP):
-        def __init__(self, host: str, port: int, *, context: ssl.SSLContext) -> None:
+        def __init__(
+            self, host: str, port: int, *, timeout: float, context: ssl.SSLContext
+        ) -> None:
             super().__init__(host, port)
             calls.append((host, port))
+            assert timeout == SMTP_TIMEOUT_SECONDS
             assert isinstance(context, ssl.SSLContext)
 
-    def _boom_smtp(host: str, port: int) -> _FakeSMTP:
+    def _boom_smtp(host: str, port: int, *, timeout: float) -> _FakeSMTP:
         raise AssertionError("smtplib.SMTP must not be used for port 465")
 
     monkeypatch.setattr(smtplib, "SMTP_SSL", _RecordingSSL)
@@ -362,11 +365,12 @@ def test_default_factory_uses_smtp_with_starttls_for_non_465_port(
     calls: list[tuple[str, int]] = []
 
     class _RecordingSMTP(_FakeSMTP):
-        def __init__(self, host: str, port: int) -> None:
+        def __init__(self, host: str, port: int, *, timeout: float) -> None:
             super().__init__(host, port)
             calls.append((host, port))
+            assert timeout == SMTP_TIMEOUT_SECONDS
 
-    def _boom_ssl(host: str, port: int, *, context: ssl.SSLContext) -> _FakeSMTP:
+    def _boom_ssl(host: str, port: int, *, timeout: float, context: ssl.SSLContext) -> _FakeSMTP:
         raise AssertionError("smtplib.SMTP_SSL must not be used for a non-465 port")
 
     monkeypatch.setattr(smtplib, "SMTP", _RecordingSMTP)

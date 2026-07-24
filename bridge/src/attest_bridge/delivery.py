@@ -57,18 +57,9 @@ class DeliveryResult:
 
 
 def _default_smtp_factory(host: str, port: int, timeout: float) -> smtplib.SMTP:
-    try:
-        if port == _SMTP_SSL_PORT:
-            return smtplib.SMTP_SSL(
-                host, port, timeout=timeout, context=ssl.create_default_context()
-            )
-        return smtplib.SMTP(host, port, timeout=timeout)
-    except TypeError:
-        # Test doubles written against the former stdlib constructor shape do
-        # not accept timeout. Production constructors always receive it.
-        if port == _SMTP_SSL_PORT:
-            return smtplib.SMTP_SSL(host, port, context=ssl.create_default_context())
-        return smtplib.SMTP(host, port)
+    if port == _SMTP_SSL_PORT:
+        return smtplib.SMTP_SSL(host, port, timeout=timeout, context=ssl.create_default_context())
+    return smtplib.SMTP(host, port, timeout=timeout)
 
 
 _GENERIC_FAILURE = "delivery failed"
