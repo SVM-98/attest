@@ -21,22 +21,22 @@ from __future__ import annotations
 import json
 import secrets
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from attest import issue
 from attest_bridge.catalog import ProductCatalog
+from attest_bridge.delivery import Delivery
 from attest_bridge.ledger import Ledger
 from attest_bridge.model import NormalizedPurchase, PurchaseRejected
 from attest_bridge.signing import IssuerIdentity
 
 _ED25519_PUBKEY_LEN = 32
+_RFC3339 = "%Y-%m-%dT%H:%M:%SZ"
 
 
-class Delivery:
-    """Placeholder for the T6 delivery type (`attest_bridge.delivery`, not yet
-    implemented). `IssuingCore` only stores what it is given here — nothing in
-    T5 reads it — so the constructor shape stays stable once T6 lands and
-    replaces this stub with the real class."""
+def _now_rfc3339() -> str:
+    return datetime.now(UTC).strftime(_RFC3339)
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,3 +146,59 @@ class IssuingCore:
         )
 
         return IssueOutcome(receipt_id=receipt_id, envelope=envelope, duplicate=False)
+
+    def process(self, purchase: NormalizedPurchase) -> IssueOutcome:
+        """Issue (or return the already-issued) receipt, then attempt delivery.
+
+        Global Constraint 9: issue + ledger-record happen first — inside
+        `issue_for`, which returns before this method ever touches delivery —
+        so the receipt is durably safe in the Ledger before any delivery is
+        attempted. An SMTP failure is recorded (`record_delivery_failure`)
+        and the receipt stays downloadable via its token link; it is never
+        lost. A receipt that already has `delivered_at` set is never resent.
+        """
+        outcome = self.issue_for(purchase)
+
+        stored = self._ledger.get_receipt(purchase.platform, purchase.platform_purchase_id)
+        if stored is None:
+            # issue_for() just inserted this row (fresh receipt) or found it
+            # already there (duplicate) — a missing row here means Ledger
+            # state was corrupted between the two calls, not a purchase-input
+            # problem worth reporting to the caller as such.
+            raise RuntimeError(
+                f"receipt for platform={purchase.platform!r} "
+                f"purchase_id={purchase.platform_purchase_id!r} vanished immediately "
+                "after issue_for"
+            )
+
+        if stored.delivered_at is not None:
+            return outcome
+
+        if self._delivery is None:
+            # No Delivery wired into this core at all: zero-config mode at
+            # the core level — the download link IS the delivery, nothing to
+            # attempt or record.
+            return outcome
+
+        download_url = f"{self._public_base_url}/r/{stored.download_token}"
+        result = self._delivery.send(
+            to_email=stored.buyer_email,
+            receipt_id=stored.receipt_id,
+            work_title=outcome.envelope["payload"]["work"]["title"],
+            envelope=outcome.envelope,
+            download_url=download_url,
+            info_url=None,
+        )
+        if result.status == "sent":
+            self._ledger.mark_delivered(
+                purchase.platform, purchase.platform_purchase_id, at=_now_rfc3339()
+            )
+        elif result.status == "failed":
+            self._ledger.record_delivery_failure(
+                purchase.platform,
+                purchase.platform_purchase_id,
+                result.detail if result.detail is not None else "delivery failed",
+            )
+        # "skipped_no_smtp": leave the receipt as-is — download-link-only mode.
+
+        return outcome

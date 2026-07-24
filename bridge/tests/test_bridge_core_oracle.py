@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import smtplib
 from typing import Any
 
 import pytest
+from attest_bridge.config import DeliveryConfig
 from attest_bridge.core import IssuingCore
+from attest_bridge.delivery import Delivery
 from attest_bridge.model import NormalizedPurchase, PurchaseRejected, UnmappedProduct
 from conftest import ISSUER
 
@@ -142,3 +145,122 @@ def test_issuer_manifest_is_embedded_for_offline_verification(
     outcome = core.issue_for(_purchase(platform_purchase_id="cs_manifest"))
     assert outcome.envelope["delivery"]["issuer_manifest"] == key_manifest
     assert outcome.envelope["payload"]["issuer"]["id"] == ISSUER
+
+
+# -- process(): delivery wiring (Global Constraint 9 — issue+record first) --
+
+
+def _delivery_config() -> DeliveryConfig:
+    return DeliveryConfig(
+        smtp_host="smtp.example.com",
+        smtp_port=587,
+        smtp_username="merchant",
+        smtp_password="hunter2-super-secret",  # noqa: S106 - test fixture, not a real secret
+        from_address="receipts@merchant.example.com",
+        info_url="https://merchant.example.com/attest/what-is-this",
+    )
+
+
+class _FailingSMTP:
+    """Fails at login, every time — no real network, never reaches send_message."""
+
+    def __init__(self, host: str, port: int) -> None:
+        pass
+
+    def starttls(self, *, context: Any) -> None:
+        pass
+
+    def login(self, username: str, password: str) -> None:
+        raise smtplib.SMTPAuthenticationError(535, b"bad credentials")
+
+    def send_message(self, message: Any) -> None:  # pragma: no cover
+        raise AssertionError("send_message must not be reached after login fails")
+
+    def quit(self) -> None:
+        pass
+
+    def __enter__(self) -> _FailingSMTP:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        pass
+
+
+def _make_succeeding_smtp_factory() -> tuple[Any, list[int]]:
+    """Returns (factory, calls) — `calls` grows by one per `send_message`."""
+    calls: list[int] = []
+
+    class _SucceedingSMTP:
+        def __init__(self, host: str, port: int) -> None:
+            pass
+
+        def starttls(self, *, context: Any) -> None:
+            pass
+
+        def login(self, username: str, password: str) -> None:
+            pass
+
+        def send_message(self, message: Any) -> None:
+            calls.append(1)
+
+        def quit(self) -> None:
+            pass
+
+        def __enter__(self) -> _SucceedingSMTP:
+            return self
+
+        def __exit__(self, *exc_info: object) -> None:
+            pass
+
+    return _SucceedingSMTP, calls
+
+
+def test_process_smtp_failure_keeps_receipt_safe_in_ledger_and_it_still_verifies(
+    catalog: Any, issuer_identity: Any, ledger: Any, trust_store: Any
+) -> None:
+    core = IssuingCore(
+        catalog=catalog,
+        issuer=issuer_identity,
+        ledger=ledger,
+        public_base_url="https://receipts.example.com",
+        delivery=Delivery(_delivery_config(), smtp_factory=_FailingSMTP),
+    )
+    outcome = core.process(_purchase(platform_purchase_id="cs_delivery_fail"))
+
+    # Global Constraint 9: a delivery failure never loses a receipt — it is
+    # already durably recorded, retriable, and still a fully valid envelope.
+    stored = ledger.get_receipt("stripe", "cs_delivery_fail")
+    assert stored is not None
+    assert stored.delivered_at is None
+    assert stored.delivery_attempts == 1
+    assert stored.last_delivery_error is not None
+    assert "hunter2-super-secret" not in stored.last_delivery_error
+
+    result = verify_mod.verify(_envelope_bytes(outcome.envelope), trust_store)
+    assert result.ok is True
+
+
+def test_process_does_not_resend_to_an_already_delivered_receipt(
+    catalog: Any, issuer_identity: Any, ledger: Any
+) -> None:
+    factory, calls = _make_succeeding_smtp_factory()
+    core = IssuingCore(
+        catalog=catalog,
+        issuer=issuer_identity,
+        ledger=ledger,
+        public_base_url="https://receipts.example.com",
+        delivery=Delivery(_delivery_config(), smtp_factory=factory),
+    )
+    purchase = _purchase(platform_purchase_id="cs_no_resend")
+
+    first = core.process(purchase)
+    second = core.process(purchase)
+
+    assert len(calls) == 1  # the fake's send_message was invoked exactly once
+    assert second.duplicate is True
+    assert second.receipt_id == first.receipt_id
+
+    stored = ledger.get_receipt("stripe", "cs_no_resend")
+    assert stored is not None
+    assert stored.delivered_at is not None
+    assert stored.delivery_attempts == 0
