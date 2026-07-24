@@ -30,7 +30,7 @@ from attest import verify as verifier
 from attest_bridge.catalog import ProductCatalog
 from attest_bridge.delivery import Delivery
 from attest_bridge.ledger import Ledger
-from attest_bridge.model import NormalizedPurchase, PurchaseRejected
+from attest_bridge.model import NormalizedPurchase, PurchaseRejected, purchase_id_for_log
 from attest_bridge.signing import IssuerIdentity
 
 _ED25519_PUBKEY_LEN = 32
@@ -106,7 +106,11 @@ class IssuingCore:
         entry = manifests.find_key(self._issuer.manifest_snapshot, self._issuer.kid)
         if entry is None or not verifier._within_validity(issued_at, entry):
             reason = f"signing key {self._issuer.kid!r} is outside its validity window"
-            _log.error("purchase %s rejected: %s", purchase.platform_purchase_id, reason)
+            _log.error(
+                "purchase %s rejected: %s",
+                purchase_id_for_log(purchase.platform_purchase_id),
+                reason,
+            )
             raise PurchaseRejected(reason)
 
         # (4) Fresh, unique salt for this receipt's buyer-binding commitment.
@@ -184,7 +188,8 @@ class IssuingCore:
             # problem worth reporting to the caller as such.
             raise RuntimeError(
                 f"receipt for platform={purchase.platform!r} "
-                f"purchase_id={purchase.platform_purchase_id!r} vanished immediately "
+                f"purchase_id={purchase_id_for_log(purchase.platform_purchase_id)} "
+                "vanished immediately "
                 "after issue_for"
             )
 

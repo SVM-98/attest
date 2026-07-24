@@ -306,6 +306,11 @@ class ItchPoller:
         if claim.attempts + 1 >= self._max_attempts:
             self._ledger.exhaust_claim(claim.token)
             if api_failure:
+                _log.warning(
+                    "itch API failure for game %s (attempt %d); abandoning claim",
+                    claim.game_id,
+                    claim.attempts + 1,
+                )
                 self._ledger.add_dead_letter(
                     "itch",
                     None,

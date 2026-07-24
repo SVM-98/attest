@@ -184,6 +184,7 @@ def test_retry_failed_resolves_dead_letter_after_catalog_gains_the_mapping(
     hybrid_keys: pq.HybridSigningKeys,
     key_manifest: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setenv(_STRIPE_ENV_VAR, "whsec_real_test_secret")
 
@@ -211,7 +212,8 @@ def test_retry_failed_resolves_dead_letter_after_catalog_gains_the_mapping(
 
     rc = cli.main(["retry-failed", "--config", str(config_path)])
 
-    assert rc == 1
+    assert rc == 0
+    assert "undelivered: 0" in capsys.readouterr().out
     assert ledger.unresolved_dead_letters() == []
     stored = ledger.get_receipt("stripe", "cs_retry_1")
     assert stored is not None
@@ -356,7 +358,8 @@ def test_redact_tokens_hides_download_tokens() -> None:
 
 
 def test_redact_tokens_hides_stripe_session_capability_from_access_log() -> None:
-    request = "GET /stripe/receipt?session_id=cs_live_secret HTTP/1.1"
-    redacted = cli._redact_tokens(request)
-    assert "cs_live_secret" not in redacted
-    assert "session_id=<redacted>" in redacted
+    for key in ("session_id", "session%5Fid"):
+        request = f"GET /stripe/receipt?{key}=cs_live_secret HTTP/1.1"
+        redacted = cli._redact_tokens(request)
+        assert "cs_live_secret" not in redacted
+        assert "session_id=<redacted>" in redacted

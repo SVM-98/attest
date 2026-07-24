@@ -25,6 +25,7 @@ import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
 
 from attest import issue, validate
@@ -53,8 +54,9 @@ def _now_rfc3339() -> str:
 
 
 def _redact_tokens(text: str) -> str:
-    """Redact receipt capabilities from access logs."""
-    return _SESSION_CAPABILITY_RE.sub(r"\1<redacted>", _TOKEN_PATH_RE.sub("/r/<redacted>", text))
+    """Redact receipt capabilities from access logs after URL-decoding keys."""
+    decoded = unquote(text)
+    return _SESSION_CAPABILITY_RE.sub(r"\1<redacted>", _TOKEN_PATH_RE.sub("/r/<redacted>", decoded))
 
 
 class _SanitizedRequestHandler(WSGIRequestHandler):
@@ -329,15 +331,17 @@ def _cmd_retry_failed(args: argparse.Namespace) -> int:
                 continue
             purchase = deps.stripe.normalize(event)
             deps.core.process(purchase)
-        except Exception as exc:  # still bad input, or a transient failure — leave unresolved
-            log.warning("retry-failed: dead letter %d still failing: %s", dead_letter.id, exc)
+        except Exception:  # still bad input, or a transient failure — leave unresolved
+            log.warning("retry-failed: dead letter %d still failing", dead_letter.id)
             continue
         deps.ledger.resolve_dead_letter(dead_letter.id, now=_now_rfc3339())
         resolved += 1
 
     delivered, delivery_failures = _sweep_deliveries(deps)
     unresolved = len(deps.ledger.unresolved_dead_letters())
-    undelivered = len(deps.ledger.undelivered())
+    # Download-link-only deployments deliberately leave `delivered_at` NULL:
+    # their receipt capability is the delivery, not an unresolved SMTP task.
+    undelivered = len(deps.ledger.undelivered()) if deps.config.delivery is not None else 0
     print(
         f"resolved: {resolved}, unresolved: {unresolved}, deliveries retried: {delivered}, "
         f"delivery failures: {delivery_failures}, undelivered: {undelivered}"

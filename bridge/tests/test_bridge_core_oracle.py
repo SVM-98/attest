@@ -52,7 +52,10 @@ def test_email_bound_receipt_verifies_offline_ok(core: IssuingCore, trust_store:
 
 
 def test_issue_for_rejects_when_the_daemon_key_has_expired(
-    core: IssuingCore, ledger: Any, monkeypatch: pytest.MonkeyPatch
+    core: IssuingCore,
+    ledger: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     monkeypatch.setattr("attest_bridge.core._now_rfc3339", lambda: "2100-01-01T00:00:00Z")
     monkeypatch.setattr("attest_bridge.core.verifier._within_validity", lambda *_: False)
@@ -60,6 +63,8 @@ def test_issue_for_rejects_when_the_daemon_key_has_expired(
     with pytest.raises(PurchaseRejected, match="validity window"):
         core.issue_for(_purchase(platform_purchase_id="cs_expired_key"))
     assert ledger.get_receipt("stripe", "cs_expired_key") is None
+    assert "cs_expired_key" not in caplog.text
+    assert "sha256:a0f1ed324955" in caplog.text
 
 
 def test_real_loader_identity_issues_a_receipt_the_oracle_accepts(

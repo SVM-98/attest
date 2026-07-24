@@ -247,7 +247,7 @@ def _handle_stripe_webhook(
                 "stripe", purchase_id, str(exc), json.dumps(event), now=_now_rfc3339()
             )
             deps.ledger.mark_event("stripe", event_id, now=_now_rfc3339())
-            deps.log.error("stripe event %s: dead-lettered (%s)", event_id, exc)
+            deps.log.error("stripe event %s: dead-lettered", event_id)
             return _json_response(start_response, "200 OK", {"ok": True})
 
     with lock:
@@ -269,7 +269,7 @@ def _handle_stripe_webhook(
                 now=_now_rfc3339(),
             )
             deps.ledger.mark_event("stripe", event_id, now=_now_rfc3339())
-            deps.log.error("stripe event %s: dead-lettered (%s)", event_id, exc)
+            deps.log.error("stripe event %s: dead-lettered", event_id)
             return _json_response(start_response, "200 OK", {"ok": True})
         except Exception:
             # Signing/config/unexpected failure: fail closed. NEVER mark_event —
