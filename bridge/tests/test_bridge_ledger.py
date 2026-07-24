@@ -56,7 +56,7 @@ def test_seen_event_is_false_when_unmarked(ledger: Ledger) -> None:
 
 
 def test_seen_event_is_true_after_mark_event(ledger: Ledger) -> None:
-    ledger.mark_event("stripe", "evt_1")
+    ledger.mark_event("stripe", "evt_1", now=NOW)
 
     assert ledger.seen_event("stripe", "evt_1") is True
 
