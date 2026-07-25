@@ -1,0 +1,58 @@
+# attest-bridge merchant configuration.
+#
+# Copy this file to `bridge.toml`, fill in your own values, and point the
+# bridge at it (see bridge/README.md for the exact invocation). Every secret
+# below is referenced by the name of an environment variable — never by its
+# value — so this file is safe to commit alongside your deployment config.
+# `load_config` resolves each `*_env` variable at startup and refuses to
+# start (raising ConfigError, naming the missing variable) if it is unset.
+
+public_base_url = "https://receipts.example.com"
+ledger_path = "/var/lib/attest-bridge/ledger.sqlite3"
+
+[issuer]
+id = "store.example.com"
+display_name = "Example Games Store"
+kid = "store.example.com/keys/2026-07#hybrid-1"
+seed_path = "/secrets/issuer.seed"               # from: attest keygen --hybrid
+mldsa_key_path = "/secrets/issuer.mldsa.json"    # from: attest keygen --hybrid
+manifest_path = "/etc/attest-bridge/key-manifest.json"  # from: attest manifest init
+
+# Omit this whole table if you don't sell through Stripe.
+[stripe]
+webhook_secret_env = "STRIPE_WEBHOOK_SECRET"     # whsec_... from the Stripe dashboard
+api_key_env = "STRIPE_API_KEY"                   # optional: only for line-items fallback
+
+# Omit this whole table if you don't sell through itch.io.
+[itch]
+api_key_env = "ITCH_API_KEY"
+poll_interval_seconds = 60
+max_attempts = 10
+
+# Omit this whole table for download-link-only mode (no receipt emails sent).
+[delivery]
+smtp_host = "smtp.example.com"
+smtp_port = 587
+smtp_username = "receipts@example.com"
+smtp_password_env = "SMTP_PASSWORD"
+from_address = "receipts@example.com"
+info_url = "https://store.example.com/what-is-this-file"
+
+# One [products.<product_key>] table per SKU you sell. `<product_key>` is
+# whatever identifier the platform's webhook uses to name the purchased
+# item — a Stripe price id, or `itch_<game_id>` for itch.io. A purchase for
+# a product_key with no matching table here is refused (UnmappedProduct),
+# never issued with guessed terms.
+[products.price_1PxYzEXAMPLE]                     # Stripe price id, or itch_<game_id>
+title = "Example Game"
+publisher = "Example Publisher srl"
+artifact_series = "store.example.com/works/EXG-001"
+terms_uri = "https://store.example.com/attest/license-templates/standard-v1"
+legal_text_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+# grant = "perpetual"       # default; override per-product if this SKU differs
+# revocability = "none"     # default
+# revocation_window_days = 30 # required when revocability = "refund_window"
+# drm = "drm-free"          # default
+# edition = "digital"       # optional, omit if not applicable
+[products.price_1PxYzEXAMPLE.identifiers]
+issuer_sku = "EXG-001"

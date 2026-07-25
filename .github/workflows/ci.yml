@@ -19,10 +19,10 @@ jobs:
       # `dev` is a PEP 621 optional-dependency extra, not a PEP 735 group:
       # bare `uv sync --locked` installs runtime deps only. Use --extra dev
       # to get pytest/ruff/mypy.
-      - run: uv sync --locked --extra dev
+      - run: uv sync --locked --extra dev --all-packages
       - run: uv run --frozen pytest -q
       - run: uv run --frozen ruff check .
-      - run: uv run --frozen mypy --strict src
+      - run: uv run --frozen mypy --strict src bridge/src
       - run: uv run --frozen python tools/check_spec_docs.py
       # Builds the Internet-Draft snapshot source (ietf/) with the pinned,
       # inline-references-only xml2rfc v3 toolchain (ietf/README.md). uvx is
