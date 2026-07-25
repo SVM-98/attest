@@ -63,4 +63,7 @@ module = "pqcrypto.*"
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "bridge/tests"]
+
+[tool.uv.workspace]
+members = ["bridge"]

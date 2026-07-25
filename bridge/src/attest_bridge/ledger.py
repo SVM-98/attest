@@ -1,0 +1,402 @@
+"""Ledger: sqlite3-backed OPERATIONAL state — webhook-event idempotency,
+issued-receipt store, itch claim queue, dead letters.
+
+Contract (task-4-brief.md): this is NOT part of the trust model — nothing
+`attest.verify` does depends on any of it — but the `receipts` table stores
+issued envelopes verbatim, including `delivery.salt`, so the database file
+itself is a SECRET. `__init__` creates the file at 0600 before the first
+byte is ever written to it (`Path.touch(mode=0o600)`), then re-chmods it
+after connecting as a belt-and-braces guard for a file that predates this
+contract (documented in T10).
+
+Timestamps are always CALLER-SUPPLIED RFC3339 strings — this module never
+reads a clock — which keeps tests deterministic and hands retry/backoff
+policy entirely to the caller. RFC3339's lexicographic-equals-chronological
+ordering is exactly what makes `due_claims`'s plain string comparison
+correct without parsing a single string into a datetime.
+
+One `sqlite3.Connection` per `Ledger`, shared by the WSGI request thread and
+the itch poller thread (T8/T9): `check_same_thread=False` disables sqlite3's
+default single-thread guard, and EVERY access — reads and writes alike — takes
+`_lock` for the full duration of its statement (plus commit, for writes). A
+shared connection yields undefined results if a write steps a cursor a read is
+mid-iteration on (SQLite same-connection isolation), so the lock serializes
+whole read+fetch operations, not just writes. Every statement is parametrized —
+never string-formatted — SQL.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import secrets
+import sqlite3
+import threading
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from attest_bridge.model import ClaimQueueFull
+
+MAX_PENDING_CLAIMS = 1000
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS events (
+  platform TEXT NOT NULL, event_id TEXT NOT NULL, received_at TEXT NOT NULL,
+  PRIMARY KEY (platform, event_id));
+CREATE TABLE IF NOT EXISTS receipts (
+  platform TEXT NOT NULL, purchase_id TEXT NOT NULL, receipt_id TEXT NOT NULL,
+  envelope_json TEXT NOT NULL, download_token TEXT NOT NULL UNIQUE,
+  buyer_email TEXT NOT NULL, issued_at TEXT NOT NULL,
+  delivered_at TEXT, delivery_attempts INTEGER NOT NULL DEFAULT 0,
+  last_delivery_error TEXT,
+  PRIMARY KEY (platform, purchase_id));
+CREATE TABLE IF NOT EXISTS claims (
+  token TEXT PRIMARY KEY, email TEXT NOT NULL, game_id TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at TEXT NOT NULL, created_at TEXT NOT NULL,
+  receipts_issued INTEGER NOT NULL DEFAULT 0);
+CREATE UNIQUE INDEX IF NOT EXISTS claims_pending_email_game_unique
+  ON claims (email, game_id) WHERE status = 'pending';
+CREATE TABLE IF NOT EXISTS dead_letters (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  platform TEXT NOT NULL, purchase_id TEXT, reason TEXT NOT NULL,
+  raw_json TEXT NOT NULL, created_at TEXT NOT NULL, resolved_at TEXT);
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class StoredReceipt:
+    platform: str
+    purchase_id: str
+    receipt_id: str
+    envelope_json: str
+    download_token: str
+    buyer_email: str
+    issued_at: str
+    delivered_at: str | None
+    delivery_attempts: int
+    last_delivery_error: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class Claim:
+    token: str
+    email: str
+    game_id: str
+    status: str  # "pending" | "confirmed" | "exhausted"
+    attempts: int
+    next_attempt_at: str
+    created_at: str
+    # Operator-only count of receipts issued while resolving this claim. It is
+    # intentionally never an HTTP response field: claim state must not reveal
+    # whether an address owns a particular game.
+    receipts_issued: int
+
+
+@dataclass(frozen=True, slots=True)
+class DeadLetter:
+    id: int
+    platform: str
+    purchase_id: str | None
+    reason: str
+    raw_json: str
+    created_at: str
+    resolved_at: str | None
+
+
+def _receipt_from_row(row: sqlite3.Row) -> StoredReceipt:
+    return StoredReceipt(
+        platform=row["platform"],
+        purchase_id=row["purchase_id"],
+        receipt_id=row["receipt_id"],
+        envelope_json=row["envelope_json"],
+        download_token=row["download_token"],
+        buyer_email=row["buyer_email"],
+        issued_at=row["issued_at"],
+        delivered_at=row["delivered_at"],
+        delivery_attempts=row["delivery_attempts"],
+        last_delivery_error=row["last_delivery_error"],
+    )
+
+
+def _claim_from_row(row: sqlite3.Row) -> Claim:
+    return Claim(
+        token=row["token"],
+        email=row["email"],
+        game_id=row["game_id"],
+        status=row["status"],
+        attempts=row["attempts"],
+        next_attempt_at=row["next_attempt_at"],
+        created_at=row["created_at"],
+        receipts_issued=row["receipts_issued"],
+    )
+
+
+def _dead_letter_from_row(row: sqlite3.Row) -> DeadLetter:
+    return DeadLetter(
+        id=row["id"],
+        platform=row["platform"],
+        purchase_id=row["purchase_id"],
+        reason=row["reason"],
+        raw_json=row["raw_json"],
+        created_at=row["created_at"],
+        resolved_at=row["resolved_at"],
+    )
+
+
+class Ledger:
+    """Operational state store — idempotency, receipts, claims, dead letters.
+
+    NOT part of the trust model. See module docstring for the secrecy (0600)
+    and threading (shared connection + write lock) contracts.
+    """
+
+    def __init__(self, db_path: Path) -> None:
+        # Secrecy contract: the file must never exist world/group readable,
+        # not even for the instant between creation and a later chmod — set
+        # the mode at creation time, then re-assert it once connected.
+        db_path.touch(mode=0o600, exist_ok=True)
+        self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        os.chmod(db_path, 0o600)
+        self._conn.row_factory = sqlite3.Row
+        self._lock = threading.Lock()
+        with self._lock, self._conn:
+            self._conn.executescript(_SCHEMA)
+
+    # -- webhook-event idempotency ----------------------------------------
+
+    def seen_event(self, platform: str, event_id: str) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM events WHERE platform = ? AND event_id = ?", (platform, event_id)
+            ).fetchone()
+        return row is not None
+
+    def mark_event(self, platform: str, event_id: str, *, now: str) -> None:
+        # `now` mirrors the other state-recording methods (enqueue_claim,
+        # add_dead_letter, resolve_dead_letter): the caller supplies the RFC3339
+        # timestamp so events.received_at holds a real value (the Ledger never
+        # reads a clock) rather than an empty sentinel.
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO events (platform, event_id, received_at) VALUES (?, ?, ?)",
+                (platform, event_id, now),
+            )
+
+    # -- receipts -----------------------------------------------------------
+
+    def get_receipt(self, platform: str, purchase_id: str) -> StoredReceipt | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM receipts WHERE platform = ? AND purchase_id = ?",
+                (platform, purchase_id),
+            ).fetchone()
+        return None if row is None else _receipt_from_row(row)
+
+    def record_receipt(
+        self,
+        platform: str,
+        purchase_id: str,
+        receipt_id: str,
+        envelope: dict[str, Any],
+        buyer_email: str,
+        download_token: str,
+        issued_at: str,
+    ) -> None:
+        # Deliberately NOT catching sqlite3.IntegrityError here: a duplicate
+        # (platform, purchase_id) must propagate — the caller (core, T5)
+        # checks `get_receipt` first, this PRIMARY KEY is the last line of
+        # defense against a race, not the primary dedup mechanism.
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO receipts
+                    (platform, purchase_id, receipt_id, envelope_json, download_token,
+                     buyer_email, issued_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    platform,
+                    purchase_id,
+                    receipt_id,
+                    json.dumps(envelope),
+                    download_token,
+                    buyer_email,
+                    issued_at,
+                ),
+            )
+
+    def by_download_token(self, token: str) -> StoredReceipt | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM receipts WHERE download_token = ?", (token,)
+            ).fetchone()
+        return None if row is None else _receipt_from_row(row)
+
+    def mark_delivered(self, platform: str, purchase_id: str, at: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE receipts SET delivered_at = ? WHERE platform = ? AND purchase_id = ?",
+                (at, platform, purchase_id),
+            )
+
+    def record_delivery_failure(self, platform: str, purchase_id: str, error: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                UPDATE receipts
+                SET delivery_attempts = delivery_attempts + 1, last_delivery_error = ?
+                WHERE platform = ? AND purchase_id = ?
+                """,
+                (error, platform, purchase_id),
+            )
+
+    def undelivered(self) -> list[StoredReceipt]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM receipts WHERE delivered_at IS NULL"
+            ).fetchall()
+        return [_receipt_from_row(row) for row in rows]
+
+    # -- itch claims queue (the poller "cursor") -----------------------------
+
+    def enqueue_claim(self, email: str, game_id: str, *, now: str) -> str:
+        with self._lock, self._conn:
+            # This lookup and potential insert deliberately share one lock and
+            # transaction. The partial unique index below extends the dedup
+            # half across Ledger instances/processes. The count cap remains
+            # best-effort across processes: an extra admission is not a
+            # security boundary and does not justify distributed counting.
+            existing = self._conn.execute(
+                "SELECT token FROM claims WHERE email = ? AND game_id = ? "
+                "AND status = 'pending' ORDER BY created_at LIMIT 1",
+                (email, game_id),
+            ).fetchone()
+            if existing is not None:
+                return str(existing["token"])
+            pending = self._conn.execute(
+                "SELECT COUNT(*) AS count FROM claims WHERE status = 'pending'"
+            ).fetchone()
+            assert pending is not None
+            if int(pending["count"]) >= MAX_PENDING_CLAIMS:
+                raise ClaimQueueFull("claim queue is full")
+            token = secrets.token_urlsafe(32)
+            try:
+                self._conn.execute(
+                    """
+                    INSERT INTO claims (token, email, game_id, status, attempts,
+                                         next_attempt_at, created_at)
+                    VALUES (?, ?, ?, 'pending', 0, ?, ?)
+                    """,
+                    (token, email, game_id, now, now),
+                )
+            except sqlite3.IntegrityError:
+                existing = self._conn.execute(
+                    "SELECT token FROM claims WHERE email = ? AND game_id = ? "
+                    "AND status = 'pending' ORDER BY created_at LIMIT 1",
+                    (email, game_id),
+                ).fetchone()
+                if existing is None:
+                    raise
+                return str(existing["token"])
+        return token
+
+    def get_claim(self, token: str) -> Claim | None:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM claims WHERE token = ?", (token,)).fetchone()
+        return None if row is None else _claim_from_row(row)
+
+    def due_claims(self, now: str) -> list[Claim]:
+        # RFC3339 strings sort lexicographically, so this is a plain string
+        # comparison — a future `next_attempt_at` is correctly not due. Only
+        # 'pending' claims are ever due: 'confirmed'/'exhausted' are terminal.
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM claims WHERE status = 'pending' AND next_attempt_at <= ? "
+                "ORDER BY next_attempt_at",
+                (now,),
+            ).fetchall()
+        return [_claim_from_row(row) for row in rows]
+
+    def add_claim_receipts(self, token: str, n: int) -> None:
+        """Increment the operator-visible issued count for a claim."""
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE claims SET receipts_issued = receipts_issued + ? WHERE token = ?",
+                (n, token),
+            )
+
+    def complete_claim(self, token: str) -> None:
+        """Mark a claim terminal while retaining its cumulative receipt count.
+
+        No receipt identifier or download capability is associated with the
+        claim row: claims are delivered to the submitted mailbox only.
+        """
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE claims SET status = 'confirmed' WHERE token = ?",
+                (token,),
+            )
+
+    def defer_claim(self, token: str, *, next_attempt_at: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE claims SET attempts = attempts + 1, next_attempt_at = ? WHERE token = ?",
+                (next_attempt_at, token),
+            )
+
+    def exhaust_claim_with_dead_letter(
+        self,
+        token: str,
+        *,
+        platform: str,
+        purchase_id: str | None,
+        reason: str,
+        raw_json: str,
+        now: str,
+    ) -> None:
+        """Atomically abandon a claim and retain its recovery record.
+
+        An exhausted claim is terminal and therefore invisible to the poller.
+        Its dead letter is the sole recovery path for ``retry-failed``, so the
+        two writes must commit together or neither may persist.
+        """
+        with self._lock, self._conn:
+            self._conn.execute("UPDATE claims SET status = 'exhausted' WHERE token = ?", (token,))
+            self._conn.execute(
+                """
+                INSERT INTO dead_letters (platform, purchase_id, reason, raw_json, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (platform, purchase_id, reason, raw_json, now),
+            )
+
+    # -- dead letters (operator-visible failed purchases) --------------------
+
+    def add_dead_letter(
+        self, platform: str, purchase_id: str | None, reason: str, raw_json: str, *, now: str
+    ) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO dead_letters (platform, purchase_id, reason, raw_json, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (platform, purchase_id, reason, raw_json, now),
+            )
+
+    def unresolved_dead_letters(self) -> list[DeadLetter]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM dead_letters WHERE resolved_at IS NULL ORDER BY id"
+            ).fetchall()
+        return [_dead_letter_from_row(row) for row in rows]
+
+    def resolve_dead_letter(self, dead_letter_id: int, *, now: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE dead_letters SET resolved_at = ? WHERE id = ?",
+                (now, dead_letter_id),
+            )
