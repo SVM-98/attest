@@ -277,15 +277,56 @@ def test_two_ledger_connections_deduplicate_the_same_pending_claim(tmp_path: Pat
     assert second.enqueue_claim("buyer@example.com", "game_1", now=NOW) == token
 
 
-def test_exhaust_claim_drops_it_from_due_claims(ledger: Ledger) -> None:
+def test_exhaust_claim_with_dead_letter_drops_it_from_due_claims(ledger: Ledger) -> None:
     token = ledger.enqueue_claim("buyer@example.com", "game_1", now=PAST)
 
-    ledger.exhaust_claim(token)
+    ledger.exhaust_claim_with_dead_letter(
+        token,
+        platform="itch",
+        purchase_id=None,
+        reason="claim abandoned after 1 failed API attempts",
+        raw_json='{"email": "buyer@example.com", "game_id": "game_1"}',
+        now=NOW,
+    )
 
     assert ledger.due_claims(NOW) == []
     claim = ledger.get_claim(token)
     assert claim is not None
     assert claim.status == "exhausted"
+    dead_letters = ledger.unresolved_dead_letters()
+    assert len(dead_letters) == 1
+    assert dead_letters[0].reason == "claim abandoned after 1 failed API attempts"
+
+
+def test_exhaust_claim_with_dead_letter_rolls_back_when_dead_letter_insert_fails(
+    ledger: Ledger,
+) -> None:
+    token = ledger.enqueue_claim("buyer@example.com", "game_1", now=PAST)
+    ledger._conn.execute(
+        """
+        CREATE TRIGGER fail_dead_letter_insert
+        BEFORE INSERT ON dead_letters
+        BEGIN
+          SELECT RAISE(ABORT, 'dead letter insert failed');
+        END;
+        """
+    )
+
+    with pytest.raises(sqlite3.IntegrityError, match="dead letter insert failed"):
+        ledger.exhaust_claim_with_dead_letter(
+            token,
+            platform="itch",
+            purchase_id=None,
+            reason="claim abandoned after 1 failed API attempts",
+            raw_json='{"email": "buyer@example.com", "game_id": "game_1"}',
+            now=NOW,
+        )
+
+    claim = ledger.get_claim(token)
+    assert claim is not None
+    assert claim.status == "pending"
+    assert ledger.due_claims(NOW) == [claim]
+    assert ledger.unresolved_dead_letters() == []
 
 
 # -- dead letters -----------------------------------------------------------------

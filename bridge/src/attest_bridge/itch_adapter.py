@@ -316,7 +316,6 @@ class ItchPoller:
 
     def _defer_or_exhaust(self, claim: Claim, now: datetime, *, api_failure: bool = False) -> None:
         if claim.attempts + 1 >= self._max_attempts:
-            self._ledger.exhaust_claim(claim.token)
             failure_kind = "API" if api_failure else "issuance/storage"
             failure_reason = "failed API attempts" if api_failure else "issuance/storage failures"
             _log.warning(
@@ -325,11 +324,12 @@ class ItchPoller:
                 claim.game_id,
                 claim.attempts + 1,
             )
-            self._ledger.add_dead_letter(
-                "itch",
-                None,
-                f"claim abandoned after {claim.attempts + 1} {failure_reason}",
-                json.dumps({"email": claim.email, "game_id": claim.game_id}),
+            self._ledger.exhaust_claim_with_dead_letter(
+                claim.token,
+                platform="itch",
+                purchase_id=None,
+                reason=f"claim abandoned after {claim.attempts + 1} {failure_reason}",
+                raw_json=json.dumps({"email": claim.email, "game_id": claim.game_id}),
                 now=now.strftime(_RFC3339),
             )
             return
