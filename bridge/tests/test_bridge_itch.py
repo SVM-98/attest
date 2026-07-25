@@ -467,6 +467,47 @@ def test_unexpected_core_error_defers_claim_and_poller_survives(
     assert claim.next_attempt_at == (now + timedelta(seconds=60)).strftime(_RFC3339)
 
 
+def test_exhausted_claim_after_core_failure_has_recovery_dead_letter(
+    ledger: Ledger,
+    core: IssuingCore,
+    itch_bridge_config: BridgeConfig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An API-confirmed purchase must remain operator-recoverable on exhaustion."""
+    now = datetime(2026, 7, 24, 10, 0, 0, tzinfo=UTC)
+    token = ledger.enqueue_claim("buyer@example.com", "123456", now=now.strftime(_RFC3339))
+    fake_http_get, _ = _fake_http_get([_purchase_json(id=8001, game_id=123456, status="settled")])
+    adapter = ItchAdapter(api_key="itch_key", http_get=fake_http_get)
+    poller = ItchPoller(adapter=adapter, ledger=ledger, core=core, max_attempts=1)
+
+    def boom(purchase: object) -> None:
+        raise RuntimeError("unexpected signing failure")
+
+    monkeypatch.setattr(core, "process", boom)
+
+    poller.tick(now=now)
+
+    claim = ledger.get_claim(token)
+    assert claim is not None
+    assert claim.status == "exhausted"
+    dead_letters = ledger.unresolved_dead_letters()
+    assert len(dead_letters) == 1
+    assert dead_letters[0].platform == "itch"
+    assert dead_letters[0].purchase_id is None
+    assert dead_letters[0].reason == "claim abandoned after 1 issuance/storage failures"
+
+    deps = BridgeDeps(
+        config=replace(itch_bridge_config, itch=None),
+        core=core,
+        ledger=ledger,
+        stripe=None,
+        log=logging.getLogger("test-exhausted-claim-retry-failed"),
+    )
+    monkeypatch.setattr(cli, "_build_deps", lambda config_path, *, log: deps)
+    monkeypatch.setattr(cli, "_sweep_deliveries", lambda deps: (0, 0))
+    assert cli.main(["retry-failed", "--config", "unused.toml"]) == 1
+
+
 def test_run_forever_survives_a_tick_exception(ledger: Ledger, core: IssuingCore) -> None:
     # Last-resort guard: even if `tick` itself somehow raises (bypassing its
     # own per-claim isolation), `run_forever` must not let that kill the

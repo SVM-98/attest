@@ -15,6 +15,7 @@ from attest_bridge.model import (
     ConfigError,
     NormalizedPurchase,
     PurchaseRejected,
+    purchase_id_for_log,
     rfc3339_from_unix,
 )
 from attest_bridge.stripe_adapter import (
@@ -84,6 +85,19 @@ def _event(
         "created": created,
         "data": {"object": session},
     }
+
+
+def test_malformed_session_rejection_digests_its_capability() -> None:
+    adapter = _adapter()
+    session_id = "cs_live_capability"
+    session = _session(session_id=session_id, metadata={"attest_product_key": "price_TEST"})
+    session["customer_details"] = "not-an-object"
+
+    with pytest.raises(PurchaseRejected) as raised:
+        adapter.normalize(_event(session))
+
+    assert session_id not in str(raised.value)
+    assert purchase_id_for_log(session_id) in str(raised.value)
 
 
 def make_session_completed_event(

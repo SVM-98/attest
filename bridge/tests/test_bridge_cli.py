@@ -335,6 +335,41 @@ def test_retry_failed_rc_2_on_config_error(tmp_path: Path) -> None:
     assert rc == 2
 
 
+def test_retry_failed_returns_nonzero_for_configured_delivery_with_undelivered_receipt(
+    tmp_path: Path,
+    hybrid_keys: pq.HybridSigningKeys,
+    key_manifest: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv(_STRIPE_ENV_VAR, "whsec_real_test_secret")
+    monkeypatch.setenv("SMTP_PASSWORD", "smtp-test")
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    ledger.record_receipt(
+        "stripe",
+        "cs_undelivered",
+        "receipt_undelivered",
+        {},
+        "buyer@example.com",
+        "download-token-undelivered",
+        "2026-07-24T10:00:00Z",
+    )
+    monkeypatch.setattr(cli, "_sweep_deliveries", lambda deps: (0, 0))
+    extra = """
+[delivery]
+smtp_host = "smtp.example.com"
+smtp_port = 587
+smtp_username = "merchant"
+smtp_password_env = "SMTP_PASSWORD"
+from_address = "receipts@example.com"
+info_url = "https://merchant.example.com/info"
+"""
+    config_path = _write_config(tmp_path, hybrid_keys, key_manifest, extra_toml=extra)
+
+    assert cli.main(["retry-failed", "--config", str(config_path)]) == 1
+    assert "undelivered: 1" in capsys.readouterr().out
+
+
 # -- serve (fail-fast only -- serve_forever() is not exercised here) --------
 
 
@@ -345,6 +380,37 @@ def test_serve_fails_fast_with_rc_2_on_config_error(
     rc = cli.main(["serve", "--config", str(missing_config)])
     assert rc == 2
     assert "config error" in capsys.readouterr().err
+
+
+def test_serve_installs_sanitized_request_handler(
+    tmp_path: Path,
+    hybrid_keys: pq.HybridSigningKeys,
+    key_manifest: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(_STRIPE_ENV_VAR, "whsec_real_test_secret")
+    installed_handler: type[object] | None = None
+
+    class FakeServer:
+        def __enter__(self) -> FakeServer:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def serve_forever(self) -> None:
+            return None
+
+    def fake_make_server(*args: object, **kwargs: object) -> FakeServer:
+        nonlocal installed_handler
+        installed_handler = kwargs["handler_class"]  # type: ignore[assignment,index]
+        return FakeServer()
+
+    monkeypatch.setattr(cli, "make_server", fake_make_server)
+    config_path = _write_config(tmp_path, hybrid_keys, key_manifest)
+
+    assert cli.main(["serve", "--config", str(config_path)]) == 0
+    assert installed_handler is cli._SanitizedRequestHandler
 
 
 # -- access-log token redaction (security review) --------------------
