@@ -347,9 +347,31 @@ class Ledger:
                 (next_attempt_at, token),
             )
 
-    def exhaust_claim(self, token: str) -> None:
+    def exhaust_claim_with_dead_letter(
+        self,
+        token: str,
+        *,
+        platform: str,
+        purchase_id: str | None,
+        reason: str,
+        raw_json: str,
+        now: str,
+    ) -> None:
+        """Atomically abandon a claim and retain its recovery record.
+
+        An exhausted claim is terminal and therefore invisible to the poller.
+        Its dead letter is the sole recovery path for ``retry-failed``, so the
+        two writes must commit together or neither may persist.
+        """
         with self._lock, self._conn:
             self._conn.execute("UPDATE claims SET status = 'exhausted' WHERE token = ?", (token,))
+            self._conn.execute(
+                """
+                INSERT INTO dead_letters (platform, purchase_id, reason, raw_json, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (platform, purchase_id, reason, raw_json, now),
+            )
 
     # -- dead letters (operator-visible failed purchases) --------------------
 
