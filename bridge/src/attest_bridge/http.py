@@ -34,9 +34,10 @@ purchase is silently lost. Every other terminal state — including a
 permanently-bad purchase (dead-lettered) — gets a 200 so Stripe stops
 retrying something that will never succeed.
 
-Never logged, anywhere in this module: a download token, a salt, a secret,
-or a full envelope. Event ids, session ids, and receipt ids are not secrets
-and may be logged freely.
+Never logged, anywhere in this module: a download token, a Stripe session id,
+a salt, a secret, or a full envelope. A Stripe session id is a receipt
+capability: it is retained in the dead-letter row for operator recovery and
+never emitted to a log.
 """
 
 from __future__ import annotations

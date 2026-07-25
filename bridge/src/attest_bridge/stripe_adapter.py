@@ -41,6 +41,7 @@ from attest_bridge.model import (
     NormalizedPurchase,
     PurchaseRejected,
     decode_buyer_pubkey,
+    purchase_id_for_log,
     rfc3339_from_unix,
 )
 
@@ -192,12 +193,14 @@ class StripeAdapter:
         customer_details = session.get("customer_details") if "customer_details" in session else {}
         if not isinstance(customer_details, dict):
             raise PurchaseRejected(
-                f"stripe session {platform_purchase_id!r} customer_details is not an object"
+                "stripe session "
+                f"{purchase_id_for_log(platform_purchase_id)} customer_details is not an object"
             )
         email = customer_details.get("email")
         if not isinstance(email, str) or not email:
             raise PurchaseRejected(
-                f"stripe session {platform_purchase_id!r} has no customer_details.email"
+                "stripe session "
+                f"{purchase_id_for_log(platform_purchase_id)} has no customer_details.email"
             )
 
         created = event.get("created")
@@ -212,13 +215,15 @@ class StripeAdapter:
         metadata = session.get("metadata") if "metadata" in session else {}
         if not isinstance(metadata, dict):
             raise PurchaseRejected(
-                f"stripe session {platform_purchase_id!r} metadata is not an object"
+                "stripe session "
+                f"{purchase_id_for_log(platform_purchase_id)} metadata is not an object"
             )
         if not all(
             isinstance(key, str) and isinstance(value, str) for key, value in metadata.items()
         ):
             raise PurchaseRejected(
-                f"stripe session {platform_purchase_id!r} metadata must contain string keys "
+                "stripe session "
+                f"{purchase_id_for_log(platform_purchase_id)} metadata must contain string keys "
                 "and values"
             )
         metadata_product_key = metadata.get("attest_product_key")
@@ -270,11 +275,13 @@ class StripeAdapter:
         data = json.loads(body)
         if not isinstance(data, dict):
             raise PurchaseRejected(
-                f"stripe line items for session {session_id!r} are not an object"
+                f"stripe line items for session {purchase_id_for_log(session_id)} are not an object"
             )
         items = data.get("data")
         if not isinstance(items, list) or not items:
-            raise PurchaseRejected(f"stripe line items for session {session_id!r} are empty")
+            raise PurchaseRejected(
+                f"stripe line items for session {purchase_id_for_log(session_id)} are empty"
+            )
         if len(items) > 1:
             raise PurchaseRejected(
                 "checkout session contains multiple line items; the bridge issues one receipt "
@@ -282,15 +289,20 @@ class StripeAdapter:
             )
         item = items[0]
         if not isinstance(item, dict):
-            raise PurchaseRejected(f"stripe line item for session {session_id!r} is not an object")
+            raise PurchaseRejected(
+                f"stripe line item for session {purchase_id_for_log(session_id)} is not an object"
+            )
         price = item.get("price") or {}
         if not isinstance(price, dict):
             raise PurchaseRejected(
-                f"stripe line item for session {session_id!r} price is not an object"
+                "stripe line item for session "
+                f"{purchase_id_for_log(session_id)} price is not an object"
             )
         price_id = price.get("id")
         if not isinstance(price_id, str) or not price_id:
-            raise PurchaseRejected(f"stripe line item for session {session_id!r} has no price.id")
+            raise PurchaseRejected(
+                f"stripe line item for session {purchase_id_for_log(session_id)} has no price.id"
+            )
         return str(price_id)
 
     @staticmethod

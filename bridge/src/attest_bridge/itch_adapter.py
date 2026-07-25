@@ -41,7 +41,13 @@ from urllib.parse import quote
 from attest_bridge._http import https_get as _default_http_get
 from attest_bridge.core import IssuingCore
 from attest_bridge.ledger import Claim, Ledger
-from attest_bridge.model import BridgeError, NormalizedPurchase, PurchaseRejected, UnmappedProduct
+from attest_bridge.model import (
+    BridgeError,
+    NormalizedPurchase,
+    PurchaseRejected,
+    UnmappedProduct,
+    purchase_id_for_log,
+)
 
 _log = logging.getLogger("attest_bridge.itch")
 
@@ -229,7 +235,10 @@ class ItchPoller:
                 # One claim's unexpected failure (e.g. a signing IssueError) must
                 # neither abort the whole tick nor kill the sole poller thread:
                 # log it and defer this claim to retry on the normal backoff.
-                _log.exception("itch poller: unexpected error on claim %s; deferring", claim.token)
+                _log.exception(
+                    "itch poller: unexpected error on claim %s; deferring",
+                    purchase_id_for_log(claim.token),
+                )
                 self._defer_or_exhaust(claim, now)
                 continue
             if not completed:
@@ -249,7 +258,8 @@ class ItchPoller:
         for raw in purchases:
             if not isinstance(raw, dict):
                 _log.warning(
-                    "itch poller: skipping non-object purchase row for claim %s", claim.token
+                    "itch poller: skipping non-object purchase row for claim %s",
+                    purchase_id_for_log(claim.token),
                 )
                 continue
             if raw.get("status") in _SKIP_STATUSES:
@@ -294,7 +304,9 @@ class ItchPoller:
                 # Do not let one transient signing/storage failure starve a
                 # second purchase returned for this same claim. The claim stays
                 # pending for retry after the remaining rows are attempted.
-                _log.exception("itch poller: failed purchase %s; continuing", purchase_id)
+                _log.exception(
+                    "itch poller: failed purchase %s; continuing", purchase_id_for_log(purchase_id)
+                )
                 retryable_failure = True
                 continue
             completed = True
@@ -305,19 +317,21 @@ class ItchPoller:
     def _defer_or_exhaust(self, claim: Claim, now: datetime, *, api_failure: bool = False) -> None:
         if claim.attempts + 1 >= self._max_attempts:
             self._ledger.exhaust_claim(claim.token)
-            if api_failure:
-                _log.warning(
-                    "itch API failure for game %s (attempt %d); abandoning claim",
-                    claim.game_id,
-                    claim.attempts + 1,
-                )
-                self._ledger.add_dead_letter(
-                    "itch",
-                    None,
-                    f"claim abandoned after {claim.attempts + 1} failed API attempts",
-                    json.dumps({"email": claim.email, "game_id": claim.game_id}),
-                    now=now.strftime(_RFC3339),
-                )
+            failure_kind = "API" if api_failure else "issuance/storage"
+            failure_reason = "failed API attempts" if api_failure else "issuance/storage failures"
+            _log.warning(
+                "itch %s failure for game %s (attempt %d); abandoning claim",
+                failure_kind,
+                claim.game_id,
+                claim.attempts + 1,
+            )
+            self._ledger.add_dead_letter(
+                "itch",
+                None,
+                f"claim abandoned after {claim.attempts + 1} {failure_reason}",
+                json.dumps({"email": claim.email, "game_id": claim.game_id}),
+                now=now.strftime(_RFC3339),
+            )
             return
         if api_failure:
             _log.warning(
