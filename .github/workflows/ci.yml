@@ -12,7 +12,7 @@ jobs:
   python:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           version: "0.11.21"
@@ -45,7 +45,7 @@ jobs:
   supply-chain:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           version: "0.11.21"
@@ -177,7 +177,7 @@ jobs:
             checker_timeout: 5100
             lemmas: "sanity_toolchain,sanity_v01_accept,sanity_rotate_then_accept,sanity_mixed_keyset,sanity_kid_bound_accept,sanity_retired_key_receipt_still_accepts,sanity_slot2_issue_and_compromise,sanity_attacker_distinct_mid,sanity_same_version_conflict,sanity_continuity_advance,sanity_accept_after_advance,sanity_multihop_advance_compromise,sanity_hybrid_accept,reach_rotation_nonactive_signer_flagged,reach_rotation_same_version_flagged,reach_rotation_gap_flagged,reach_compromised_receipt_submitted,verified_clean_head_honest,rotation_no_hijack,compromised_key_rejected,old_key_powerless,pq_receipt_sig_source,no_cross_version_confusion,attack_v01_post_crqc,attack_tofu_forgery,attack_mixed_keyset_hijack,sanity_artifact_manifest_accept,am_pq_sig_source,no_downgrade_artifact_manifest"
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Both SHA256 values verified 2026-07-22 against the official release
       # assets (recomputed locally from fresh downloads; they match the plan).
       # Maude must be installed before Tamarin runs: tamarin-prover invokes
