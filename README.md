@@ -5,42 +5,40 @@
 An archive holds an offline build it is authorized to release, but only to the
 people who bought the game. The store that sold it has shut down, and its
 customer database went with it. The archive still has to decide, with no human
-in the loop, which claimants may download the file. That decision is what attest
-is for. No archive runs such a gate today; whether anyone ever will is the open
-question at the bottom of this page.
+in the loop, which claimants may download the file. That decision is the one
+attest was built to make possible.
 
 attest is an open standard and reference implementation for signed purchase
-receipts the *buyer* holds. The seller signs a receipt at checkout, the buyer
-keeps the file, and a gate can verify it offline later — issuer, license grant,
-status material, buyer binding — without contacting a seller that no longer
-exists. Every receipt carries an email-salt commitment and may bind a buyer
-public key, so a claimant can show that a receipt is *theirs* and not a copy
-that floated around, without revealing their identity to the verifier. The
-operator, not attest, decides whether the grant a receipt describes still
-qualifies.
+receipts the *buyer* holds. The seller signs one at checkout, the buyer keeps the
+file, and a gate can check it offline afterwards with nothing to contact: the
+bundle carries the issuer's key and artifact manifests, and the operator decides
+in advance whose key material it will accept. Every receipt also carries an
+email-salt commitment and may bind a buyer public key, so a claimant can show a
+receipt is *theirs* rather than a copy that floated around, without revealing
+their identity to the verifier. What the receipt cannot do is decide: whether the
+grant it describes still qualifies is the operator's policy, not attest's.
 
-Most of the time none of this is needed. While a seller or an authoritative
-successor still holds usable records, it can answer the question itself. For a
-refund, a dispute, or a judge, a bank statement and an order confirmation are
-ordinarily enough. And where the store simply hands over a durable DRM-free
-installer — GOG's answer, and a better one — there is no later gate to operate
-at all. Delivery beats evidence whenever delivery is available.
+Most of the time none of this is needed. While a seller or a successor still
+holds usable records, it can answer the question itself. Where a human weighs the
+evidence — a refund desk, a dispute, a judge — a bank statement and an order
+confirmation are what actually get used. And where the store simply hands over a
+durable DRM-free installer, GOG's answer and a better one, there is no later gate
+to operate at all: delivery beats evidence whenever delivery is available.
 
-The case for attest exists only when four conditions hold together: authorized
-content survives somewhere; some legitimate operator may distribute it;
-distribution is restricted to a defined entitled class rather than published
-openly; and the seller's usable entitlement records do not survive. If any one
-of them fails, attest is unnecessary.
+What is left is narrow, and it has four conditions that must hold together.
+Authorized content survives somewhere. Some legitimate operator may distribute
+it. Distribution is restricted to a defined entitled class rather than published
+openly. And the seller's usable entitlement records do not survive. If any one of
+them fails, nothing here is needed.
 
 `attest-receipts` 0.4.0 on PyPI and `attest-verifier` 0.4.0 on npm are
 independent Python and TypeScript implementations that agree on all 97
-conformance vector leaves across 36 groups; the specs for v0.1 and v0.2 are
-public. **Try it in your browser:** <https://svm-98.github.io/attest/> — drop a
-`.attest` bundle (or the built-in sample) and watch it verify entirely
-client-side; the page's CSP forbids it from talking to any other host. Nothing
-in production uses this: there are no issuers yet, no law asks for portable
-receipts, and the protocol is frozen at 0.4.0 until an operator with this
-problem appears.
+conformance vector leaves. **Try it in your browser:**
+<https://svm-98.github.io/attest/> — drop a `.attest` bundle (or the built-in
+sample) and watch it verify entirely client-side. Nothing in production uses it:
+no archive runs such a gate today, there are no issuers and no external reviews,
+no law I know of asks for portable receipts, and the protocol is frozen at 0.4.0
+until an operator with this problem appears.
 
 **The question, for archives, successors and escrow providers:** if you run — or
 expect one day to run — a service that must release an authorized digital good
@@ -55,8 +53,10 @@ At checkout, the store signs a receipt and hands the buyer an `.attest` bundle �
 a small file the buyer keeps anywhere: disk, cloud, USB, wherever. There is no
 account to keep alive and nothing to sync. Later, anyone with a verifier — a
 friend, a marketplace, the buyer themself — can check that bundle's signature
-offline against the issuer's published key material and confirm it's a genuine,
-unrevoked receipt. If the buyer needs to prove the receipt is specifically
+offline against the issuer's published key material and confirm it is genuine;
+whether it has since been revoked is only as good as the status material that
+verifier has, and with none it reports revocation as unknown rather than
+guessing. If the buyer needs to prove the receipt is specifically
 *theirs* (not just a copy that has floated around), they can do so by disclosing
 a salt or answering a key challenge, without exposing their identity to the
 verifier. Nothing in this loop requires a server: there is no central attest
@@ -73,10 +73,10 @@ proof — plus a Python reference implementation and an independent TypeScript
 verifier.
 
 It is **not** a DRM-stripping tool, a content host, an index of content, a
-marketplace, a resale/transfer protocol (not in v0.1 — see the reserved
-`transferable` field), a blockchain or NFT product, or a payment instrument. A
-receipt is evidence of a license grant, not the artifact itself and not the
-transaction that paid for it.
+marketplace, a general resale right (v0.1 defines no transfer at all; v0.2 §17
+adds it only where the issuer mediates it), a blockchain or NFT product, or a
+payment instrument. A receipt is evidence of a license grant, not the artifact
+itself and not the transaction that paid for it.
 
 None of this bypasses an unwilling seller: a receipt is issuer-signed, and attest
 cannot conjure a valid one out of a store that refuses to sign. A seller that
@@ -239,8 +239,8 @@ them could look like, where one exists.
 Non-normative, and deliberately undated — these are directions, not commitments:
 
 The authorized preservation escrow described at the top of this page is not
-listed here: it is the case attest exists for, not a future direction. What
-follows is genuinely speculative.
+listed here: it is the case this project is aimed at, not a future direction.
+What follows is genuinely speculative.
 
 - **Evidence capture for non-cooperating stores.** A research track into
   TLS-session-proof techniques (the zkTLS/TLSNotary class) that could let a buyer
