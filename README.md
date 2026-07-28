@@ -11,8 +11,10 @@ attest was built to make possible.
 attest is an open standard and reference implementation for signed purchase
 receipts the *buyer* holds. The seller signs one at checkout, the buyer keeps the
 file, and a gate can check it offline afterwards with nothing to contact: the
-bundle carries the issuer's key and artifact manifests, and the operator decides
-in advance whose key material it will accept. Every receipt also carries an
+bundle carries the issuer's key and artifact manifests. Carrying them is not the
+same as trusting them — key material that only ever arrived inside a bundle is
+reported as unauthenticated, so the anchor has to be issuer key material somebody
+pinned while the issuer still existed. Every receipt also carries an
 email-salt commitment and may bind a buyer public key, so a claimant can show a
 receipt is *theirs* rather than a copy that floated around, without revealing
 their identity to the verifier. What the receipt cannot do is decide: whether the
