@@ -8,6 +8,7 @@ an element cannot be explained in those terms, it does not belong.
 
 | File | Use |
 |---|---|
+| `banner.png` | Cover image: the lockup on a torn slip of paper. Used at the top of the repository README. The area below the teeth is transparent, so it reads as paper on a dark page and as a panel on a light one. |
 | `lockup.svg` | The primary logo: mark plus wordmark. Use this wherever there is room. |
 | `lockup-square-dot.svg` | Same lockup with the leading dot cut as a square instead of the typeface's round period. An alternate, not the default. |
 | `mark.svg` | The mark alone, for sizes down to about 24 px. |
@@ -16,6 +17,7 @@ an element cannot be explained in those terms, it does not belong.
 | `favicon.svg` | `mark-small.svg` under the name browsers look for. |
 | `favicon-16.png`, `favicon-32.png` | Raster fallbacks, ink on transparent. |
 | `apple-touch-icon-180.png` | Paper mark on an ink tile, opaque as Apple requires. |
+| `lockup-ink.png`, `lockup-paper.png` | Raster lockups on transparent, for places that cannot take an SVG. |
 | `social-preview-1280x640.png` | GitHub repository social preview (Settings → General → Social preview). |
 
 Every SVG is a single colour and uses `fill="currentColor"`, so it inherits the colour of the
