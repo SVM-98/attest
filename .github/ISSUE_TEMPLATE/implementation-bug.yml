@@ -1,0 +1,51 @@
+name: Implementation bug
+description: Something in the Python implementation, the TypeScript verifier, or the web verifier behaves incorrectly.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If the specification itself is wrong or ambiguous, use "Specification defect" instead —
+        the distinction matters here, because an implementation bug is fixed in code and a spec
+        defect is fixed by amendment.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Where
+      options:
+        - Python implementation (attest-receipts)
+        - TypeScript verifier (attest-verifier)
+        - Web verifier (the page at svm-98.github.io/attest)
+        - CLI
+        - Webhook bridge
+        - Somewhere else / not sure
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Package version, or the commit you are on.
+      placeholder: "attest-receipts 0.4.0"
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: What you did
+      description: The exact command or steps. If a receipt or bundle is involved, please say whether you can share it — receipts can carry a buyer commitment, so do not paste one you would not publish.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected, and what happened instead
+      description: If a verification result is involved, the full result object is more useful than a summary — the layered result never collapses, so every field carries information.
+    validations:
+      required: true
+  - type: checkboxes
+    id: vectors
+    attributes:
+      label: Conformance
+      options:
+        - label: I checked whether an existing vector in `docs/spec/vectors/` already covers this case.
