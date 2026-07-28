@@ -1,7 +1,4 @@
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="logo/lockup-paper.png">
-  <img src="logo/lockup-ink.png" alt="attest" width="282">
-</picture>
+<img src="logo/banner.png" alt="attest">
 
 **When the store is gone, someone still has to decide who was entitled.**
 
