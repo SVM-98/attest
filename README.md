@@ -1,56 +1,53 @@
 # attest
 
-**The store dies, the receipt survives.**
+**When the store is gone, someone still has to decide who was entitled.**
 
-When a digital store shuts down or delists a title, buyers lose twice. The loud
-loss is access: the game, book, or film stops working, and everyone talks about
-that. The quiet loss is evidence: the only record that you ever paid lived in
-the seller's database, so the proof of purchase dies at the same moment as
-everything it could have proven — a refund, a dispute, a class action, a
-preservation project's eligibility check. You go from "customer" to "nobody in
-particular" the instant the server goes dark.
+An archive holds an offline build it is authorized to release, but only to the
+people who bought the game. The store that sold it has shut down, and its
+customer database went with it. The archive still has to decide, with no human
+in the loop, which claimants may download the file. That decision is what attest
+is for. No archive runs such a gate today; whether anyone ever will is the open
+question at the bottom of this page.
 
-attest closes that second gap. It is an open standard and reference
-implementation for signed purchase receipts the *buyer* holds: the store signs
-a receipt once at checkout, the buyer keeps the file like a paper receipt, and
-anyone can verify it offline, forever — even after the store is gone. It covers
-any digital purchase: games, e-books, film and TV, music, software, courses.
-No account, no wallet, no blockchain, no server that has to stay alive for the
-proof to still work.
+attest is an open standard and reference implementation for signed purchase
+receipts the *buyer* holds. The seller signs a receipt at checkout, the buyer
+keeps the file, and a gate can verify it offline later — issuer, license grant,
+status material, buyer binding — without contacting a seller that no longer
+exists. Every receipt carries an email-salt commitment and may bind a buyer
+public key, so a claimant can show that a receipt is *theirs* and not a copy
+that floated around, without revealing their identity to the verifier. The
+operator, not attest, decides whether the grant a receipt describes still
+qualifies.
 
-**Try it in your browser:** <https://svm-98.github.io/attest/> — drop a `.attest`
-bundle (or the built-in sample) and watch it verify entirely client-side; the
-page's CSP forbids it from talking to any other host.
+Most of the time none of this is needed. While a seller or an authoritative
+successor still holds usable records, it can answer the question itself. For a
+refund, a dispute, or a judge, a bank statement and an order confirmation are
+ordinarily enough. And where the store simply hands over a durable DRM-free
+installer — GOG's answer, and a better one — there is no later gate to operate
+at all. Delivery beats evidence whenever delivery is available.
 
-## The problem
+The case for attest exists only when four conditions hold together: authorized
+content survives somewhere; some legitimate operator may distribute it;
+distribution is restricted to a defined entitled class rather than published
+openly; and the seller's usable entitlement records do not survive. If any one
+of them fails, attest is unnecessary.
 
-A digital "purchase" today is a revocable license living inside one company's
-platform, not a thing you hold. When the platform shuts down, delists a title, or
-changes terms, the buyer's library goes with it — regardless of medium: Robot Cache
-bricked already-downloaded games at its May 2026 shutdown; Funimation wiped
-customers' digital anime libraries in 2024; Kindle removed book export in
-February 2025; Sony ends PlayStation disc production for new games in
-January 2028, pushing more purchases into pure platform dependency. None of this is
-hypothetical or gaming-specific — it is what "buy" already means for every kind of
-digital media.
+`attest-receipts` 0.4.0 on PyPI and `attest-verifier` 0.4.0 on npm are
+independent Python and TypeScript implementations that agree on all 97
+conformance vector leaves across 36 groups; the specs for v0.1 and v0.2 are
+public. **Try it in your browser:** <https://svm-98.github.io/attest/> — drop a
+`.attest` bundle (or the built-in sample) and watch it verify entirely
+client-side; the page's CSP forbids it from talking to any other host. Nothing
+in production uses this: there are no issuers yet, no law asks for portable
+receipts, and the protocol is frozen at 0.4.0 until an operator with this
+problem appears.
 
-Policy is waking up to half of the problem. California's AB 2426 and Maryland's
-[HB 208](https://mgaleg.maryland.gov/mgawebsite/Legislation/Details/hb0208?ys=2025RS)
-require disclosure that a digital "purchase" is a license; the EU's Digital
-Content Directive (2019/770) already grants consumers remedies when digital
-content fails to conform; and in June 2026 the European Commission — answering
-the 1.29-million-signature Stop Killing Games initiative — committed to an
-industry code of conduct on video game end-of-life by the end of 2026. All of
-those efforts are about access and disclosure. None of them puts proof of
-purchase on the table — yet a right without evidence is unenforceable. Once the
-seller's records are the only proof and the seller is gone, there is nothing
-left to base a remedy on.
-
-What's missing is not more disclosure law — it's an open technical standard for
-a purchase record the buyer actually holds, independent of whether the seller
-survives. That evidence layer is what attest is. Deliberately, it is *only*
-that: attest does not keep content alive (see below), it makes sure that
-whatever rights a buyer has can still be exercised after the store is gone.
+**The question, for archives, successors and escrow providers:** if you run — or
+expect one day to run — a service that must release an authorized digital good
+only to the people who bought it, after the seller and its records are gone,
+what evidence would that gate accept, and who decides the policy behind it?
+Answers in [GitHub Discussions](https://github.com/SVM-98/attest/discussions) or
+to `SVM-98@proton.me` are worth more to this project than another feature.
 
 ## How it works, for humans
 
@@ -82,8 +79,9 @@ receipt is evidence of a license grant, not the artifact itself and not the
 transaction that paid for it.
 
 None of this bypasses an unwilling seller: a receipt is issuer-signed, and attest
-cannot conjure a valid one out of a store that refuses to sign. For incumbents who
-won't adopt voluntarily, the lever is regulation and market pressure, not forgery.
+cannot conjure a valid one out of a store that refuses to sign. A seller that
+never issues receipts leaves nothing for a later gate to check, and no amount of
+protocol fixes that.
 
 ## Status
 
@@ -240,11 +238,10 @@ them could look like, where one exists.
 
 Non-normative, and deliberately undated — these are directions, not commitments:
 
-- **Authorized preservation escrow.** A path where a rights holder deposits a
-  build or copy with a preservation institution and licenses buyers to retrieve
-  it once official distribution ends — with the receipt as the eligibility
-  check. Strictly rights-holder-authorized: attest will never host, index, or
-  distribute content on its own.
+The authorized preservation escrow described at the top of this page is not
+listed here: it is the case attest exists for, not a future direction. What
+follows is genuinely speculative.
+
 - **Evidence capture for non-cooperating stores.** A research track into
   TLS-session-proof techniques (the zkTLS/TLSNotary class) that could let a buyer
   capture their own evidence of a purchase from a store that never signs anything,
