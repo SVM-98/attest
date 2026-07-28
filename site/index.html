@@ -5,18 +5,19 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'">
-  <meta name="description" content="attest — cryptographically-signed purchase receipts the buyer holds. Verify one right here, offline, in your browser.">
-  <title>attest — the store dies, the receipt survives</title>
+  <meta name="description" content="attest — seller-signed purchase receipts the buyer holds, checkable by a machine after the seller is gone. Verify one right here, offline, in your browser.">
+  <title>attest — a receipt a machine can still check after the seller is gone</title>
   <link rel="stylesheet" href="/src/styles.css">
 </head>
 <body>
 <header class="hero">
   <h1>attest</h1>
-  <p class="tagline">The store dies. The receipt survives.</p>
-  <p>An open standard for cryptographically-signed purchase receipts, for any digital
-     purchase — games, music, film and TV, books. The store signs a receipt once; the buyer
-     holds it forever; anyone can verify it offline. No wallet, no blockchain, no server
-     that has to stay alive for the proof to still work.</p>
+  <p class="tagline">When the store is gone, someone still has to decide who was entitled.</p>
+  <p>An open standard for seller-signed purchase receipts the buyer holds. The seller signs
+     once at checkout; the buyer keeps the file; a gate can verify it offline afterwards —
+     issuer, license grant, buyer binding — with no surviving service of any kind, and tell
+     a buyer apart from someone who merely holds a copy. Where the seller is still around,
+     or simply hands over a DRM-free installer, none of this is needed.</p>
   <nav>
     <a href="https://github.com/SVM-98/attest">GitHub</a>
     <a href="https://github.com/SVM-98/attest/blob/main/docs/spec/attest-v0.1.md">Spec v0.1</a>
@@ -66,20 +67,21 @@
   </section>
 
   <section class="explainer">
-    <h2>The problem</h2>
-    <p>A digital “purchase” today is a revocable license living inside one company’s
-       platform. When the platform shuts down, delists a title, or changes terms, the
-       buyer’s library goes with it: Robot Cache bricked already-downloaded games at its
-       2026 shutdown; Funimation wiped customers’ digital libraries in 2024; Kindle removed
-       book export in 2025. Regulators have started requiring stores to <em>disclose</em>
-       that “buy” means “license” — what’s missing is the technical standard for a purchase
-       record the buyer actually holds. That’s attest.</p>
+    <h2>The case</h2>
+    <p>An archive holds an offline build it is authorized to release, but only to the people
+       who bought the game. The store that sold it is gone, and its customer database went
+       with it. The archive still has to decide, with no human in the loop, which claimants
+       may download the file. That decision is what attest is for — and only that: while the
+       seller is still around, or hands the buyer a DRM-free installer, or where a judge is
+       the one reading the evidence, nothing here is needed. No archive runs such a gate
+       today; whether anyone ever will is the
+       <a href="https://github.com/SVM-98/attest#readme">open question</a>.</p>
 
     <h2>How it works</h2>
     <ol>
       <li><strong>The store signs.</strong> At checkout, the seller signs a receipt —
           title, terms, artifact hashes, survivability promises — with its published
-          Ed25519 key.</li>
+          signing keys.</li>
       <li><strong>You hold it.</strong> The buyer keeps the <code>.attest</code> bundle
           anywhere: disk, cloud, USB. No account has to stay alive.</li>
       <li><strong>Anyone verifies, offline.</strong> Any verifier — this page, the CLI, a
@@ -96,9 +98,9 @@
       <li><strong>Not a blockchain.</strong> A signed receipt needs no consensus, token, or
           wallet. (A strictly optional transparency-anchoring layer is future roadmap — the
           only place a chain will ever appear.)</li>
-      <li><strong>Not resale.</strong> v0.1 defines no transfer protocol; the
-          <code>transferable</code> field is reserved for a future rights-holder-authorized
-          profile.</li>
+      <li><strong>Not a resale market.</strong> v0.1 defines no transfer protocol at all;
+          v0.2 §17 adds transfer only where the issuer mediates it, and never a general
+          right to resell.</li>
     </ul>
     <p>Skeptical? Good — read the <a href="https://github.com/SVM-98/attest/blob/main/docs/faq.md">FAQ</a>,
        it answers the questions a reasonable person asks.</p>
