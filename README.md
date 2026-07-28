@@ -1,4 +1,7 @@
-# attest
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="logo/lockup-paper.png">
+  <img src="logo/lockup-ink.png" alt="attest" width="282">
+</picture>
 
 **When the store is gone, someone still has to decide who was entitled.**
 
@@ -49,6 +52,28 @@ what evidence would that gate accept, and who decides the policy behind it?
 Answers in [GitHub Discussions](https://github.com/SVM-98/attest/discussions) or
 to `SVM-98@proton.me` are worth more to this project than another feature.
 
+## Start here
+
+Depending on why you landed on this page:
+
+- **You want to see whether it actually works.** Open the
+  [verifier](https://svm-98.github.io/attest/) and drop the built-in sample on it.
+  It takes about thirty seconds, installs nothing, and you can disconnect from the
+  network first — that is the whole point of the thing.
+- **You want to know whether any of this concerns you.** Read the
+  [FAQ](docs/faq.md). It answers the questions a sceptical person asks first,
+  including the ones where the answer is no.
+- **You want the standard.**
+  [`docs/spec/attest-v0.1.md`](docs/spec/attest-v0.1.md) is the normative
+  specification, [`attest-v0.2.md`](docs/spec/attest-v0.2.md) the additive delta,
+  and [`docs/spec/vectors/`](docs/spec/vectors/) the conformance corpus every
+  implementation is measured against.
+- **You might be the person this was built for** — an archive, a successor, an
+  escrow, anyone who could end up deciding who is entitled to something after the
+  seller is gone. The question at the top of this page is a real one, and
+  [Discussions](https://github.com/SVM-98/attest/discussions) is where to answer
+  it.
+
 ## How it works, for humans
 
 At checkout, the store signs a receipt and hands the buyer an `.attest` bundle —
@@ -58,12 +83,12 @@ friend, a marketplace, the buyer themself — can check that bundle's signature
 offline against the issuer's published key material and confirm it is genuine;
 whether it has since been revoked is only as good as the status material that
 verifier has, and with none it reports revocation as unknown rather than
-guessing. If the buyer needs to prove the receipt is specifically
-*theirs* (not just a copy that has floated around), they can do so by disclosing
-a salt or answering a key challenge, without exposing their identity to the
-verifier. Nothing in this loop requires a server: there is no central attest
-authority, no registry that must exist, and no phone-home — a verifier needs only
-the receipt bytes, the issuer's key material, and, optionally, a revocation feed.
+guessing. If the buyer needs to prove the receipt is specifically *theirs* (not
+just a copy that has floated around), they can do so by disclosing a salt or
+answering a key challenge, without exposing their identity to the verifier.
+Nothing in this loop requires a server: there is no central attest authority, no
+registry that must exist, and no phone-home — a verifier needs only the receipt
+bytes, the issuer's key material, and, optionally, a revocation feed.
 
 ## What it is / is not
 
@@ -80,74 +105,65 @@ adds it only where the issuer mediates it), a blockchain or NFT product, or a
 payment instrument. A receipt is evidence of a license grant, not the artifact
 itself and not the transaction that paid for it.
 
-None of this bypasses an unwilling seller: a receipt is issuer-signed, and attest
-cannot conjure a valid one out of a store that refuses to sign. A seller that
-never issues receipts leaves nothing for a later gate to check, and no amount of
-protocol fixes that.
+None of this bypasses an unwilling seller: a receipt is issuer-signed, and
+attest cannot conjure a valid one out of a store that refuses to sign. A seller
+that never issues receipts leaves nothing for a later gate to check, and no
+amount of protocol fixes that.
 
 ## Status
 
 Spec v0.1 is complete and v0.2 is specified and implemented on `main`, with two
 independent implementations — a Python reference implementation and a TypeScript
-verifier — that agree on all 97 conformance vector leaves across 36 groups: 51 of
-them the v0.1 corpus, the rest exercising v0.2's hybrid signature profile,
+verifier — that agree on all 97 conformance vector leaves across 36 groups: 51
+of them the v0.1 corpus, the rest exercising v0.2's hybrid signature profile,
 transparency/anchoring behaviour, the upgrade-policy hardening (mixed-keyset
 prohibition, artifact-manifest currency, anchor profile v2, logged revocation
-deadlines), and Stage 3 issuer-mediated transfer. (A v0.1-only verifier is required
-to reject v0.2 envelopes, so it is measured against the 51-leaf subset.) There is also an
-end-to-end demo that deletes a store's entire infrastructure mid-lifecycle and
-proves the receipt still verifies.
+deadlines), and Stage 3 issuer-mediated transfer. (A v0.1-only verifier is
+required to reject v0.2 envelopes, so it is measured against the 51-leaf
+subset.) There is also an end-to-end demo that deletes a store's entire
+infrastructure mid-lifecycle and proves the receipt still verifies.
 
 The published packages are `0.4.0`, which ships all of v0.2 — Stages 1 and 2
 (hybrid signatures; transparency and anchoring) and Stage 3, issuer-mediated
 transfer, this document's own §17.
 
-Three pieces of assurance work go beyond what a test suite can show. They are
-being finished on branches, and are linked here rather than left invisible:
+Seven pieces of work go beyond what a test suite can show. All of them are on
+`main`, and they are linked here rather than left invisible:
 
-- **Formal verification.** A [Tamarin model of the wire protocol](https://github.com/SVM-98/attest/blob/feature/p1.3-formal-verification/formal/attest.spthy):
-  machine-checked theorems that acceptance implies an issuer signature, that key
-  rotation cannot be hijacked, and that revocation is sound and effective — plus
-  attack exhibits proved *reachable* rather than argued in prose, plus negative
-  controls that must falsify. Each theorem states its own scope in the theory
-  file; nothing is claimed more broadly there than the prover checked. In
-  progress on [`feature/p1.3-formal-verification`](https://github.com/SVM-98/attest/tree/feature/p1.3-formal-verification).
-- **[Threat model](https://github.com/SVM-98/attest/blob/pillar-1/docs/spec/attest-threat-model.md).**
-  67 attacks catalogued across the whole receipt lifecycle, each either mitigated
-  or recorded as out of scope with a reason, a traceability matrix, and the
-  protocol gaps the exercise found left tracked in the open instead of quietly
-  fixed. On [`pillar-1`](https://github.com/SVM-98/attest/tree/pillar-1).
-- **[Privacy considerations](https://github.com/SVM-98/attest/blob/pillar-1/docs/spec/attest-privacy.md).**
-  Every field classified by what it reveals to which observer, twenty testable
-  privacy claims, and a GDPR annex covering what a receipt deliberately does not
-  record. On [`pillar-1`](https://github.com/SVM-98/attest/tree/pillar-1).
-- **[Transfer economics](https://github.com/SVM-98/attest/blob/pillar-1/docs/spec/attest-transfer-economics.md)
-  (non-normative).** The market and legal context behind Stage 3's transfer
-  profile — resale velocity, the issuer-royalty incentive, and the CJEU case law
+- **[Formal verification](formal/attest.spthy).** A Tamarin model of the wire
+  protocol: machine-checked theorems that acceptance implies an issuer signature,
+  that key rotation cannot be hijacked, and that revocation is sound and effective
+  — plus attack exhibits proved *reachable* rather than argued in prose, plus
+  negative controls that must falsify. Each theorem states its own scope in the
+  theory file; nothing is claimed more broadly there than the prover checked, and
+  a CI checker pins those statements so the claims cannot drift from the proofs.
+- **[Threat model](docs/spec/attest-threat-model.md).** 67 attacks catalogued
+  across the whole receipt lifecycle, each either mitigated or recorded as out of
+  scope with a reason, a traceability matrix, and the protocol gaps the exercise
+  found left tracked in the open instead of quietly fixed.
+- **[Privacy considerations](docs/spec/attest-privacy.md).** Every field
+  classified by what it reveals to which observer, twenty testable privacy claims,
+  and a GDPR annex covering what a receipt deliberately does not record.
+- **[Transfer economics](docs/spec/attest-transfer-economics.md)**
+  (non-normative). The market and legal context behind Stage 3's transfer profile
+  — resale velocity, the issuer-royalty incentive, and the CJEU case law
   (*UsedSoft*, *Tom Kabinet*) that makes transfer issuer-mediated rather than a
-  general resale right. On [`pillar-1`](https://github.com/SVM-98/attest/tree/pillar-1).
-
-Three further pieces make attest citable and checkable, not just built and
-tested, and are likewise linked here rather than left invisible:
-
-- **IETF Internet-Draft.** [`ietf/draft-martinalli-open-purchase-receipts.xml`](https://github.com/SVM-98/attest/blob/pillar-1/ietf/draft-martinalli-open-purchase-receipts.xml)
-  is the source for `draft-martinalli-open-purchase-receipts-00`, a
-  snapshot-profile mirror of the living spec (declares it mirrors v0.1
-  revision 5 and v0.2 revision 6) that builds clean to `-00` txt/html in CI.
-  It is ready to submit; submission to the IETF Datatracker is a deliberate
-  manual step, not something this repo automates. On
-  [`pillar-1`](https://github.com/SVM-98/attest/tree/pillar-1).
-- **[Standards-relationship annex](https://github.com/SVM-98/attest/blob/pillar-1/docs/spec/attest-standards-relationship.md).**
-  Documents attest's boundary against every adjacent standard people compare
-  it to — W3C Verifiable Credentials, eIDAS 2.0/the EUDI Wallet, JOSE/JWS and
-  COSE, RFC 8785 (JCS), C2PA, SCITT/RFC 9943, and RATS (RFC 9334) — so each
-  comparison is answered once instead of re-argued per issue. On
-  [`pillar-1`](https://github.com/SVM-98/attest/tree/pillar-1).
-- **[Conformance program](https://github.com/SVM-98/attest/blob/pillar-1/docs/conformance.md).**
-  One documented command, run with a third party's own adapter against the
-  vector corpus, produces a pass/fail report and a self-certification claim;
-  both in-repo verifiers pass 97/97 through that exact path. On
-  [`pillar-1`](https://github.com/SVM-98/attest/tree/pillar-1).
+  general resale right.
+- **[Internet-Draft](ietf/draft-martinalli-open-purchase-receipts.xml).** The
+  source for `draft-martinalli-open-purchase-receipts-00`, a snapshot-profile
+  mirror of the living spec (it declares that it mirrors v0.1 revision 5 and v0.2
+  revision 6) that builds clean to `-00` txt/html in CI. It is ready to submit;
+  submission to the IETF Datatracker is a deliberate manual step, not something
+  this repo automates, and it has not been done.
+- **[Standards-relationship annex](docs/spec/attest-standards-relationship.md).**
+  Documents attest's boundary against every adjacent standard people compare it to
+  — W3C Verifiable Credentials, eIDAS 2.0/the EUDI Wallet, JOSE/JWS and COSE, RFC
+  8785 (JCS), C2PA, SCITT/RFC 9943, and RATS (RFC 9334) — so each comparison is
+  answered once instead of re-argued per issue.
+- **[Conformance program](docs/conformance.md).** One documented command, run with
+  a third party's own adapter against the vector corpus, produces a pass/fail
+  report and a self-certification claim; both in-repo verifiers pass 97/97 through
+  that exact path.
 
 ## Quickstart
 

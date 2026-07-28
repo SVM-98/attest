@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" role="img">
+  <title>attest</title>
+  <style>
+    path { fill: #17191d; }
+    @media (prefers-color-scheme: dark) { path { fill: #f1f0ed; } }
+  </style>
+  <path fill="#17191d" fill-rule="evenodd" d="M5 2.6h14V18l-2.33 2.9L14.33 18 12 20.9 9.67 18l-2.34 2.9L5 18Zm2.8 4.4h8.4v2.6H7.8Z"/>
+</svg>
