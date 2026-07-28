@@ -27,6 +27,8 @@ htmlcov/
 .superpowers/
 docs/superpowers/
 .hypothesis/
+.codex-wt/
+.claude/
 
 # Internet-Draft local build output (already matched by the generic
 # `build/` rule above; named explicitly for discoverability).

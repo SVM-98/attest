@@ -1,0 +1,46 @@
+name: Specification defect
+description: The specification is wrong, ambiguous, contradicts itself, or two conforming implementations could read it differently.
+labels: ["spec"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is the most valuable kind of issue this project can receive. Two independent
+        implementations agreeing on the corpus is evidence the spec is unambiguous — a case where
+        they could reasonably disagree is evidence it is not.
+  - type: dropdown
+    id: document
+    attributes:
+      label: Which document
+      options:
+        - attest-v0.1.md
+        - attest-v0.2.md
+        - attest-versioning.md
+        - attest-threat-model.md
+        - attest-privacy.md
+        - attest-standards-relationship.md
+        - The Internet-Draft
+        - The conformance corpus or its documentation
+    validations:
+      required: true
+  - type: input
+    id: section
+    attributes:
+      label: Section
+      placeholder: "§11.3, or the paragraph beginning 'A conforming verifier MUST'"
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: Quote the text, then say what is wrong with it. If two readings are possible, give both and say which one you implemented.
+    validations:
+      required: true
+  - type: textarea
+    id: consequence
+    attributes:
+      label: What it lets happen
+      description: A concrete case where the defect produces a wrong result, a security property that does not hold, or two implementations that disagree. A defect nobody can reach is worth recording; one that is reachable is worth fixing first.
+    validations:
+      required: true
