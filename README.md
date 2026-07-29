@@ -2,11 +2,12 @@
 
 **When the store is gone, someone still has to decide who was entitled.**
 
-An archive holds an offline build it is authorized to release, but only to the
-people who bought the game. The store that sold it has shut down, and its
-customer database went with it. The archive still has to decide, with no human
-in the loop, which claimants may download the file. That decision is the one
-attest was built to make possible.
+An archive holds an offline copy of a digital good it is authorized to release,
+but only to the people who bought it — a game, an album, a film, an ebook, a
+piece of software. The store that sold it has shut down, and its customer
+database went with it. The archive still has to decide, with no human in the
+loop, which claimants may download the file. That decision is the one attest was
+built to make possible.
 
 attest is an open standard and reference implementation for signed purchase
 receipts the *buyer* holds. The seller signs one at checkout, the buyer keeps the
@@ -14,11 +15,15 @@ file, and a gate can check it offline afterwards with nothing to contact: the
 bundle carries the issuer's key and artifact manifests. Carrying them is not the
 same as trusting them — key material that only ever arrived inside a bundle is
 reported as unauthenticated, so the anchor has to be issuer key material somebody
-pinned while the issuer still existed. Every receipt also carries an
-email-salt commitment and may bind a buyer public key, so a claimant can show a
-receipt is *theirs* rather than a copy that floated around, without revealing
-their identity to the verifier. What the receipt cannot do is decide: whether the
-grant it describes still qualifies is the operator's policy, not attest's.
+pinned while the issuer still existed. Every receipt also carries a commitment to
+a buyer identifier — an email address or an issuer account — and may bind a buyer
+public key, so a claimant can show a receipt is *theirs* rather than a copy that
+floated around. What that costs in privacy depends on which path is used:
+disclosing the salt is a bearer proof that hands the identifier to the verifier
+and can be replayed, while a challenge answered with a bound buyer key proves
+possession without disclosing either. What the receipt cannot do is decide:
+whether the grant it describes still qualifies is the operator's policy, not
+attest's.
 
 Most of the time none of this is needed. While a seller or a successor still
 holds usable records, it can answer the question itself. Where a human weighs the
@@ -33,14 +38,15 @@ it. Distribution is restricted to a defined entitled class rather than published
 openly. And the seller's usable entitlement records do not survive. If any one of
 them fails, nothing here is needed.
 
-`attest-receipts` 0.4.0 on PyPI and `attest-verifier` 0.4.0 on npm are
-independent Python and TypeScript implementations that agree on all 97
-conformance vector leaves. **Try it in your browser:**
+`attest-receipts` 0.4.0 on PyPI (issue and verify) and `attest-verifier` 0.4.0 on
+npm (verify only) are independent Python and TypeScript implementations that
+agree on all 97 conformance vector leaves. **Try it in your browser:**
 <https://svm-98.github.io/attest/> — drop a `.attest` bundle (or the built-in
 sample) and watch it verify entirely client-side. Nothing in production uses it:
 no archive runs such a gate today, there are no issuers and no external reviews,
-no law I know of asks for portable receipts, and the protocol is frozen at 0.4.0
-until an operator with this problem appears.
+no law I know of asks for portable receipts, and the wire format is frozen at
+`attest_version` 0.1 and 0.2 — 0.4.0 is the package release, not the protocol
+version — until an operator with this problem appears.
 
 **The question, for archives, successors and escrow providers:** if you run — or
 expect one day to run — a service that must release an authorized digital good
@@ -129,7 +135,9 @@ Seven pieces of work go beyond what a test suite can show. All of them are on
 
 - **[Formal verification](formal/attest.spthy).** A Tamarin model of the wire
   protocol: machine-checked theorems that acceptance implies an issuer signature,
-  that key rotation cannot be hijacked, and that revocation is sound and effective
+  that a rotation is accepted only when the previous active key signed it or it
+  carries an explicit compromise flag, and that the reason a revoked key is
+  rejected cannot itself be forged — soundness, not liveness
   — plus attack exhibits proved *reachable* rather than argued in prose, plus
   negative controls that must falsify. Each theorem states its own scope in the
   theory file; nothing is claimed more broadly there than the prover checked, and
