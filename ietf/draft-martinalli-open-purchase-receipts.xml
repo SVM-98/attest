@@ -302,16 +302,18 @@
             revocation-record effectiveness (<xref target="revocation"/>).
             When <tt>revocability == "none"</tt>, the schema additionally
             REQUIRES <tt>drm == "drm-free"</tt>,
-            <tt>survivability.redownload_right == true</tt>, and at least
+            <tt>redownload_right == true</tt> under
+            <tt>survivability</tt>, and at least
             one of a non-empty <tt>work.artifact_series</tt> or a non-empty
             <tt>work.artifacts</tt> array; a <tt>revocability: "none"</tt>
             payload violating any of these is schema-invalid, never merely
             a warning.</td></tr>
-            <tr><td><tt>revocation_window_days</tt></td><td>REQUIRED iff
-            <tt>revocability == "refund_window"</tt></td><td>Integer,
-            1 to 3650; the window is anchored to <tt>issued_at</tt> and
-            evaluated against a revocation record's own signed time, never
-            the verifier's clock.</td></tr>
+            <tr><td><tt>revocation_window_days</tt></td><td>conditionally
+            required</td><td>REQUIRED iff <tt>revocability ==
+            "refund_window"</tt>. Integer, 1 to 3650; the window is
+            anchored to <tt>issued_at</tt> and evaluated against a
+            revocation record's own signed time, never the verifier's
+            clock.</td></tr>
             <tr><td><tt>transferable</tt></td><td>REQUIRED</td><td>Boolean.
             This document defines no meaning for this field: it is reserved,
             exactly as in the living specification's own core profile.
@@ -392,7 +394,8 @@ commitment = scrypt(P, salt, N=32768, r=8, p=1, dkLen=32)
         proven via non-replayable challenge-response, with domain label
         the ASCII string <tt>"Attest-binding-challenge-v1"</tt>:</t>
         <artwork><![CDATA[
-verifier sends nonce (>= 16 random bytes, freshly generated per challenge)
+verifier sends nonce (>= 16 random bytes,
+                      freshly generated per challenge)
 buyer signs: UTF8("Attest-binding-challenge-v1") || 0x00
              || receipt_id || 0x00 || nonce
 ]]></artwork>
