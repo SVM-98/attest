@@ -1,6 +1,6 @@
 """Tests for the revocation-view bound + cached manifest self-verify.
 
-Review improvement #17 (security review): `_classify_revocation`
+Review improvement #17 (security review, 2026-07-13): `_classify_revocation`
 used to re-run the issuer manifest's self-verify once PER RECORD in the
 untrusted revocation view (O(N * manifest-verify) wasted-work DoS), and
 the view had no size bound. This file pins the two hardenings:
@@ -11,7 +11,7 @@ the view had no size bound. This file pins the two hardenings:
   CLOSED for revocable receipts (`policy`/`refund_window` → an error, so
   `ok` is false) while only warning for irrevocable `none` receipts — never
   truncation, never a raise. Fail-closed is the fix for the append-only
-  feed-poisoning suppression attack the reviewer flagged in the final review.
+  feed-poisoning suppression attack flagged in the final review round.
 
 Mirrored on the TS side by `verifiers/ts/test/revocation-bound.test.ts`.
 """
@@ -132,7 +132,7 @@ def test_oversized_view_on_revocable_receipt_fails_closed() -> None:
     """Overflow on a REVOCABLE receipt fails closed: an untrusted view too
     large to evaluate must not certify the receipt as ok. Returning "unknown"
     with ok=true would let an append-only feed-poisoning attacker suppress a
-    genuine revocation by padding past the cap (security review)."""
+    genuine revocation by padding past the cap (adversarial review finding)."""
     payload = make_payload(license={"revocability": "policy"})
     envelope = issue.issue(payload, KP, KID)
     view = [_record(f"2026-07-0{i}T00:00:00Z") for i in range(1, 5)]  # 4 records
@@ -169,7 +169,7 @@ def test_oversized_view_on_irrevocable_receipt_warns_and_stays_ok() -> None:
 
 
 def test_padding_a_genuine_revocation_past_the_cap_cannot_suppress_it() -> None:
-    """The suppression scenario the reviewer flagged: a genuine issuer-signed
+    """The suppression scenario from the review: a genuine issuer-signed
     revocation for a policy receipt, padded with junk past the cap, must NOT
     flip the receipt to ok. Fail-closed: revocation "unknown" but ok=false."""
     payload = make_payload(license={"revocability": "policy"})

@@ -1,6 +1,6 @@
 """Tests for `attest_bridge._http`: the shared https-only, redirect-refusing
 GET primitive both platform adapters route their `_default_http_get` through
-(security review). The Bearer token these adapters send must never be
+(2026-07 security review, fix 3). The Bearer token these adapters send must never be
 replayed across a redirect to another (or non-https) origin -- see the
 module docstring in `_http.py` for the full argument. Hermetic: no network.
 """

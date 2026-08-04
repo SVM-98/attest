@@ -413,7 +413,7 @@ def test_serve_installs_sanitized_request_handler(
     assert installed_handler is cli._SanitizedRequestHandler
 
 
-# -- access-log token redaction (security review) --------------------
+# -- access-log token redaction (2026-07 security review, fix 4) ------------
 
 
 def test_redact_tokens_hides_download_tokens() -> None:

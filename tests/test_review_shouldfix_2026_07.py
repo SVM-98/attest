@@ -1,7 +1,7 @@
 """Regression tests for the 2026-07-13 review SHOULD-FIX batch (test-first).
 
-See the internal review triage. (#20 entry-count preflight
-is intentionally deferred — the 100k-entry cap already bounds it post-open.)
+(#20 entry-count preflight is intentionally deferred — the 100k-entry cap
+already bounds it post-open.)
 """
 
 from __future__ import annotations
