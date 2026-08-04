@@ -1,6 +1,6 @@
 """Ledger: sqlite3 operational-state store — idempotency, receipts, claims, dead letters.
 
-Contract (the task brief): the Ledger is NOT part of the trust model, but the
+Contract: the Ledger is NOT part of the trust model, but the
 `receipts` table stores issued envelopes verbatim (carrying `delivery.salt`), so
 the database file is a SECRET — must be 0600 on disk. Timestamps are always
 caller-supplied RFC3339 strings; the Ledger never reads a clock. Each behavior
@@ -367,7 +367,7 @@ def test_resolve_dead_letter_removes_it_from_unresolved(ledger: Ledger) -> None:
 
 
 def test_stored_receipt_claim_dead_letter_are_frozen_dataclasses() -> None:
-    # Sanity check on the pinned shapes (the task brief) — mutation must
+    # Sanity check on the pinned shapes — mutation must
     # raise, since later tasks treat these as immutable value objects.
     receipt = StoredReceipt(
         platform="stripe",

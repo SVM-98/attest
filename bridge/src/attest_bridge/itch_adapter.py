@@ -1,6 +1,5 @@
-"""itch.io adapter: a claim-queue poller, not a webhook (the task brief;
-OI-4, source-verified 2026-07-24 — `the internal implementation plan
-webhook-bridge.md`).
+"""itch.io adapter: a claim-queue poller, not a webhook (OI-4,
+source-verified 2026-07-24 against the live API — see below).
 
 itch.io exposes no purchase webhook and no purchase-enumeration/pagination/
 cursor endpoint at all: `api.itch.io` offers only `credentials/info`,
@@ -220,7 +219,7 @@ class ItchPoller:
     def tick(self, *, now: datetime) -> None:
         """Drain every claim due at `now` (synchronous, fully testable).
 
-        Pinned per the task brief — see the module/class docstrings for why
+        Pinned by the bridge plan — see the module/class docstrings for why
         the live API call is the only thing that can ever lead to
         `core.process` being invoked.
         """

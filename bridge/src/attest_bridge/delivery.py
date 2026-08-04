@@ -1,8 +1,7 @@
 """Delivery: merchant SMTP send of a signed receipt, or a zero-config
 download-link fallback.
 
-Contract (the task brief, Global Constraint 9 — `docs/plans/
-2026-07-24-p2.1-webhook-bridge.md`): by the time `Delivery.send` is ever
+Contract (bridge design, Global Constraint 9): by the time `Delivery.send` is ever
 called, `IssuingCore.process` has already issued and durably recorded the
 receipt in the Ledger — a delivery failure never loses it. So `send` NEVER
 raises: any `smtplib`/`ssl`/`OSError` from the network becomes a

@@ -1,6 +1,6 @@
 """BridgeConfig TOML loader: env-referenced secrets, fail-fast validation.
 
-Contract under test (the task brief): secrets never live in bridge.toml —
+Contract under test: secrets never live in bridge.toml —
 sections reference environment variables via `*_env` keys, and `load_config`
 resolves them at startup. A missing variable must be named in the
 `ConfigError`; a resolved secret VALUE must never appear in any exception

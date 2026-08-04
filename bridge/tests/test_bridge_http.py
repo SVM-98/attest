@@ -1,4 +1,4 @@
-"""WSGI app tests (the task brief): the pinned webhook error-handling
+"""WSGI app tests: the pinned webhook error-handling
 policy table, one test per row, plus the phase-defining E2E oracle —
 signed webhook in, offline-`attest.verify`-passing envelope out, no mocks
 anywhere on that path.

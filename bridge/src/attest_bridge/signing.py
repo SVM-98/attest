@@ -1,6 +1,6 @@
 """Startup loader for the merchant's hybrid signing key + key manifest — fail-fast.
 
-Contract (the task brief): load the Ed25519 + ML-DSA-65 signing key material an
+Contract: load the Ed25519 + ML-DSA-65 signing key material an
 `IssuerConfig` points at, in the exact on-disk shapes `attest keygen` writes, then
 cross-check the loaded key material against its own key manifest. Every failure —
 missing/unreadable file, malformed seed/ML-DSA material, a self-inconsistent

@@ -1,6 +1,6 @@
 """Merchant configuration loader: single `bridge.toml` + env-referenced secrets.
 
-Contract (the task brief): a secret NEVER appears inline in `bridge.toml`.
+Contract: a secret NEVER appears inline in `bridge.toml`.
 Sections reference the environment variable that holds the secret via a
 `*_env` key (`webhook_secret_env`, `api_key_env`, `smtp_password_env`);
 `load_config` resolves the named variable at startup and raises

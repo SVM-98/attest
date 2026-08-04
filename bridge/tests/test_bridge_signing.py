@@ -1,6 +1,6 @@
 """SigningKeyProvider: load the merchant's hybrid signing key + key manifest, fail-fast.
 
-Contract under test (the task brief): `load_issuer` reads the exact on-disk
+Contract under test: `load_issuer` reads the exact on-disk
 formats `attest keygen`/`manifest init` write, cross-checks the loaded key
 material against its own key manifest, and raises `ConfigError` — naming the
 file path and/or kid, NEVER decoded key bytes — on any corruption. The

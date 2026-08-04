@@ -1,7 +1,7 @@
 """Stdlib WSGI app: Stripe webhook endpoint + receipt-download routes + the
-itch claim-queue endpoints (the task brief).
+itch claim-queue endpoints.
 
-Contract (the task brief): this module is the integration point between the
+Contract: this module is the integration point between the
 platform adapters (T7's `StripeAdapter`) and `IssuingCore` (T5) — it owns the
 webhook error-handling policy (the design's "what happens on every kind of
 failure" section, made executable) and never invents behavior the policy
@@ -310,7 +310,7 @@ def _handle_stripe_receipt(
     return _receipt_response(start_response, stored)
 
 
-# -- itch claim queue (the task brief; OI-4) --------------------------------
+# -- itch claim queue (OI-4) --------------------------------
 #
 # There is no itch webhook (see `itch_adapter.py`'s module docstring) — these
 # routes only ever touch the Ledger's claim queue. Enqueuing a claim NEVER
@@ -320,7 +320,7 @@ def _handle_stripe_receipt(
 
 
 def _parse_claim_fields(environ: dict[str, Any]) -> dict[str, str]:
-    """Accept both form-encoded and JSON claim submissions (the task brief).
+    """Accept both form-encoded and JSON claim submissions.
 
     A body this function can't make sense of (wrong content type, malformed
     JSON, non-UTF-8 bytes) degrades to an empty mapping — the caller's own

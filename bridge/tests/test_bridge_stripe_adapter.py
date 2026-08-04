@@ -1,6 +1,6 @@
 """StripeAdapter: webhook signature verification (trust boundary) + normalize
-to `NormalizedPurchase` (the task brief; Global Constraint 15 / OI-1 —
-`the internal implementation plan`).
+to `NormalizedPurchase` (Global Constraint 15 / OI-1 —
+the bridge plan).
 """
 
 from __future__ import annotations
@@ -116,8 +116,7 @@ def make_session_completed_event(
     """Public event-builder — one source of truth for the `checkout.session.
     completed`-shaped event fixture, shared with T8 (imported by
     `test_bridge_http.py`, not duplicated). Delegates to `_session`/`_event`
-    above so this module's existing tests are untouched (purely additive,
-    the task brief)."""
+    above so this module's existing tests are untouched (purely additive)."""
     session = _session(
         session_id=session_id,
         email=email,

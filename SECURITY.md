@@ -21,7 +21,7 @@ hybrid profile.
 ## Reporting a vulnerability
 
 **Do not open a public issue for a security vulnerability.** Report it privately
-by email to `SVM-98@proton.me`.
+by email to `bernalli@proton.me`.
 
 Please include:
 

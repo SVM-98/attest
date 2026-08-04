@@ -1,4 +1,4 @@
-"""itch.io claim-queue poller tests (the task brief; OI-4, source-verified
+"""itch.io claim-queue poller tests (OI-4, source-verified
 2026-07-24): itch.io has no purchase webhook and no purchase-enumeration
 endpoint, so issuance is a claim-queue poller whose SOLE issuance authority is
 the live `GET /games/{game_id}/purchases?email=...` API response -- a claim

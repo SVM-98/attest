@@ -1,7 +1,6 @@
 """IssuingCore: turns a `NormalizedPurchase` into a signed v0.2 attest receipt.
 
-Reuse 1:1 (Global Constraint 3, `the internal implementation plan
-bridge.md`): payload assembly is `issue.build_payload(...)`, signing is
+Reuse 1:1 (Global Constraint 3, the bridge plan): payload assembly is `issue.build_payload(...)`, signing is
 `issue.issue(...)` — the bridge NEVER constructs `buyer`/`license`/
 `signatures` by hand and never touches `canon`/`keys`/`pq` for issuance
 itself. The real verifier is the test oracle (`test_bridge_core_oracle.py`):

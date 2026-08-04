@@ -21,7 +21,7 @@ other space that carries this project's name.
 
 ## Reporting
 
-Email `SVM-98@proton.me`. Reports are read by one person — the maintainer — and
+Email `bernalli@proton.me`. Reports are read by one person — the maintainer — and
 are not shared further without the reporter's agreement, except where the law
 requires it.
 

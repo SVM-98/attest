@@ -1,7 +1,7 @@
 """Ledger: sqlite3-backed OPERATIONAL state — webhook-event idempotency,
 issued-receipt store, itch claim queue, dead letters.
 
-Contract (the task brief): this is NOT part of the trust model — nothing
+Contract: this is NOT part of the trust model — nothing
 `attest.verify` does depends on any of it — but the `receipts` table stores
 issued envelopes verbatim, including `delivery.salt`, so the database file
 itself is a SECRET. `__init__` creates the file at 0600 before the first

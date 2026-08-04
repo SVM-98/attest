@@ -1,9 +1,8 @@
 """Stripe adapter: verify the inbound webhook signature (the trust boundary
 between a merchant's Stripe account and this bridge), then normalize a
 `checkout.session.completed` / `checkout.session.async_payment_succeeded`
-event into a platform-agnostic `NormalizedPurchase` (the task brief; Global
-Constraint 15 / OI-1 — `the internal implementation plan
-bridge.md`).
+event into a platform-agnostic `NormalizedPurchase` (Global
+Constraint 15 / OI-1 — the bridge plan).
 
 Signature scheme (Stripe docs, verified 2026-07-24): the `Stripe-Signature`
 header is `t=<unix>,v1=<hex>[,v1=...][,v0=...]`. The signed message is

@@ -67,8 +67,7 @@ def test_decode_buyer_pubkey_rejects_non_canonical_alphabet_decoding_to_32_bytes
 
 
 def test_rfc3339_from_unix_matches_attest_format() -> None:
-    # Epoch literal independently recomputed (brief's the task brief literal
+    # Epoch literal independently recomputed (the design doc's literal
     # "2026-07-13T16:53:20Z" did not match `datetime.fromtimestamp(1_784_000_000,
-    # UTC)`; per the brief's own instruction, the literal is fixed here, not
-    # the function under test).
+    # UTC)`; the literal is fixed here, not the function under test).
     assert rfc3339_from_unix(1_784_000_000) == "2026-07-14T03:33:20Z"

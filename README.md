@@ -53,7 +53,7 @@ expect one day to run — a service that must release an authorized digital good
 only to the people who bought it, after the seller and its records are gone,
 what evidence would that gate accept, and who decides the policy behind it?
 Answers in [GitHub Discussions](https://github.com/bernalli/attest/discussions) or
-to `SVM-98@proton.me` are worth more to this project than another feature.
+to `bernalli@proton.me` are worth more to this project than another feature.
 
 ## Start here
 
@@ -294,7 +294,7 @@ requests must pass all 97 conformance vector leaves and keep both the Python and
 TypeScript suites green.
 
 **Contact.** Use GitHub Issues for technical bugs, GitHub Discussions for
-everything else, or email `SVM-98@proton.me`.
+everything else, or email `bernalli@proton.me`.
 Security issues follow a different path — see [`SECURITY.md`](SECURITY.md), and
 do not open a public issue for a vulnerability.
 

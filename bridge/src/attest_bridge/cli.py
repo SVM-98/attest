@@ -1,5 +1,4 @@
-"""attest-bridge CLI: `serve`, `check-config`, `retry-failed`, `itch-import`
-(the task brief, the task brief).
+"""attest-bridge CLI: `serve`, `check-config`, `retry-failed`, `itch-import`.
 
 `check-config` deliberately stops at config + issuer + catalog validation —
 it never touches the Ledger (no sqlite file is created just to validate a

@@ -1,4 +1,4 @@
-"""CLI tests (the task brief): `check-config` and `retry-failed`.
+"""CLI tests: `check-config` and `retry-failed`.
 
 `check-config` is exercised against a real `bridge.toml` pointing at real T3
 key/manifest files (the exact on-disk shapes `attest keygen`/`manifest init`

@@ -88,7 +88,7 @@ rule Genesis_v01:
    direct threading (the class token emitted by Issue_Receipt_v01 itself) was
    MEASURED intractable on this model -- the cheapest 9-step revocation witness
    exceeded 180s and the full revocation group exceeded 600s against its 40s
-   baseline, the same two-active-key blow-up recorded in task-4-report.md. */
+   baseline, the same two-active-key blow-up recorded in the internal task ledger. */
 rule Birth_Rid:
     [ Fr(~rid) ]
   --[ RidBorn(~rid) ]->
@@ -781,7 +781,7 @@ rule Window_Out:
    instances, no new fact producer): every all-traces theorem stays true over a
    subset of its old traces, and every frozen witness anchors its admission on the
    GENESIS manifest, whose entry is 'ed_only. Measured before/after -- see
-   task-6-report.md. */
+   the internal task ledger. */
 rule Admit_Revocation_Record:
     let body = <'revoke', rid, recTime>
         kid  = <$I, kname>
@@ -944,7 +944,7 @@ rule Ignore_Revocation_out_of_window:
    envelope terms).
    SPEC SCOPE (adjudication, v0.1 §11.1): the revocation view is a PER-INVOCATION
    input -- `unknown`/`not_revoked_as_of` do NOT degrade `ok`. So the plan's
-   absolute "a revoked rid's later Accept is UNREACHABLE" (plan:228) is STRONGER
+   absolute "a revoked rid's later Accept is UNREACHABLE" is STRONGER
    than the spec (a feed that withholds the record yields a legitimate ok, its
    staleness surfaced via the §12.3 freshness anchor). The provable, spec-true
    property is PER-INVOCATION: an invocation that CONSULTS a honored record for
@@ -1583,7 +1583,7 @@ lemma reach_revocation_out_of_window:
    measurements, and the honest limits -- notably that this is strictly weaker as
    a regression detector, since the reject rule's existence, premise shape and
    actions become review obligations rather than prover obligations -- are in
-   the internal task ledger The per-invocation "consulting => not ok"
+   the internal task-5 report. The per-invocation "consulting => not ok"
    safety remains machine-checked by the theorem revoked_view_never_ok. */
 
 /* ---------------------------------------------------------------------------
@@ -1612,8 +1612,8 @@ lemma reach_revocation_out_of_window:
    key it had just forged; the probe asserting the counterexample was falsified in
    140 steps with EVERY branch closing on solve(!KU(~nameA)), including all seven
    continuity-advance cases. That rule now publishes the name, and the boundary is
-   stated instead of hidden. Probes and prover output:
-   the internal task ledger
+   stated instead of hidden. Probes and prover output are archived in the
+   internal task ledger.
    TRACTABILITY: with a faithful attacker this lemma does NOT prove on its own
    within the prover budget in any shape tried (clean-verified conditioned,
    all-heads classification, attacker-chosen public key name -- all >560s). It
@@ -1624,7 +1624,7 @@ lemma reach_revocation_out_of_window:
    exact-kid) is REQUIRED: the record's own signer key may be the attacker's own
    fabricated <I,name'> whose secret was never in honest !KeyMat (never a
    Reveal_Key target), so exact-kid RevealKey(kid) would be FALSE though an
-   issuer key WAS revealed (verified counterexample; see task-4-fixwave-plan.md
+   issuer key WAS revealed (verified counterexample; see the internal fix-wave plan
    F6 root-cause log). It FALSIFIES if Eq(verify) is deleted from admission
    (mutation M-verify): a forged record is then admitted with neither
    RevocationIssued nor a reveal. As a [reuse] lemma it is available to soundness,
@@ -1752,9 +1752,9 @@ lemma refund_window_bound:
    per-invocation input, so an invocation that CONSULTED the honored record for
    rid yields not-ok; an Accept in a DIFFERENT invocation whose view withheld the
    record is spec-legitimate and does NOT falsify this. The absolute "later
-   Accept globally unreachable" (plan:228) is deliberately NOT claimed -- it is
+   Accept globally unreachable" is deliberately NOT claimed -- it is
    stronger than the spec (flagged to the maintainer as a plan amendment; see the
-   Reject_v01_revoked comment and task-4-fixwave-plan.md F7). */
+   Reject_v01_revoked comment and the internal fix-wave plan, item F7). */
 lemma revoked_view_never_ok:
   all-traces
   "not (Ex V rid #o. Ok(V, rid) @ #o & ConsultedHonored(V, rid) @ #o)"
@@ -1850,7 +1850,7 @@ lemma pq_receipt_sig_source [reuse]:
        by exactly one issuance rule). So the receipt accepted at (1) as v0.2 was
        never a v0.1 receipt: the two profiles do not share receipt identities.
 
-   ADAPTATION vs the plan sketch (righe 302-308), documented (theory-wins-over-brief,
+   ADAPTATION vs the plan sketch (sketch lines 302-308), documented (theory-wins-over-sketch,
    as T3/T4 did). The plan's SYMMETRIC second conjunct
    `Accept_v01(...) ==> IssuedVersion(I, rid, '0.1')` is NOT a theorem of this model
    and is deliberately replaced by conjunct (2). The reason is exactly the property
@@ -1863,7 +1863,7 @@ lemma pq_receipt_sig_source [reuse]:
    theorem -- acceptance_issuer_signed (Task 3): under verified/clean trust,
    Accept_v01 ==> honest issuance OR an issuer-key reveal. Task 6 formalises the
    resulting v0.1-vs-v0.2 downgrade asymmetry.
-   NEGATIVE CONTROL (recorded in task-5-report.md): dropping the verify_pq premise
+   NEGATIVE CONTROL (recorded in the internal task ledger): dropping the verify_pq premise
    from Accept_v02 falsifies conjunct (1) -- a stolen-Ed-key forgery is then accepted
    as v0.2 with no v0.2 issuance -- confirming the PQ signature is the load-bearing
    version binding. */
@@ -2023,7 +2023,7 @@ lemma am_pq_sig_source [reuse]:
    to the accepted `kid`, and that is not a weakening: the signed body carries the
    fresh per-document identity `aid`, born once in the issuance rule, so at most
    one issuance instance can match -- the theorem pins THAT document's issuance.
-   NEGATIVE CONTROL (task-6-report.md): dropping the verify_pq premise from the
+   NEGATIVE CONTROL (the internal task ledger): dropping the verify_pq premise from the
    acceptance rule falsifies this theorem -- with the Ed leg alone, a revealed Ed
    key mints an accepted artifact manifest that was never issued. */
 lemma no_downgrade_artifact_manifest:
@@ -2089,7 +2089,7 @@ lemma rev_pq_sig_source [reuse]:
    -- what the hybrid admission point accepts is unforgeable.
    ANTI-VACUITY: sanity_hybrid_revocation_admitted exhibits a reachable admitted
    hybrid record, so the antecedent is not empty. NEGATIVE CONTROL
-   (task-6-report.md): dropping the verify_pq premise from
+   (the internal task ledger): dropping the verify_pq premise from
    Admit_Revocation_Record_hybrid -- letting a hybrid signer's record
    authenticate on the Ed leg alone, the exact downgrade §13 forbids -- falsifies
    this theorem. */

@@ -128,10 +128,9 @@ note) before being treated as current.
 ## Submission (out of scope for this repository's automation)
 
 Submission to the IETF Datatracker is a **manual action** for the maintainer:
-creating a Datatracker account, choosing the public author email (the
-`254686239+bernalli@users.noreply.github.com` address in the draft front matter is a
-real, GitHub-associated placeholder swapped at submission time — not an
-invented mailbox), uploading the built draft, and checking the
+creating a Datatracker account (the `bernalli@proton.me` address in the draft
+front matter is the project's real contact mailbox), uploading the built
+draft, and checking the
 current post-meeting submission window live at submission time. None of
 this is automated by CI or by any tooling in this repository; the CI step
 only proves the draft **builds cleanly**, not that it has been submitted.
