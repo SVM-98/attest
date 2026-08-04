@@ -9,7 +9,7 @@
     <title abbrev="attest Purchase Receipts">attest: Portable, Offline-Verifiable Digital Purchase Receipts</title>
     <author fullname="Samuele Martinalli" initials="S." surname="Martinalli">
       <address>
-        <email>SVM-98@users.noreply.github.com</email>
+        <email>254686239+bernalli@users.noreply.github.com</email>
       </address>
     </author>
     <date year="2026" month="July" day="23"/>
@@ -1166,7 +1166,7 @@ buyer signs: UTF8("Attest-binding-challenge-v1") || 0x00
         </front>
         <seriesInfo name="FIPS" value="204"/>
       </reference>
-      <reference anchor="ATTEST-SCHEMA" target="https://github.com/SVM-98/attest/blob/v0.4.0/docs/spec/schema/attest-receipt.schema.json">
+      <reference anchor="ATTEST-SCHEMA" target="https://github.com/bernalli/attest/blob/v0.4.0/docs/spec/schema/attest-receipt.schema.json">
         <front>
           <title>attest receipt JSON Schema (attest-receipt.schema.json), revision-pinned</title>
           <author initials="S." surname="Martinalli" fullname="S. Martinalli"/>
@@ -1249,7 +1249,7 @@ buyer signs: UTF8("Attest-binding-challenge-v1") || 0x00
           <date year="2025"/>
         </front>
       </reference>
-      <reference anchor="ATTEST-REPO" target="https://github.com/SVM-98/attest">
+      <reference anchor="ATTEST-REPO" target="https://github.com/bernalli/attest">
         <front>
           <title>attest: Portable, Offline-Verifiable Digital Purchase Receipts (source repository)</title>
           <author initials="S." surname="Martinalli" fullname="S. Martinalli"/>

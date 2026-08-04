@@ -142,5 +142,5 @@ security fix landed after 0.1.0.
 - Initial release: attest v0.1 reference implementation (signer + verifier,
   JCS canonicalization, Ed25519 via PyNaCl, offline verification, CLI).
 
-[0.1.2]: https://github.com/SVM-98/attest/releases/tag/v0.1.2
-[0.1.0]: https://github.com/SVM-98/attest/releases/tag/attest-verifier-v0.1.0
+[0.1.2]: https://github.com/bernalli/attest/releases/tag/v0.1.2
+[0.1.0]: https://github.com/bernalli/attest/releases/tag/attest-verifier-v0.1.0

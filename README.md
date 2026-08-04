@@ -41,7 +41,7 @@ them fails, nothing here is needed.
 `attest-receipts` 0.4.0 on PyPI (issue and verify) and `attest-verifier` 0.4.0 on
 npm (verify only) are independent Python and TypeScript implementations that
 agree on all 97 conformance vector leaves. **Try it in your browser:**
-<https://svm-98.github.io/attest/> — drop a `.attest` bundle (or the built-in
+<https://bernalli.github.io/attest/> — drop a `.attest` bundle (or the built-in
 sample) and watch it verify entirely client-side. Nothing in production uses it:
 no archive runs such a gate today, there are no issuers and no external reviews,
 no law I know of asks for portable receipts, and the wire format is frozen at
@@ -52,7 +52,7 @@ version — until an operator with this problem appears.
 expect one day to run — a service that must release an authorized digital good
 only to the people who bought it, after the seller and its records are gone,
 what evidence would that gate accept, and who decides the policy behind it?
-Answers in [GitHub Discussions](https://github.com/SVM-98/attest/discussions) or
+Answers in [GitHub Discussions](https://github.com/bernalli/attest/discussions) or
 to `SVM-98@proton.me` are worth more to this project than another feature.
 
 ## Start here
@@ -60,7 +60,7 @@ to `SVM-98@proton.me` are worth more to this project than another feature.
 Depending on why you landed on this page:
 
 - **You want to see whether it actually works.** Open the
-  [verifier](https://svm-98.github.io/attest/) and drop the built-in sample on it.
+  [verifier](https://bernalli.github.io/attest/) and drop the built-in sample on it.
   It takes about thirty seconds, installs nothing, and you can disconnect from the
   network first — that is the whole point of the thing.
 - **You want to know whether any of this concerns you.** Read the
@@ -74,7 +74,7 @@ Depending on why you landed on this page:
 - **You might be the person this was built for** — an archive, a successor, an
   escrow, anyone who could end up deciding who is entitled to something after the
   seller is gone. The question at the top of this page is a real one, and
-  [Discussions](https://github.com/SVM-98/attest/discussions) is where to answer
+  [Discussions](https://github.com/bernalli/attest/discussions) is where to answer
   it.
 
 ## How it works, for humans

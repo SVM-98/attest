@@ -129,7 +129,7 @@ note) before being treated as current.
 
 Submission to the IETF Datatracker is a **manual action** for the maintainer:
 creating a Datatracker account, choosing the public author email (the
-`SVM-98@users.noreply.github.com` address in the draft front matter is a
+`254686239+bernalli@users.noreply.github.com` address in the draft front matter is a
 real, GitHub-associated placeholder swapped at submission time — not an
 invented mailbox), uploading the built draft, and checking the
 current post-meeting submission window live at submission time. None of

@@ -105,6 +105,6 @@ the revocation-view bound.
   logic, revocation classification, and buyer-binding checks. Verifier-only:
   it reads and validates receipts, never issues, signs, or mutates them.
 
-[0.1.2]: https://github.com/SVM-98/attest/releases/tag/v0.1.2
-[0.1.1]: https://github.com/SVM-98/attest/releases/tag/attest-verifier-v0.1.1
-[0.1.0]: https://github.com/SVM-98/attest/releases/tag/attest-verifier-v0.1.0
+[0.1.2]: https://github.com/bernalli/attest/releases/tag/v0.1.2
+[0.1.1]: https://github.com/bernalli/attest/releases/tag/attest-verifier-v0.1.1
+[0.1.0]: https://github.com/bernalli/attest/releases/tag/attest-verifier-v0.1.0

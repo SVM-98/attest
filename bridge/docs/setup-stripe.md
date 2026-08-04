@@ -18,7 +18,7 @@ it is unreleased); never run `pip install attest-bridge` — that name may
 resolve to an unrelated package. Install it from a source checkout instead:
 
 ```sh
-git clone https://github.com/SVM-98/attest.git
+git clone https://github.com/bernalli/attest.git
 cd attest
 pip install ./bridge
 ```
