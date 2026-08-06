@@ -69,6 +69,28 @@ uvx --from xml2rfc==3.34.0 xml2rfc \
 This produces `ietf/build/draft-martinalli-open-purchase-receipts-00.txt`
 and `...-00.html` (git-ignored; `ietf/build/` is not committed).
 
+### The document date is deliberately unset
+
+The front matter carries a bare `<date/>` with no attributes, so every render
+stamps the day it was built and recomputes the expiry line from it. This is
+not an oversight. The Datatracker refuses a submission whose document date is
+more than three days from the submission date, and `xml2rfc` warns about the
+same gap at build time ("The document date (...) is more than 3 days away from
+today's date"); the check is a hard validation error, not advice — it blocks
+automatic posting, leaving only a manual-posting request. A hard-coded date
+goes stale on its own between the day the draft is written and the day it is
+uploaded, which is exactly what happened to this draft between July and
+August 2026.
+
+An empty element removes the drift between writing the draft and building it.
+What is left depends on the route. Uploading the **XML** hands the stamping to
+the Datatracker, which resolves the element while processing the submission
+and renders the plaintext itself. Uploading a locally built `.txt` freezes the
+date of *its own build*, so an upload more than three days later is stale —
+**on that route, build and upload in the same sitting.** If a fixed date is
+ever wanted (a resubmission dated to match an announcement, say), put the
+attributes back for that one build.
+
 ### Why the `cp` step: a naming quirk in xml2rfc 3.34.0
 
 `xml2rfc`'s output filename tracks the **source file's own basename**, not
