@@ -147,12 +147,31 @@ draft has fallen behind the living specification and should be refreshed
 (a new `-01` draft, an updated `-00` before submission, or a superseding
 note) before being treated as current.
 
-## Submission (out of scope for this repository's automation)
+## Submission — done on 2026-08-06
 
-Submission to the IETF Datatracker is a **manual action** for the maintainer:
-creating a Datatracker account (the `bernalli@proton.me` address in the draft
-front matter is the project's real contact mailbox), uploading the built
-draft, and checking the
-current post-meeting submission window live at submission time. None of
-this is automated by CI or by any tooling in this repository; the CI step
-only proves the draft **builds cleanly**, not that it has been submitted.
+`draft-martinalli-open-purchase-receipts-00` is an **active Internet-Draft**:
+<https://datatracker.ietf.org/doc/draft-martinalli-open-purchase-receipts/>
+(individual submission, Informational, expires 2027-02-07). The rendered text,
+HTML and XML are served from `ietf.org/archive/id/`.
+
+How it was done, for whoever does the next revision. Submission is a **manual
+action** for the maintainer and is not automated by anything here — the CI step
+only proves the draft **builds cleanly**, never that it was submitted. No
+Datatracker account is required: the tool accepts the upload unauthenticated
+and mails a confirmation link to the authors listed in the document, which is
+why the `bernalli@proton.me` address in the front matter has to be a mailbox
+that actually receives mail. Uploading the **XML** is the better route — the
+Datatracker renders the text itself, and it stamps the date while processing
+(see "The document date is deliberately unset" above). Leave *Replaces* empty
+for a fresh `-00`. Check the submission window live first: cut-offs are tied to
+IETF meeting dates, and submissions close for the days around each meeting.
+
+The idnits report for the `-00` came back **0 errors, 0 flaws, 1 warning**. The
+warning counts the lines carrying non-ASCII characters: informational, and not
+a defect to chase — RFC 7997 admits non-ASCII in RFCs and drafts under its own
+rules, and nothing in this document failed validation. The lines the same report
+flags as over-long are the ones carrying an em dash: idnits applies the
+72-column limit in **bytes** (it runs under `LC_ALL=C`), and an em dash costs
+three of them. Counted in characters — measured directly on the rendered text
+here, which is more than the report itself establishes — every line is within
+72. Neither is worth fixing.
